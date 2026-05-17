@@ -1,0 +1,14 @@
+selfsignedmaterials/
+*.pfx
+*.pem
+*.key
+*.crt
+*.csr
+license.json
+
+*.retry
+
+.DS_Store
+.vscode/
+.idea/
+*.swp

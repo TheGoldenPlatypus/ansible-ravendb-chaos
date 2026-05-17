@@ -1,0 +1,46 @@
+- name: Provision docker containers for RavenDB chaos lab
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Build the list of container names (1a, 1b, ..., 2a, 2b, ...)
+      ansible.builtin.set_fact:
+        container_names: "{{ raw_names.split() }}"
+      vars:
+        raw_names: |-
+          {% for cluster in range(1, clusters_count | int + 1) %}
+          {% for letter in 'abcdefghijklmnopqrstuvwxyz'[: nodes_per_cluster | int] %}
+          {{ cluster }}{{ letter }}
+          {% endfor %}
+          {% endfor %}
+
+    - name: Create the shared docker network
+      community.docker.docker_network:
+        name: "{{ docker_network_name }}"
+        state: present
+
+    - name: Launch a privileged systemd-ready container per node
+      community.docker.docker_container:
+        name: "{{ item }}"
+        hostname: "{{ item }}"
+        image: "{{ docker_image }}"
+        state: started
+        restart_policy: unless-stopped
+        privileged: true
+        command: /usr/sbin/init
+        cgroupns_mode: host
+        networks:
+          - name: "{{ docker_network_name }}"
+        networks_cli_compatible: true
+        purge_networks: true
+        volumes:
+          - /sys/fs/cgroup:/sys/fs/cgroup:rw
+        tmpfs:
+          - /run
+          - /tmp
+      loop: "{{ container_names }}"
+
+    - name: Show what we provisioned
+      ansible.builtin.debug:
+        msg: "Provisioned {{ container_names | length }} container(s) on '{{ docker_network_name }}': {{ container_names | join(', ') }}"

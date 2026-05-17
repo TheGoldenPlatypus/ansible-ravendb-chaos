@@ -1,0 +1,148 @@
+- name: Ensure ravendb python client is available on the controller
+  hosts: localhost
+  connection: local
+  gather_facts: true
+
+  roles:
+    - role: ravendb.ravendb.ravendb_python_client_prerequisites
+
+
+- name: Discover containers and group them by cluster_id
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Inspect the shared docker network
+      community.docker.docker_network_info:
+        name: "{{ docker_network_name }}"
+      register: network_info
+
+    - name: Build a {name -> ip} map for every container on the network
+      ansible.builtin.set_fact:
+        node_ip_map: "{{ node_ip_map | default({}) | combine({item.Name: item.IPv4Address.split('/')[0]}) }}"
+      loop: "{{ network_info.network.Containers.values() | list }}"
+
+    - name: Sort container names for stable iteration
+      ansible.builtin.set_fact:
+        container_names: "{{ node_ip_map.keys() | list | sort }}"
+
+    - name: Build the /etc/hosts block that maps every <name>.<domain> to its container IP
+      ansible.builtin.set_fact:
+        hosts_block: |-
+          {% for name in container_names %}
+          {{ node_ip_map[name] }} {{ name }}.{{ ravendb_domain }}
+          {% endfor %}
+
+    - name: Register each container in ravendb_nodes with cluster_id + node_letter host vars
+      ansible.builtin.add_host:
+        name: "{{ item }}"
+        groups: ravendb_nodes
+        ansible_connection: community.docker.docker
+        ansible_python_interpreter: /usr/bin/python3
+        cluster_id: "{{ item | regex_replace('[^0-9].*', '') }}"
+        node_letter: "{{ item | regex_replace('^[0-9]+', '') }}"
+      loop: "{{ container_names }}"
+      changed_when: false
+
+
+- name: Write the hubsink /etc/hosts block on the controller
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: true
+
+  tasks:
+    - name: Upsert the ANSIBLE MANAGED HUBSINK block in /etc/hosts
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} ANSIBLE MANAGED HUBSINK"
+        block: "{{ hostvars['localhost'].hosts_block }}"
+
+
+- name: Write the hubsink /etc/hosts block inside every container
+  hosts: ravendb_nodes
+  gather_facts: false
+  become: true
+
+  tasks:
+    - name: Upsert the ANSIBLE MANAGED HUBSINK block in /etc/hosts (inside container)
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} ANSIBLE MANAGED HUBSINK"
+        block: "{{ hostvars['localhost'].hosts_block }}"
+        unsafe_writes: true
+
+
+- name: Form one RavenDB cluster per cluster_id
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    leader_letter: "a"
+
+  tasks:
+    - name: Collect every node's host vars into a flat list of dicts
+      ansible.builtin.set_fact:
+        node_records: "{{ groups['ravendb_nodes'] | map('extract', hostvars) | list }}"
+
+    - name: Get the unique sorted set of cluster ids
+      ansible.builtin.set_fact:
+        cluster_ids: "{{ node_records | map(attribute='cluster_id') | unique | list | sort }}"
+
+    - name: Pick out only the non-leader nodes (these are the ones we will join)
+      ansible.builtin.set_fact:
+        join_plan: "{{ node_records | selectattr('node_letter', 'ne', leader_letter) | list }}"
+
+    - name: Wait until each cluster leader's HTTPS endpoint responds 200
+      ansible.builtin.uri:
+        url: "https://{{ item }}{{ leader_letter }}.{{ ravendb_domain }}:443/cluster/topology"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        status_code: [200]
+      loop: "{{ cluster_ids }}"
+      register: leader_ready
+      retries: 30
+      delay: 2
+      until: leader_ready is succeeded
+
+    - name: Add each non-leader node to its cluster leader as a Member
+      ravendb.ravendb.node:
+        tag: "{{ item.node_letter | upper }}"
+        type: Member
+        url: "https://{{ item.inventory_hostname }}.{{ ravendb_domain }}:443"
+        leader_url: "https://{{ item.cluster_id }}{{ leader_letter }}.{{ ravendb_domain }}:443"
+        certificate_path: "{{ cert_dir }}/client.pem"
+        ca_cert_path: "{{ cert_ca_crt }}"
+      loop: "{{ join_plan }}"
+      loop_control:
+        label: "cluster {{ item.cluster_id }} <- {{ item.inventory_hostname }}"
+
+    - name: Read back the final topology of each cluster leader
+      ansible.builtin.uri:
+        url: "https://{{ item }}{{ leader_letter }}.{{ ravendb_domain }}:443/cluster/topology"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        return_content: true
+      loop: "{{ cluster_ids }}"
+      register: topology_results
+
+    - name: Print the final cluster layout (tag / container / url per cluster)
+      ansible.builtin.debug:
+        msg: "{{ summary.split('\n') }}"
+      vars:
+        summary: |-
+          ================================================================
+            Formed {{ cluster_ids | length }} cluster(s) with {{ node_records | length }} node(s) on {{ docker_network_name }}
+          ================================================================
+          {% for cid in cluster_ids %}
+
+            Cluster {{ cid }}
+              tag   container   url
+          {% for n in node_records | selectattr('cluster_id', 'eq', cid) | sort(attribute='node_letter') %}
+              {{ (n.node_letter | upper).ljust(5) }} {{ n.inventory_hostname.ljust(11) }} https://{{ n.inventory_hostname }}.{{ ravendb_domain }}:443
+          {% endfor %}
+          {% endfor %}
+
+          ================================================================

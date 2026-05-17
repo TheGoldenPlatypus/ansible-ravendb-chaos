@@ -1,0 +1,15 @@
+clusters_count: 1
+nodes_per_cluster: 3
+
+docker_network_name: hubsinknet
+docker_image: docker.io/geerlingguy/docker-ubuntu2204-ansible:latest
+
+ravendb_domain: hubsink.test
+rdb_version: 7.2.2
+
+cert_dir: /mnt/c/dev/hub-sink/selfsignedmaterials
+cert_server_pfx: "{{ cert_dir }}/server.pfx"
+cert_ca_crt: "{{ cert_dir }}/ca.crt"
+cert_ca_key: "{{ cert_dir }}/ca.key"
+cert_client_pfx: "{{ cert_dir }}/client.pfx"
+cert_license: "{{ cert_dir }}/license.json"

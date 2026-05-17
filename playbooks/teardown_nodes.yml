@@ -1,0 +1,41 @@
+- name: Tear down all containers on hubsinknet
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Inspect the shared docker network
+      community.docker.docker_network_info:
+        name: "{{ docker_network_name }}"
+      register: network_info
+
+    - name: Collect the names of every container attached to the network
+      ansible.builtin.set_fact:
+        container_names: "{{ (network_info.network.Containers | default({})).values() | list | map(attribute='Name') | list }}"
+      when: network_info.network is not none
+
+    - name: Remove each container
+      community.docker.docker_container:
+        name: "{{ item }}"
+        state: absent
+        force_kill: true
+      loop: "{{ container_names | default([]) }}"
+
+    - name: Remove the shared docker network
+      community.docker.docker_network:
+        name: "{{ docker_network_name }}"
+        state: absent
+
+
+- name: Strip the hubsink hosts block from the controller's /etc/hosts
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: true
+
+  tasks:
+    - name: Remove the ANSIBLE MANAGED HUBSINK block from /etc/hosts
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} ANSIBLE MANAGED HUBSINK"
+        state: absent
