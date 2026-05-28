@@ -1,0 +1,313 @@
+##################################################################################################
+# scenarios/hub-sink/chaos_failover.repro-snapshot.yml
+#
+# SNAPSHOT of the chaos_failover.yml as it was when the bug was successfully reproduced
+# (1a=83, 1b=93, 1c=83 -- 1b had 10 extra docs: other/written-on-1b/r1-0..9).
+#
+# Differences vs the original chaos_failover.yml:
+#   * STEP 6.5 (TRIGGER doc writes) is commented out -- user wrote 1 doc per sink node
+#     via RavenDB Studio's "New document" button during the "PAUSE before STEP 6.5"
+#     instead, then waited 30-90s before pressing Enter.
+#   * PAUSE-after-6.5 is also commented out (no longer needed since the writes are gone).
+#   * Everything else is identical to the pre-rehab-detection version.
+#
+# Kept for reference.  The live chaos_failover.yml has since been hardened with
+# write_docs_studio.yml writes, restart_ravendb on the relay in STEP 5, and the
+# wait_for_rehab/wait_for_member gates in STEP 9.
+##################################################################################################
+
+
+# ============================ STEP 1 -- seed ============================
+
+- ansible.builtin.import_playbook: ../../toolbox/write_docs.yml
+  vars:
+    target: 1a
+    db_name: Tenants
+    count: 10
+    id_prefix: other/seed
+
+- name: PAUSE after STEP 1
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: "Wait ~10s for seeds to spread, then Enter"
+      ansible.builtin.pause:
+        prompt: "Wait ~10 seconds for seed docs to replicate to 1b and 1c, then press Enter."
+
+    - name: "Press Enter to cut the hub mesh"
+      ansible.builtin.pause:
+        prompt: "STEP 1 done.  Press Enter to cut the hub mesh."
+
+
+# ============================ Pre-STEP 2 -- read counts ============================
+
+- ansible.builtin.import_playbook: ../../toolbox/read_doc_count.yml
+  vars: { target: 1a, db_name: Tenants }
+- ansible.builtin.import_playbook: ../../toolbox/read_doc_count.yml
+  vars: { target: 1b, db_name: Tenants }
+- ansible.builtin.import_playbook: ../../toolbox/read_doc_count.yml
+  vars: { target: 1c, db_name: Tenants }
+
+
+# ============================ STEP 2 -- cut hub mesh ============================
+
+- ansible.builtin.import_playbook: ../../toolbox/cut_link.yml
+  vars: { node_a: 1a, node_b: 1b }
+- ansible.builtin.import_playbook: ../../toolbox/cut_link.yml
+  vars: { node_a: 1a, node_b: 1c }
+- ansible.builtin.import_playbook: ../../toolbox/cut_link.yml
+  vars: { node_a: 1b, node_b: 1c }
+
+- name: PAUSE after STEP 2
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.pause:
+        prompt: "STEP 2 done.  Hub mesh cut, sinks unaffected.  Press Enter to write 20 docs per hub node."
+
+
+# ============================ STEP 3 -- alternating-prefix writes ============================
+
+- ansible.builtin.import_playbook: ../../toolbox/write_docs_interleaved.yml
+  vars:
+    target: 1a
+    db_name: Tenants
+    count: 20
+    prefixes:
+      - "tenants/cluster2/written-on-1a/r1"
+      - "other/written-on-1a/r1"
+
+- ansible.builtin.import_playbook: ../../toolbox/write_docs_interleaved.yml
+  vars:
+    target: 1b
+    db_name: Tenants
+    count: 20
+    prefixes:
+      - "tenants/cluster2/written-on-1b/r1"
+      - "other/written-on-1b/r1"
+
+- ansible.builtin.import_playbook: ../../toolbox/write_docs_interleaved.yml
+  vars:
+    target: 1c
+    db_name: Tenants
+    count: 20
+    prefixes:
+      - "tenants/cluster2/written-on-1c/r1"
+      - "other/written-on-1c/r1"
+
+- name: PAUSE after STEP 3
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.pause:
+        prompt: "STEP 3 done.  Expect 30/30/30 on hub (10 seed + 20 own).  Press Enter to write sink-originated docs."
+
+
+# ============================ STEP 3.5 -- sink-origin writes ============================
+
+- ansible.builtin.import_playbook: ../../toolbox/write_docs.yml
+  vars:
+    target: 2a
+    db_name: Tenants
+    count: 20
+    id_prefix: sink-origin
+
+- name: PAUSE after STEP 3.5
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: "Wait ~5s for sink internal replication + SinkToHub push"
+      ansible.builtin.pause:
+        prompt: "Wait ~5 seconds for sink-internal replication and SinkToHub push to start, then press Enter."
+
+    - name: "Press Enter to identify the HubToSink relay"
+      ansible.builtin.pause:
+        prompt: "STEP 3.5 done.  Press Enter to identify the HubToSink relay."
+
+
+# ============================ STEP 4 -- identify relay ============================
+
+- name: STEP 4 -- probe sink for the HubToSink relay
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Probe sink for each potential relay
+      ansible.builtin.uri:
+        url: "https://2a.hubsink.test:443/databases/Tenants/docs?startsWith=tenants/cluster2/written-on-{{ item }}/r1-&pageSize=1"
+        method: GET
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+      register: relay_probes
+      loop: [1a, 1b, 1c]
+
+    - name: Pick the relay (whichever hub node's docs reached the sink)
+      ansible.builtin.set_fact:
+        relay: "{{ (relay_probes.results | selectattr('json.Results','ne',[]) | first).item }}"
+
+    - name: Show identified relay
+      ansible.builtin.debug:
+        msg: "active hub->sink relay is {{ relay }}"
+
+    - name: "Press Enter to isolate the relay from the sink"
+      ansible.builtin.pause:
+        prompt: "STEP 4 done.  Relay is {{ relay }}.  Press Enter to isolate it from the sink."
+
+
+# ============================ STEP 5 -- cut relay from sinks ============================
+
+- ansible.builtin.import_playbook: ../../toolbox/cut_link.yml
+  vars: { node_a: "{{ relay }}", node_b: 2a }
+- ansible.builtin.import_playbook: ../../toolbox/cut_link.yml
+  vars: { node_a: "{{ relay }}", node_b: 2b }
+- ansible.builtin.import_playbook: ../../toolbox/cut_link.yml
+  vars: { node_a: "{{ relay }}", node_b: 2c }
+
+- name: STEP 5 -- failover wait + derive non-relay names
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: "Wait 120s for RavenDB to fail over the cluster-2 pull task"
+      ansible.builtin.pause:
+        prompt: "Wait AT LEAST 120 seconds for RavenDB to detect the dead relay and fail over.  Press Enter when ready."
+
+    - name: "Press Enter to restore the non-relay hub pair"
+      ansible.builtin.pause:
+        prompt: "STEP 5 done.  Press Enter to restore the non-relay hub pair."
+
+    - name: Name the two non-relay hub nodes
+      ansible.builtin.set_fact:
+        nonrelay_a: "{{ (['1a','1b','1c'] | reject('eq', relay) | list)[0] }}"
+        nonrelay_b: "{{ (['1a','1b','1c'] | reject('eq', relay) | list)[1] }}"
+
+
+# ============================ STEP 6 -- restore non-relay pair ============================
+
+- ansible.builtin.import_playbook: ../../toolbox/restore_link.yml
+  vars:
+    node_a: "{{ nonrelay_a }}"
+    node_b: "{{ nonrelay_b }}"
+
+- name: PAUSE before STEP 6.5 (TRIGGER writes)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.pause:
+        prompt: "STEP 6 done.  Press Enter to fire 15 TRIGGER docs at the half-healed hub."
+
+
+# # ============================ STEP 6.5 -- fire TRIGGER docs at each sink ============================
+# # 5 docs per sink node, 15 total.  Pumped at the half-healed hub to maximise the race window
+# # for the filtered-pull bug.
+# # ** COMMENTED OUT in this reproduction snapshot -- user wrote 1 doc per sink node via Studio
+# #    during the pause above, then waited 30-90s before pressing Enter. **
+#
+# - ansible.builtin.import_playbook: ../../toolbox/write_docs.yml
+#   vars:
+#     target: 2a
+#     db_name: Tenants
+#     count: 5
+#     id_prefix: "other/TRIGGER-2a"
+#
+# - ansible.builtin.import_playbook: ../../toolbox/write_docs.yml
+#   vars:
+#     target: 2b
+#     db_name: Tenants
+#     count: 5
+#     id_prefix: "other/TRIGGER-2b"
+#
+# - ansible.builtin.import_playbook: ../../toolbox/write_docs.yml
+#   vars:
+#     target: 2c
+#     db_name: Tenants
+#     count: 5
+#     id_prefix: "other/TRIGGER-2c"
+#
+#
+# - name: PAUSE after STEP 6.5
+#   hosts: localhost
+#   connection: local
+#   gather_facts: false
+#   tasks:
+#     - ansible.builtin.pause:
+#         prompt: "TRIGGERs fired.  Press Enter to restore the relay's hub-internal links."
+
+
+# ============================ STEP 7 -- restore relay's hub-internal links ============================
+
+- ansible.builtin.import_playbook: ../../toolbox/restore_link.yml
+  vars:
+    node_a: "{{ relay }}"
+    node_b: "{{ nonrelay_a }}"
+
+- ansible.builtin.import_playbook: ../../toolbox/restore_link.yml
+  vars:
+    node_a: "{{ relay }}"
+    node_b: "{{ nonrelay_b }}"
+
+- name: PAUSE after STEP 7
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.pause:
+        prompt: "STEP 7 done.  Hub mesh fully reconnected; relay still cut from sink.  Press Enter to restore the relay <-> sink link."
+
+
+# ============================ STEP 8 -- restore relay <-> sink ============================
+
+- ansible.builtin.import_playbook: ../../toolbox/restore_link.yml
+  vars: { node_a: "{{ relay }}", node_b: 2a }
+- ansible.builtin.import_playbook: ../../toolbox/restore_link.yml
+  vars: { node_a: "{{ relay }}", node_b: 2b }
+- ansible.builtin.import_playbook: ../../toolbox/restore_link.yml
+  vars: { node_a: "{{ relay }}", node_b: 2c }
+
+
+# ============================ STEP 9 -- final counts + STEP 10 verdict ============================
+
+- name: STEP 9 final counts + STEP 10 verdict
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: "Press Enter to poll hub for final counts"
+      ansible.builtin.pause:
+        prompt: "STEP 8 done.  Every cut undone.  Press Enter to read per-node doc counts."
+
+    - name: Read doc count on each hub node
+      ansible.builtin.uri:
+        url: "https://{{ c }}.hubsink.test:443/databases/Tenants/stats"
+        method: GET
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+      register: post_heal_counts
+      loop: [1a, 1b, 1c]
+      loop_control:
+        loop_var: c
+
+    - name: Print per-node final counts
+      ansible.builtin.debug:
+        msg: "{{ item.c }}  ->  {{ item.json.CountOfDocuments }} docs"
+      loop: "{{ post_heal_counts.results }}"
+      loop_control:
+        label: "{{ item.c }}"
+
+    - name: "Inspect Studio if you want, then press Enter for the verdict"
+      ansible.builtin.pause:
+        prompt: "Hub state captured.  Inspect Studio if you want, then press Enter for the verdict."
+
+    - name: "STEP 10 -- ASSERT all hub nodes agree on doc count"
+      ansible.builtin.assert:
+        that:
+          - (post_heal_counts.results | map(attribute='json.CountOfDocuments') | unique | list | length) == 1
+        fail_msg: >-
+          BUG REPRODUCED -- hub nodes disagree:
+          {% for r in post_heal_counts.results %}{{ r.c }}={{ r.json.CountOfDocuments }} {% endfor %}
+        success_msg: "OK -- all hub nodes agree on doc count.  No bug reproduced this run."

@@ -6,6 +6,12 @@ selfsignedmaterials/
 *.csr
 license.json
 
+# per-sink replication certs minted at runtime by scenarios/hub-sink/tasks/define_hub.yml
+scenarios/hub-sink/replication-certs/
+
+# real SSH inventory: contains plaintext passwords + internal LAN IPs.  Keep .example tracked.
+inventory/ssh_hosts.yml
+
 *.retry
 
 .DS_Store

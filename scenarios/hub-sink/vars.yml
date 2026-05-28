@@ -1,0 +1,19 @@
+
+hub_cluster_id: 1
+
+replication_db_name: Tenants
+
+hub_task_name: bidirectional-tenants
+
+#   "HubToSink"             - one-way: hub pushes filtered docs to the sink
+#   "SinkToHub"             - one-way: sink pushes its docs to the hub
+#   "HubToSink, SinkToHub"  - bidirectional (what we use here)
+replication_mode: "HubToSink, SinkToHub"
+
+# Per-sink prefix template.  The sink's cluster_id is substituted into <id> at runtime.
+# A sink filters hub->sink to docs whose id starts with this prefix.  Sink->hub is unfiltered ("*").
+sink_prefix_template: "tenants/cluster<id>/*"
+
+# Where on the controller we stash the per-sink replication PFXs that RavenDB mints.
+# The playbooks that read/write here live under tasks/, so the path climbs one level up.
+replication_certs_dir: "{{ playbook_dir }}/../replication-certs"
