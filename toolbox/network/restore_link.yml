@@ -1,5 +1,5 @@
 ##################################################################################################
-# toolbox/restore_link.yml
+# toolbox/network/restore_link.yml
 #
 # Removes the REJECT rules previously installed by cut_link.yml between two containers.
 # Symmetric inverse of cut_link.yml.  Safe to run even if the link was never cut --
@@ -10,7 +10,7 @@
 #   node_b  REQUIRED.  Second container.
 #
 # RUN EXAMPLE:
-#   ansible-playbook toolbox/restore_link.yml -e node_a=1a -e node_b=1b
+#   ansible-playbook toolbox/network/restore_link.yml -e node_a=1a -e node_b=1b
 ##################################################################################################
 
 - name: Restore the link between two containers

@@ -1,5 +1,5 @@
 ##################################################################################################
-# toolbox/delete_database.yml
+# toolbox/db/delete_database.yml
 #
 # Deletes a database AND wipes its data files from every node in the cluster.
 #
@@ -30,10 +30,10 @@
 #
 # RUN EXAMPLES:
 #   # docker
-#   ansible-playbook toolbox/delete_database.yml -K -e cluster_leader=1a -e db_name=Tenants
+#   ansible-playbook toolbox/db/delete_database.yml -K -e cluster_leader=1a -e db_name=Tenants
 #
 #   # ssh
-#   ansible-playbook -i inventory/ssh_hosts.yml toolbox/delete_database.yml -e cluster_leader=1a -e db_name=Tenants
+#   ansible-playbook -i inventory/ssh_hosts.yml toolbox/db/delete_database.yml -e cluster_leader=1a -e db_name=Tenants
 ##################################################################################################
 
 # ===== PLAY 1 -- REST DELETE + compute cluster_peers (runs on localhost) ========================

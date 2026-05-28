@@ -1,12 +1,12 @@
 ##################################################################################################
-# toolbox/write_docs_freeform.yml
+# toolbox/writes/write_docs_freeform.yml
 #
 # Writes N "freeform" docs to a target node:
 #   - random GUID id (no slash, no collection prefix)
 #   - "@collection": null in metadata
 #
 # Use this for chaos scenarios that need writes with no predictable shape -- the burst-PUT
-# pattern in toolbox/write_docs.yml with predictable ids can fail to trigger certain
+# pattern in toolbox/writes/write_docs.yml with predictable ids can fail to trigger certain
 # replication-race bugs that DO trigger when ids don't follow a known prefix.
 #
 # INPUTS:
@@ -15,7 +15,7 @@
 #   count    REQUIRED.  Integer.  How many docs to write.  Typically small (1-3).
 #
 # RUN EXAMPLE:
-#   ansible-playbook toolbox/write_docs_freeform.yml -K \
+#   ansible-playbook toolbox/writes/write_docs_freeform.yml -K \
 #       -e target=2a -e db_name=Tenants -e count=1
 ##################################################################################################
 

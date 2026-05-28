@@ -1,5 +1,5 @@
 ##################################################################################################
-# toolbox/create_database.yml
+# toolbox/db/create_database.yml
 #
 # Creates a database on the cluster reachable via cluster_leader, using the ravendb.ravendb
 # `database` module.  Defaults to replication_factor=3 so all 3 nodes host it.
@@ -11,11 +11,11 @@
 #
 # RUN EXAMPLES:
 #   # create Tenants on cluster 1 with default replication factor 3
-#   ansible-playbook toolbox/create_database.yml -K \
+#   ansible-playbook toolbox/db/create_database.yml -K \
 #       -e cluster_leader=1a -e db_name=Tenants
 #
 #   # create a single-node DB
-#   ansible-playbook toolbox/create_database.yml -K \
+#   ansible-playbook toolbox/db/create_database.yml -K \
 #       -e cluster_leader=1a -e db_name=MyTestDb -e replication_factor=1
 ##################################################################################################
 

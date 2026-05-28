@@ -1,5 +1,5 @@
 ##################################################################################################
-# toolbox/force_cluster_asymmetry.yml
+# toolbox/service/force_cluster_asymmetry.yml
 #
 # Forces a cluster into an ASYMMETRIC version state by upgrading specific nodes to specific
 # RavenDB versions (or custom builds), per a user-supplied version_map.  Useful for testing
@@ -7,7 +7,7 @@
 # replication functional while some nodes are on the new build and others are still on the
 # old build, since customers can't upgrade every node in lockstep.
 #
-# Implementation note: this is a thin wrapper that shells out to toolbox/upgrade_node.yml
+# Implementation note: this is a thin wrapper that shells out to toolbox/service/upgrade_node.yml
 # once per entry in version_map.  Each entry's value is interpreted as:
 #   * a URL or local .deb path -> passed as -e custom_build=... --skip-tags download
 #   * anything else            -> passed as -e rdb_version=...
@@ -20,15 +20,15 @@
 #
 # RUN EXAMPLES:
 #   # asymmetric hub: 1b on 7.2.3, 1c on a dev .deb, 1a left untouched
-#   ansible-playbook toolbox/force_cluster_asymmetry.yml -K \
+#   ansible-playbook toolbox/service/force_cluster_asymmetry.yml -K \
 #       -e '{"version_map":{"1b":"7.2.3","1c":"/tmp/raven-feature-branch.deb"}}'
 #
 #   # asymmetric across clusters: hub on new version, sink left on old (cross-version repl test)
-#   ansible-playbook toolbox/force_cluster_asymmetry.yml -K \
+#   ansible-playbook toolbox/service/force_cluster_asymmetry.yml -K \
 #       -e '{"version_map":{"1a":"7.2.3","1b":"7.2.3","1c":"7.2.3"}}'
 #
 #   # symmetric upgrade of the whole hub cluster (degenerate case -- all entries same version)
-#   ansible-playbook toolbox/force_cluster_asymmetry.yml -K \
+#   ansible-playbook toolbox/service/force_cluster_asymmetry.yml -K \
 #       -e '{"version_map":{"1a":"/tmp/raven-x.deb","1b":"/tmp/raven-x.deb","1c":"/tmp/raven-x.deb"}}'
 ##################################################################################################
 
@@ -54,10 +54,10 @@
       loop_control:
         label: "{{ item.key }}"
 
-    - name: Run toolbox/upgrade_node.yml for each entry
+    - name: Run toolbox/service/upgrade_node.yml for each entry
       ansible.builtin.command:
         cmd: >-
-          ansible-playbook toolbox/upgrade_node.yml
+          ansible-playbook toolbox/service/upgrade_node.yml
           -e target={{ item.key }}
           {% if (item.value is match('^https?://')) or (item.value is search('\.deb$')) %}
           -e custom_build={{ item.value }}

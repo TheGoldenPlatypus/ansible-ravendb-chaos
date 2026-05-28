@@ -1,5 +1,5 @@
 ##################################################################################################
-# toolbox/partition_node.yml
+# toolbox/network/partition_node.yml
 #
 # Isolates one container from every other node in its cluster by cutting all links to its
 # peers in one go.  Peers are discovered by reading the target's /cluster/topology.
@@ -8,7 +8,7 @@
 #   target  REQUIRED.  Container name to partition.  Must currently be in a cluster.
 #
 # RUN EXAMPLE:
-#   ansible-playbook toolbox/partition_node.yml -e target=1c
+#   ansible-playbook toolbox/network/partition_node.yml -e target=1c
 ##################################################################################################
 
 - name: Partition a node from the rest of its cluster

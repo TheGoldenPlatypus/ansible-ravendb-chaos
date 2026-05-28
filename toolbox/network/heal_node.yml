@@ -1,5 +1,5 @@
 ##################################################################################################
-# toolbox/heal_node.yml
+# toolbox/network/heal_node.yml
 #
 # Symmetric inverse of partition_node.yml.  Removes every REJECT rule between the target
 # and its cluster peers.  Peers are discovered from the target's own /cluster/topology.
@@ -8,7 +8,7 @@
 #   target  REQUIRED.  Container name to heal.
 #
 # RUN EXAMPLE:
-#   ansible-playbook toolbox/heal_node.yml -e target=1c
+#   ansible-playbook toolbox/network/heal_node.yml -e target=1c
 ##################################################################################################
 
 - name: Heal a previously-partitioned node

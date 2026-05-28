@@ -1,5 +1,5 @@
 ##################################################################################################
-# toolbox/heal_node_ssh.yml
+# toolbox/network/heal_node_ssh.yml
 #
 # SSH-mode variant of heal_node.yml.  Symmetric inverse of partition_node_ssh.yml.  Removes
 # every DROP rule between the target host and its cluster peers.  Peers are discovered from the
@@ -10,7 +10,7 @@
 #   target  REQUIRED.  Host to heal (must be in inventory's ravendb_nodes group).
 #
 # RUN EXAMPLE:
-#   ansible-playbook -i inventory/ssh_hosts.yml toolbox/heal_node_ssh.yml -e target=1c
+#   ansible-playbook -i inventory/ssh_hosts.yml toolbox/network/heal_node_ssh.yml -e target=1c
 ##################################################################################################
 
 - name: Heal a previously-partitioned SSH host

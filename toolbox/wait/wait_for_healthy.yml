@@ -1,5 +1,5 @@
 ##################################################################################################
-# toolbox/wait_for_healthy.yml
+# toolbox/wait/wait_for_healthy.yml
 #
 # Waits for a cluster to report healthy via the ravendb.ravendb.healthcheck module.
 # Use this as the post-chaos verification step in any scenario: after the chaos action
@@ -18,11 +18,11 @@
 #
 # RUN EXAMPLES:
 #   # quick recovery check after restoring a link
-#   ansible-playbook toolbox/wait_for_healthy.yml \
+#   ansible-playbook toolbox/wait/wait_for_healthy.yml \
 #       -e cluster_leader=1a -e checks=node_alive,cluster_connectivity
 #
 #   # full cluster verification (use at the end of a chaos scenario)
-#   ansible-playbook toolbox/wait_for_healthy.yml \
+#   ansible-playbook toolbox/wait/wait_for_healthy.yml \
 #       -e cluster_leader=1a \
 #       -e checks=node_alive,cluster_connectivity
 ##################################################################################################

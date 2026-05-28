@@ -1,5 +1,5 @@
 ##################################################################################################
-# toolbox/restore_link_ssh.yml
+# toolbox/network/restore_link_ssh.yml
 #
 # SSH-mode variant of restore_link.yml.  Removes the DROP rules previously installed by
 # cut_link_ssh.yml between two hosts.  Safe to run even if the link was never cut -- iptables -D
@@ -10,7 +10,7 @@
 #   node_b  REQUIRED.  Second host.
 #
 # RUN EXAMPLE:
-#   ansible-playbook -i inventory/ssh_hosts.yml toolbox/restore_link_ssh.yml -e node_a=1a -e node_b=1b
+#   ansible-playbook -i inventory/ssh_hosts.yml toolbox/network/restore_link_ssh.yml -e node_a=1a -e node_b=1b
 ##################################################################################################
 
 - name: Restore the link between two SSH hosts

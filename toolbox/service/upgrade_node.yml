@@ -1,5 +1,5 @@
 ##################################################################################################
-# toolbox/upgrade_node.yml
+# toolbox/service/upgrade_node.yml
 #
 # Upgrades (or downgrades) RavenDB on a single node.  Reuses the upstream
 # ravendb.ravendb.ravendb_node role with state=present + a new version -- the role
@@ -20,13 +20,13 @@
 #
 # RUN EXAMPLES:
 #   # docker -- specific version
-#   ansible-playbook toolbox/upgrade_node.yml -e target=1a -e rdb_version=7.2.3
+#   ansible-playbook toolbox/service/upgrade_node.yml -e target=1a -e rdb_version=7.2.3
 #
 #   # docker -- custom build
-#   ansible-playbook toolbox/upgrade_node.yml -e target=1a -e custom_build=/tmp/raven-x.deb --skip-tags download
+#   ansible-playbook toolbox/service/upgrade_node.yml -e target=1a -e custom_build=/tmp/raven-x.deb --skip-tags download
 #
 #   # ssh
-#   ansible-playbook -i inventory/ssh_hosts.yml toolbox/upgrade_node.yml -e target=1a -e rdb_version=7.2.3
+#   ansible-playbook -i inventory/ssh_hosts.yml toolbox/service/upgrade_node.yml -e target=1a -e rdb_version=7.2.3
 ##################################################################################################
 
 

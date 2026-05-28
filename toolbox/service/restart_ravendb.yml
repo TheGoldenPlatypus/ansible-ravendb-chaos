@@ -1,5 +1,5 @@
 ##################################################################################################
-# toolbox/restart_ravendb.yml
+# toolbox/service/restart_ravendb.yml
 #
 # Restarts the RavenDB systemd service on a target node and waits for the HTTPS endpoint
 # to come back.  Useful for testing what happens to replication when one node bounces.
@@ -14,10 +14,10 @@
 #
 # RUN EXAMPLES:
 #   # docker
-#   ansible-playbook toolbox/restart_ravendb.yml -e target=1b
+#   ansible-playbook toolbox/service/restart_ravendb.yml -e target=1b
 #
 #   # ssh
-#   ansible-playbook -i inventory/ssh_hosts.yml toolbox/restart_ravendb.yml -e target=1b
+#   ansible-playbook -i inventory/ssh_hosts.yml toolbox/service/restart_ravendb.yml -e target=1b
 ##################################################################################################
 
 # ===== PLAY 1 -- validate inputs + restart in docker mode (no-op in ssh mode) ===================

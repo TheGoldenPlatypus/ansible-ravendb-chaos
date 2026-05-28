@@ -1,5 +1,5 @@
 ##################################################################################################
-# toolbox/cut_link_ssh.yml
+# toolbox/network/cut_link_ssh.yml
 #
 # SSH-mode variant of cut_link.yml.  DROPs all TCP traffic between two hosts in both directions.
 #
@@ -19,7 +19,7 @@
 #   node_b  REQUIRED.  Second host.
 #
 # RUN EXAMPLE:
-#   ansible-playbook -i inventory/ssh_hosts.yml toolbox/cut_link_ssh.yml -e node_a=1a -e node_b=1b
+#   ansible-playbook -i inventory/ssh_hosts.yml toolbox/network/cut_link_ssh.yml -e node_a=1a -e node_b=1b
 ##################################################################################################
 
 - name: Cut the link between two SSH hosts
