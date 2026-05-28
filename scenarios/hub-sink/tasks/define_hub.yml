@@ -2,7 +2,7 @@
 # scenarios/hub-sink/tasks/define_hub.yml
 #
 # Hub-side setup for filtered bidirectional pull-replication.  Run AFTER the Tenants
-# database has been created on every cluster (use toolbox/create_database.yml).
+# database has been created on every cluster (use toolbox/db/create_database.yml).
 #
 # What it does:
 #   1. Defines the Hub pull-replication task on the hub cluster's leader (WithFiltering=true).

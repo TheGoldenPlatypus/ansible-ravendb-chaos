@@ -33,17 +33,17 @@ run() {
 }
 
 # 1. heal every hub node (drops leftover REJECT rules)
-run ansible-playbook toolbox/heal_node.yml -e target=1a
-run ansible-playbook toolbox/heal_node.yml -e target=1b
-run ansible-playbook toolbox/heal_node.yml -e target=1c
+run ansible-playbook toolbox/network/heal_node.yml -e target=1a
+run ansible-playbook toolbox/network/heal_node.yml -e target=1b
+run ansible-playbook toolbox/network/heal_node.yml -e target=1c
 
 # 2. delete Tenants on both clusters (hard delete -- wipes on-disk files)
-run ansible-playbook toolbox/delete_database.yml -e cluster_leader=1a -e db_name=Tenants
-run ansible-playbook toolbox/delete_database.yml -e cluster_leader=2a -e db_name=Tenants
+run ansible-playbook toolbox/db/delete_database.yml -e cluster_leader=1a -e db_name=Tenants
+run ansible-playbook toolbox/db/delete_database.yml -e cluster_leader=2a -e db_name=Tenants
 
 # 3. recreate Tenants on both clusters
-run ansible-playbook toolbox/create_database.yml -e cluster_leader=1a -e db_name=Tenants
-run ansible-playbook toolbox/create_database.yml -e cluster_leader=2a -e db_name=Tenants
+run ansible-playbook toolbox/db/create_database.yml -e cluster_leader=1a -e db_name=Tenants
+run ansible-playbook toolbox/db/create_database.yml -e cluster_leader=2a -e db_name=Tenants
 
 # 4. rewire bidirectional pull-replication
 run ansible-playbook scenarios/hub-sink/tasks/define_hub.yml -e clusters_count=2

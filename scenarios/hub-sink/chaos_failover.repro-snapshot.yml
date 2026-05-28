@@ -19,7 +19,7 @@
 
 # ============================ STEP 1 -- seed ============================
 
-- ansible.builtin.import_playbook: ../../toolbox/write_docs.yml
+- ansible.builtin.import_playbook: ../../toolbox/writes/write_docs.yml
   vars:
     target: 1a
     db_name: Tenants
@@ -42,21 +42,21 @@
 
 # ============================ Pre-STEP 2 -- read counts ============================
 
-- ansible.builtin.import_playbook: ../../toolbox/read_doc_count.yml
+- ansible.builtin.import_playbook: ../../toolbox/diagnostic/diagnostic_doc_count.yml
   vars: { target: 1a, db_name: Tenants }
-- ansible.builtin.import_playbook: ../../toolbox/read_doc_count.yml
+- ansible.builtin.import_playbook: ../../toolbox/diagnostic/diagnostic_doc_count.yml
   vars: { target: 1b, db_name: Tenants }
-- ansible.builtin.import_playbook: ../../toolbox/read_doc_count.yml
+- ansible.builtin.import_playbook: ../../toolbox/diagnostic/diagnostic_doc_count.yml
   vars: { target: 1c, db_name: Tenants }
 
 
 # ============================ STEP 2 -- cut hub mesh ============================
 
-- ansible.builtin.import_playbook: ../../toolbox/cut_link.yml
+- ansible.builtin.import_playbook: ../../toolbox/network/cut_link.yml
   vars: { node_a: 1a, node_b: 1b }
-- ansible.builtin.import_playbook: ../../toolbox/cut_link.yml
+- ansible.builtin.import_playbook: ../../toolbox/network/cut_link.yml
   vars: { node_a: 1a, node_b: 1c }
-- ansible.builtin.import_playbook: ../../toolbox/cut_link.yml
+- ansible.builtin.import_playbook: ../../toolbox/network/cut_link.yml
   vars: { node_a: 1b, node_b: 1c }
 
 - name: PAUSE after STEP 2
@@ -70,7 +70,7 @@
 
 # ============================ STEP 3 -- alternating-prefix writes ============================
 
-- ansible.builtin.import_playbook: ../../toolbox/write_docs_interleaved.yml
+- ansible.builtin.import_playbook: ../../toolbox/writes/write_docs_interleaved.yml
   vars:
     target: 1a
     db_name: Tenants
@@ -79,7 +79,7 @@
       - "tenants/cluster2/written-on-1a/r1"
       - "other/written-on-1a/r1"
 
-- ansible.builtin.import_playbook: ../../toolbox/write_docs_interleaved.yml
+- ansible.builtin.import_playbook: ../../toolbox/writes/write_docs_interleaved.yml
   vars:
     target: 1b
     db_name: Tenants
@@ -88,7 +88,7 @@
       - "tenants/cluster2/written-on-1b/r1"
       - "other/written-on-1b/r1"
 
-- ansible.builtin.import_playbook: ../../toolbox/write_docs_interleaved.yml
+- ansible.builtin.import_playbook: ../../toolbox/writes/write_docs_interleaved.yml
   vars:
     target: 1c
     db_name: Tenants
@@ -108,7 +108,7 @@
 
 # ============================ STEP 3.5 -- sink-origin writes ============================
 
-- ansible.builtin.import_playbook: ../../toolbox/write_docs.yml
+- ansible.builtin.import_playbook: ../../toolbox/writes/write_docs.yml
   vars:
     target: 2a
     db_name: Tenants
@@ -160,11 +160,11 @@
 
 # ============================ STEP 5 -- cut relay from sinks ============================
 
-- ansible.builtin.import_playbook: ../../toolbox/cut_link.yml
+- ansible.builtin.import_playbook: ../../toolbox/network/cut_link.yml
   vars: { node_a: "{{ relay }}", node_b: 2a }
-- ansible.builtin.import_playbook: ../../toolbox/cut_link.yml
+- ansible.builtin.import_playbook: ../../toolbox/network/cut_link.yml
   vars: { node_a: "{{ relay }}", node_b: 2b }
-- ansible.builtin.import_playbook: ../../toolbox/cut_link.yml
+- ansible.builtin.import_playbook: ../../toolbox/network/cut_link.yml
   vars: { node_a: "{{ relay }}", node_b: 2c }
 
 - name: STEP 5 -- failover wait + derive non-relay names
@@ -188,7 +188,7 @@
 
 # ============================ STEP 6 -- restore non-relay pair ============================
 
-- ansible.builtin.import_playbook: ../../toolbox/restore_link.yml
+- ansible.builtin.import_playbook: ../../toolbox/network/restore_link.yml
   vars:
     node_a: "{{ nonrelay_a }}"
     node_b: "{{ nonrelay_b }}"
@@ -208,21 +208,21 @@
 # # ** COMMENTED OUT in this reproduction snapshot -- user wrote 1 doc per sink node via Studio
 # #    during the pause above, then waited 30-90s before pressing Enter. **
 #
-# - ansible.builtin.import_playbook: ../../toolbox/write_docs.yml
+# - ansible.builtin.import_playbook: ../../toolbox/writes/write_docs.yml
 #   vars:
 #     target: 2a
 #     db_name: Tenants
 #     count: 5
 #     id_prefix: "other/TRIGGER-2a"
 #
-# - ansible.builtin.import_playbook: ../../toolbox/write_docs.yml
+# - ansible.builtin.import_playbook: ../../toolbox/writes/write_docs.yml
 #   vars:
 #     target: 2b
 #     db_name: Tenants
 #     count: 5
 #     id_prefix: "other/TRIGGER-2b"
 #
-# - ansible.builtin.import_playbook: ../../toolbox/write_docs.yml
+# - ansible.builtin.import_playbook: ../../toolbox/writes/write_docs.yml
 #   vars:
 #     target: 2c
 #     db_name: Tenants
@@ -241,12 +241,12 @@
 
 # ============================ STEP 7 -- restore relay's hub-internal links ============================
 
-- ansible.builtin.import_playbook: ../../toolbox/restore_link.yml
+- ansible.builtin.import_playbook: ../../toolbox/network/restore_link.yml
   vars:
     node_a: "{{ relay }}"
     node_b: "{{ nonrelay_a }}"
 
-- ansible.builtin.import_playbook: ../../toolbox/restore_link.yml
+- ansible.builtin.import_playbook: ../../toolbox/network/restore_link.yml
   vars:
     node_a: "{{ relay }}"
     node_b: "{{ nonrelay_b }}"
@@ -262,11 +262,11 @@
 
 # ============================ STEP 8 -- restore relay <-> sink ============================
 
-- ansible.builtin.import_playbook: ../../toolbox/restore_link.yml
+- ansible.builtin.import_playbook: ../../toolbox/network/restore_link.yml
   vars: { node_a: "{{ relay }}", node_b: 2a }
-- ansible.builtin.import_playbook: ../../toolbox/restore_link.yml
+- ansible.builtin.import_playbook: ../../toolbox/network/restore_link.yml
   vars: { node_a: "{{ relay }}", node_b: 2b }
-- ansible.builtin.import_playbook: ../../toolbox/restore_link.yml
+- ansible.builtin.import_playbook: ../../toolbox/network/restore_link.yml
   vars: { node_a: "{{ relay }}", node_b: 2c }
 
 
