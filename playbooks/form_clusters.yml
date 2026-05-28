@@ -1,3 +1,51 @@
+##################################################################################################
+# playbooks/form_clusters.yml
+#
+# Joins every container into a RavenDB cluster based on its name.  Container `1a` becomes the
+# leader of cluster 1; `1b` and `1c` join it as Members.  Container `2a` becomes the leader of
+# cluster 2; `2b` and `2c` join it.  And so on.  Run AFTER install_ravendb.yml.
+#
+# Works in both target_modes:
+#   * docker -- discovers containers from docker_network_name, derives node IPs from the bridge,
+#               rewrites /etc/hosts every run (container IPs may shift across restarts).
+#   * ssh    -- reads ravendb_nodes from inventory, uses each host's ansible_host as its IP.
+#               /etc/hosts is written from stable inventory IPs.
+#
+# What it does, in order:
+#   1. Installs the python `ravendb` client on the controller (the `ravendb.ravendb.node`module that does the actual cluster-join needs it).
+#   2. Builds the (name -> ip, cluster_id, node_letter) maps:
+#         docker -> from docker_network_info + name parsing.
+#         ssh    -> from inventory's ansible_host + per-host cluster_id/node_letter.
+#   3. Writes the /etc/hosts block on the controller AND inside every container/Pi.
+#   5. Waits until each cluster's leader (the `a` node) is responding on HTTPS.
+#   6. Calls the ravendb.ravendb.node module once per non-leader container to add it
+#      to its cluster's leader as a Member.
+#   7. Reads the final topology from each leader and prints a summary
+#      table (tag / container / url per cluster).
+#
+# INPUTS (all overridable via `-e key=value`; defaults live in inventory/group_vars/all.yml):
+#   docker_network_name  shared docker network to discover containers from   (default: hubsinknet)
+#   ravendb_domain       domain stamped into each node's URL                 (default: hubsink.test)
+#   cert_dir             folder containing client.pem and ca.crt             (default: /mnt/c/dev/hub-sink/selfsignedmaterials)
+#                        cert_ca_crt and friends are derived from this in group_vars;
+#                        override cert_dir and they all follow.
+#
+# RUN EXAMPLES:
+#   # use all defaults
+#   ansible-playbook playbooks/form_clusters.yml -K
+#
+#   # point at a different cert folder
+#   ansible-playbook playbooks/form_clusters.yml -K -e cert_dir=/path/to/certs
+#
+# NOTES:
+#   * Requires sudo on the controller (-K) -- it edits /etc/hosts.
+#   * The leader for each cluster is hard-coded to be the `a` node (e.g. 1a, 2a, ...).
+#     This convention is also relied on by scenarios when they look up cluster leaders.
+#   * Idempotent.  Re-running on an already-formed cluster is a safe no-op.
+#   * /etc/hosts inside containers gets rewritten if container IPs changed between runs --
+#     re-run this if you ever restart containers and IPs shift on the bridge.
+##################################################################################################
+
 - name: Ensure ravendb python client is available on the controller
   hosts: localhost
   connection: local
@@ -7,34 +55,26 @@
     - role: ravendb.ravendb.ravendb_python_client_prerequisites
 
 
-- name: Discover containers and group them by cluster_id
+- name: Discover targets and group them by cluster_id
   hosts: localhost
   connection: local
   gather_facts: false
 
   tasks:
-    - name: Inspect the shared docker network
+    # ---------- docker mode: discover containers from the shared network ------------------------
+    - name: (docker mode) Inspect the shared docker network
       community.docker.docker_network_info:
         name: "{{ docker_network_name }}"
       register: network_info
+      when: target_mode | default('docker') == 'docker'
 
-    - name: Build a {name -> ip} map for every container on the network
+    - name: (docker mode) Build a {name -> ip} map from container IPs
       ansible.builtin.set_fact:
         node_ip_map: "{{ node_ip_map | default({}) | combine({item.Name: item.IPv4Address.split('/')[0]}) }}"
       loop: "{{ network_info.network.Containers.values() | list }}"
+      when: target_mode | default('docker') == 'docker'
 
-    - name: Sort container names for stable iteration
-      ansible.builtin.set_fact:
-        container_names: "{{ node_ip_map.keys() | list | sort }}"
-
-    - name: Build the /etc/hosts block that maps every <name>.<domain> to its container IP
-      ansible.builtin.set_fact:
-        hosts_block: |-
-          {% for name in container_names %}
-          {{ node_ip_map[name] }} {{ name }}.{{ ravendb_domain }}
-          {% endfor %}
-
-    - name: Register each container in ravendb_nodes with cluster_id + node_letter host vars
+    - name: (docker mode) Register each container in ravendb_nodes with cluster_id + node_letter
       ansible.builtin.add_host:
         name: "{{ item }}"
         groups: ravendb_nodes
@@ -42,9 +82,30 @@
         ansible_python_interpreter: /usr/bin/python3
         cluster_id: "{{ item | regex_replace('[^0-9].*', '') }}"
         node_letter: "{{ item | regex_replace('^[0-9]+', '') }}"
-      loop: "{{ container_names }}"
+      loop: "{{ node_ip_map.keys() | list | sort if node_ip_map is defined else [] }}"
       changed_when: false
+      when: target_mode | default('docker') == 'docker'
 
+    # ---------- ssh mode: read everything from inventory ----------------------------------------
+    - name: (ssh mode) Build {name -> ip} map from inventory's ansible_host
+      ansible.builtin.set_fact:
+        node_ip_map: "{{ dict(groups['ravendb_nodes'] | zip(groups['ravendb_nodes'] | map('extract', hostvars, 'ansible_host'))) }}"
+      when: target_mode | default('docker') == 'ssh'
+
+    # ---------- both modes: sorted names + hosts_block (for the docker-mode rewrite below) ------
+    - name: Sort names for stable iteration
+      ansible.builtin.set_fact:
+        container_names: "{{ node_ip_map.keys() | list | sort }}"
+
+    - name: Build the /etc/hosts block that maps every <name>.<domain> to its IP
+      ansible.builtin.set_fact:
+        hosts_block: |-
+          {% for name in container_names %}
+          {{ node_ip_map[name] }} {{ name }}.{{ ravendb_domain }}
+          {% endfor %}
+
+
+# ============== /etc/hosts rewrite (both modes) =================================================
 
 - name: Write the hubsink /etc/hosts block on the controller
   hosts: localhost
@@ -53,23 +114,34 @@
   become: true
 
   tasks:
-    - name: Upsert the ANSIBLE MANAGED HUBSINK block in /etc/hosts
+    - name: Upsert the ANSIBLE MANAGED CHAOS LAB block in /etc/hosts
       ansible.builtin.blockinfile:
         path: /etc/hosts
-        marker: "# {mark} ANSIBLE MANAGED HUBSINK"
+        marker: "# {mark} ANSIBLE MANAGED CHAOS LAB"
         block: "{{ hostvars['localhost'].hosts_block }}"
 
 
-- name: Write the hubsink /etc/hosts block inside every container
+- name: Write the hubsink /etc/hosts block on every node
   hosts: ravendb_nodes
   gather_facts: false
   become: true
 
   tasks:
-    - name: Upsert the ANSIBLE MANAGED HUBSINK block in /etc/hosts (inside container)
+    # cloud-init on Ubuntu/RaspiOS may have `manage_etc_hosts: true`, which regenerates
+    # /etc/hosts from a template on every boot and would wipe our block.  Flip it off first
+    # so our changes stick across reboots.  Idempotent: noop if not using cloud-init.
+    - name: Disable cloud-init's manage_etc_hosts (so our block survives reboot)
+      ansible.builtin.replace:
+        path: /etc/cloud/cloud.cfg
+        regexp: '^(\s*manage_etc_hosts:\s*).*$'
+        replace: '\1false'
+      failed_when: false
+      changed_when: false
+
+    - name: Upsert the ANSIBLE MANAGED CHAOS LAB block in /etc/hosts (on target)
       ansible.builtin.blockinfile:
         path: /etc/hosts
-        marker: "# {mark} ANSIBLE MANAGED HUBSINK"
+        marker: "# {mark} ANSIBLE MANAGED CHAOS LAB"
         block: "{{ hostvars['localhost'].hosts_block }}"
         unsafe_writes: true
 
@@ -134,7 +206,7 @@
       vars:
         summary: |-
           ================================================================
-            Formed {{ cluster_ids | length }} cluster(s) with {{ node_records | length }} node(s) on {{ docker_network_name }}
+            Formed {{ cluster_ids | length }} cluster(s) with {{ node_records | length }} node(s) ({{ ('on ' ~ docker_network_name) if target_mode | default('docker') == 'docker' else 'via ssh' }})
           ================================================================
           {% for cid in cluster_ids %}
 

@@ -1,0 +1,82 @@
+##################################################################################################
+# playbooks/setup_ssh_targets.yml
+#
+# Bootstraps SSH-mode targets (VMs / bare metal / cloud / other computers) for the chaos
+# harness.  This is the SSH-mode equivalent of provision_nodes.yml -- but the machines
+# already exist (you brought them); all this does is verify access and install host-side
+# prereqs.
+#
+# What it does NOT do: writing the ANSIBLE MANAGED CHAOS LAB /etc/hosts block.  That belongs
+# in form_clusters.yml (which already does it for docker mode using the same data).  At this
+# stage you don't yet know what the cluster shape is -- just that the hosts are reachable.
+#
+# What it does, in order:
+#   1. Asserts target_mode == ssh (refuses to run in docker mode -- that's provision_nodes.yml's job).
+#   2. SSH-pings every host in the ravendb_nodes group (proves the controller can reach each Pi).
+#   3. Installs apt prereqs (iptables, python3) where missing.
+#
+# After this, run:
+#   ansible-playbook -i inventory/ssh_hosts.yml playbooks/install_ravendb.yml
+#   ansible-playbook -i inventory/ssh_hosts.yml playbooks/form_clusters.yml
+#
+# RUN EXAMPLE:
+#   ansible-playbook -i inventory/ssh_hosts.yml playbooks/setup_ssh_targets.yml
+##################################################################################################
+
+- name: Sanity check + show plan
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Fail if ravendb_nodes group is empty (you must pass -i inventory/ssh_hosts.yml)
+      ansible.builtin.assert:
+        that:
+          - (groups['ravendb_nodes'] | default([])) | length > 0
+        fail_msg: >-
+          Inventory has no hosts in group 'ravendb_nodes'.  Pass -i inventory/ssh_hosts.yml
+          (copy inventory/ssh_hosts.yml.example first and fill in your hosts).
+
+    - name: Show which hosts we're bootstrapping
+      ansible.builtin.debug:
+        msg: "SSH targets: {{ groups['ravendb_nodes'] }}"
+
+
+- name: Verify SSH reachability + gather facts
+  hosts: ravendb_nodes
+  gather_facts: true
+
+  tasks:
+    - name: Print one-line summary per host
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} ({{ ansible_host }}) ->
+          {{ ansible_distribution }} {{ ansible_distribution_version }} {{ ansible_architecture }}
+
+
+- name: Install host-side prerequisites
+  hosts: ravendb_nodes
+  gather_facts: false
+  become: true
+
+  tasks:
+    - name: Install iptables + python3 (needed for chaos primitives + ansible modules)
+      ansible.builtin.apt:
+        name:
+          - iptables
+          - python3
+        state: present
+        update_cache: true
+
+
+- name: Done
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Summary
+      ansible.builtin.debug:
+        msg: >-
+          SSH BOOTSTRAP DONE  {{ groups['ravendb_nodes'] | length }} Pi(s) reachable + apt prereqs present.
+          Next: ansible-playbook -i inventory/ssh_hosts.yml playbooks/install_ravendb.yml

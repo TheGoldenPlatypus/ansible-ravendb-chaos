@@ -1,3 +1,11 @@
+# target_mode is INTENTIONALLY NOT SET HERE.
+# It's controlled by the inventory: pass -i inventory/ssh_hosts.yml to select ssh mode (that file
+# sets target_mode: ssh on the all group).  Without -i, target_mode is unset and every check
+# in the playbooks falls back to `default('docker')`, giving you the docker workflow.
+#
+# Why not set the default here?  group_vars/all.yml outranks inline inventory vars, so a
+# default of `target_mode: docker` here would silently override `ssh_hosts.yml`'s `ssh` setting.
+
 clusters_count: 1
 nodes_per_cluster: 3
 

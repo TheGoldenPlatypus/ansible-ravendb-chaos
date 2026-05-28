@@ -1,0 +1,45 @@
+# ============================================================================================
+# inventory/ssh_hosts.yml.example
+#
+# Template inventory for SSH-mode targets.  "SSH targets" means any machine the controller
+# can reach over SSH and run apt + systemctl on -- lab VMs, bare-metal servers, cloud
+# instances, other computers on your LAN, etc.  Copy to inventory/ssh_hosts.yml, fill in
+# the addresses + credentials for your fleet, then run any playbook with
+# -i inventory/ssh_hosts.yml.
+#
+# Conventions (same as docker mode):
+#   * Host name = <cluster_id><node_letter>, e.g. 1a / 1b / 1c, 2a / 2b / 2c.
+#   * The node ending in 'a' is the cluster leader.
+#   * Cluster tag (A/B/C/...) is derived from the last letter, uppercased.
+#
+# Requirements per host:
+#   * SSH reachable from the controller as `ansible_user`.
+#   * Passwordless sudo, OR set ansible_become_password (see below).
+#   * Ubuntu / Debian-family (the ravendb_node role uses apt).
+#   * Architecture: amd64 or arm64 -- the role picks the matching deb.
+# ============================================================================================
+
+all:
+  vars:
+    target_mode: ssh
+    ansible_user: ubuntu
+    # Uncomment if you use password auth instead of SSH keys:
+    # ansible_password: "<ssh-password>"
+    # ansible_become_password: "<sudo-password>"
+
+  children:
+    ravendb_nodes:
+      hosts:
+        1a:
+          ansible_host: 192.168.1.101
+          cluster_id: 1
+          node_letter: a
+        1b:
+          ansible_host: 192.168.1.102
+          cluster_id: 1
+          node_letter: b
+        1c:
+          ansible_host: 192.168.1.103
+          cluster_id: 1
+          node_letter: c
+        # Add 2a/2b/2c... here if you have a second cluster.
