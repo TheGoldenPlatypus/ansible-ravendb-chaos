@@ -1,0 +1,152 @@
+##################################################################################################
+# toolbox/network/partition_set.yml
+#
+# Bidirectionally cuts traffic between every pair in set_a x set_b in a single call.
+# This is the cross-cluster generalization of cut_link.yml -- cut_link is 1<->1 and
+# partition_node only sees its own cluster via /cluster/topology, neither can express things
+# like "isolate the hub mentor from all 6 sink nodes".
+#
+# INPUTS:
+#   set_a   REQUIRED.  JSON list of node names (e.g. '["1a"]').
+#   set_b   REQUIRED.  JSON list of node names (e.g. '["1b","1c","2a","2b","2c"]').
+#
+# RUN EXAMPLES:
+#   # P1 docker -- isolate the hub mentor (1a) from the other 8 nodes
+#   ansible-playbook toolbox/network/partition_set.yml \
+#       -e '{"set_a":["1a"],"set_b":["1b","1c","2a","2b","2c","3a","3b","3c"]}'
+#
+#   # P2 ssh -- isolate Sink_A from Hub + Sink_B
+#   ansible-playbook -i inventory/ssh_hosts.yml toolbox/network/partition_set.yml -K \
+#       -e '{"set_a":["2a","2b","2c"],"set_b":["1a","1b","1c","3a","3b","3c"]}'
+##################################################################################################
+
+- name: Partition a set of nodes from another set (mode-aware wrapper)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - set_a is defined
+          - set_b is defined
+          - set_a | length > 0
+          - set_b | length > 0
+        fail_msg: >-
+          Required: -e '{"set_a":[...],"set_b":[...]}' (both non-empty lists of node names)
+
+    - name: Resolve target_mode (default docker)
+      ansible.builtin.set_fact:
+        effective_mode: "{{ target_mode | default('docker') }}"
+
+    - name: Pick the underlying cut_link tool for this mode
+      ansible.builtin.set_fact:
+        cut_tool: "{{ 'toolbox/network/cut_link_ssh.yml' if effective_mode == 'ssh' else 'toolbox/network/cut_link.yml' }}"
+
+    - name: Initialize pair list
+      ansible.builtin.set_fact:
+        pairs: []
+
+    - name: Cross set_a x set_b, skipping self-pairs
+      ansible.builtin.set_fact:
+        pairs: "{{ pairs + [item] }}"
+      loop: "{{ set_a | product(set_b) | map('list') | list }}"
+      loop_control:
+        label: "{{ item[0] }} x {{ item[1] }}"
+      when: item[0] != item[1]
+
+    - name: Sanity check at least one pair to partition
+      ansible.builtin.assert:
+        that:
+          - pairs | length > 0
+        fail_msg: "set_a x set_b produced zero non-self pairs -- nothing to partition"
+
+    - name: Print the plan
+      ansible.builtin.debug:
+        msg: "Will cut {{ pairs | length }} pair(s) via {{ cut_tool }} (mode={{ effective_mode }})"
+
+    - name: Run cut_link per pair
+      ansible.builtin.command:
+        cmd: >-
+          ansible-playbook {{ cut_tool }}
+          {% if effective_mode == 'ssh' %}-i inventory/ssh_hosts.yml{% endif %}
+          -e node_a={{ item.0 }}
+          -e node_b={{ item.1 }}
+        chdir: "{{ playbook_dir }}/.."
+      environment:
+        ANSIBLE_BECOME_PASS: "{{ ansible_become_pass | default('') }}"
+      register: cut_runs
+      loop: "{{ pairs }}"
+      loop_control:
+        label: "{{ item.0 }} <-X-> {{ item.1 }}"
+
+    - name: Build name -> ip map (docker mode)
+      block:
+        - name: Inspect docker network
+          community.docker.docker_network_info:
+            name: "{{ docker_network_name }}"
+          register: net
+
+        - name: Build name -> ip map from docker network
+          ansible.builtin.set_fact:
+            node_ip_map: "{{ node_ip_map | default({}) | combine({item.Name: item.IPv4Address.split('/')[0]}) }}"
+          loop: "{{ net.network.Containers.values() | list }}"
+      when: effective_mode == 'docker'
+
+    - name: Validate a -> b is blocked (docker mode)
+      community.docker.docker_container_exec:
+        container: "{{ item.0 }}"
+        command: bash -lc "timeout 3 bash -c '</dev/tcp/{{ node_ip_map[item.1] }}/443' 2>/dev/null; echo rc=$?"
+      register: validate_ab_docker
+      failed_when: "'rc=0' in validate_ab_docker.stdout"
+      changed_when: false
+      loop: "{{ pairs }}"
+      loop_control:
+        label: "{{ item.0 }} -> {{ item.1 }}:443 should be BLOCKED"
+      when: effective_mode == 'docker'
+
+    - name: Validate b -> a is blocked (docker mode)
+      community.docker.docker_container_exec:
+        container: "{{ item.1 }}"
+        command: bash -lc "timeout 3 bash -c '</dev/tcp/{{ node_ip_map[item.0] }}/443' 2>/dev/null; echo rc=$?"
+      register: validate_ba_docker
+      failed_when: "'rc=0' in validate_ba_docker.stdout"
+      changed_when: false
+      loop: "{{ pairs }}"
+      loop_control:
+        label: "{{ item.1 }} -> {{ item.0 }}:443 should be BLOCKED"
+      when: effective_mode == 'docker'
+
+    - name: Build name -> ip map (ssh mode)
+      ansible.builtin.set_fact:
+        node_ip_map: "{{ dict(groups['ravendb_nodes'] | zip(groups['ravendb_nodes'] | map('extract', hostvars, 'ansible_host'))) }}"
+      when: effective_mode == 'ssh'
+
+    - name: Validate a -> b is blocked (ssh mode)
+      ansible.builtin.shell: "timeout 3 bash -c '</dev/tcp/{{ node_ip_map[item.1] }}/443' 2>/dev/null; echo rc=$?"
+      delegate_to: "{{ item.0 }}"
+      register: validate_ab_ssh
+      failed_when: "'rc=0' in validate_ab_ssh.stdout"
+      changed_when: false
+      loop: "{{ pairs }}"
+      loop_control:
+        label: "{{ item.0 }} -> {{ item.1 }}:443 should be BLOCKED"
+      when: effective_mode == 'ssh'
+
+    - name: Validate b -> a is blocked (ssh mode)
+      ansible.builtin.shell: "timeout 3 bash -c '</dev/tcp/{{ node_ip_map[item.0] }}/443' 2>/dev/null; echo rc=$?"
+      delegate_to: "{{ item.1 }}"
+      register: validate_ba_ssh
+      failed_when: "'rc=0' in validate_ba_ssh.stdout"
+      changed_when: false
+      loop: "{{ pairs }}"
+      loop_control:
+        label: "{{ item.1 }} -> {{ item.0 }}:443 should be BLOCKED"
+      when: effective_mode == 'ssh'
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: >-
+          PARTITIONED  set_a={{ set_a }}  <-X->  set_b={{ set_b }}
+          ({{ pairs | length }} pair(s), mode={{ effective_mode }}, validated bidirectionally on :443)

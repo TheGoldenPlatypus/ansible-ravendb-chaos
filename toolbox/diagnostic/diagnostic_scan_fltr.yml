@@ -1,0 +1,85 @@
+##################################################################################################
+# toolbox/diagnostic/diagnostic_scan_fltr.yml
+#
+# Read-only.  Recursively scans a capture directory for the literal substring `FLTR:` in any
+# captured CV.  Emits PASS if no occurrences are found, otherwise FAIL listing every offending
+# file with its content.  Use after diagnostic_capture_cv / diagnostic_capture_doc_cv to assert
+# the filtered-replication no-leak invariant.
+#
+# INPUTS:
+#   capture_dir  REQUIRED.  Directory (or any path) to scan recursively.
+#   strict       OPTIONAL.  If true (default), playbook fails on any FLTR hit.  Set false to
+#                            report-only without failing the run.
+#
+# RUN EXAMPLES:
+#   ansible-playbook toolbox/diagnostic/diagnostic_scan_fltr.yml -e capture_dir=captures/cv-Tenants-20260528-103000
+#   ansible-playbook toolbox/diagnostic/diagnostic_scan_fltr.yml -e capture_dir=captures -e strict=false
+##################################################################################################
+
+- name: Scan captured CVs for FLTR leakage
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - capture_dir is defined
+        fail_msg: "Required: -e capture_dir=<path>"
+
+    - name: Find all .cv files under capture_dir
+      ansible.builtin.find:
+        paths: "{{ capture_dir }}"
+        patterns: '*.cv'
+        recurse: true
+      register: found
+
+    - name: Sanity check we found something to scan
+      ansible.builtin.assert:
+        that:
+          - found.files | length > 0
+        fail_msg: "No .cv files found under {{ capture_dir }} -- nothing to scan"
+
+    - name: Read every .cv file
+      ansible.builtin.slurp:
+        src: "{{ item.path }}"
+      register: slurped
+      loop: "{{ found.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+
+    - name: "Build the list of files containing FLTR:"
+      ansible.builtin.set_fact:
+        leaked: >-
+          {{ slurped.results
+             | selectattr('content', 'defined')
+             | map(attribute='content')
+             | map('b64decode')
+             | list
+             | zip(slurped.results | map(attribute='item') | map(attribute='path') | list)
+             | selectattr(0, 'search', 'FLTR:')
+             | list }}
+
+    - name: Report each FLTR hit
+      ansible.builtin.debug:
+        msg: "LEAK  {{ entry.1 }}  ::  {{ entry.0 | trim }}"
+      loop: "{{ leaked }}"
+      loop_control:
+        loop_var: entry
+        label: "{{ entry.1 | basename }}"
+      when: leaked | length > 0
+
+    - name: Verdict
+      ansible.builtin.debug:
+        msg: >-
+          {{ found.files | length }} file(s) scanned under {{ capture_dir }}.
+          FLTR hits {{ leaked | length }}.
+          {{ 'PASS -- no FLTR leakage.' if leaked | length == 0 else 'FAIL -- see entries above.' }}
+
+    - name: Fail on FLTR hit when strict
+      ansible.builtin.assert:
+        that:
+          - leaked | length == 0
+        fail_msg: "FLTR leakage detected in {{ leaked | length }} file(s) under {{ capture_dir }}"
+      when: (strict | default(true)) | bool

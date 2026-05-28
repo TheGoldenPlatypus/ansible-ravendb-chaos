@@ -1,0 +1,97 @@
+##################################################################################################
+# toolbox/tasks/set_mentor_node.yml
+#
+# Flips MentorNode on an ongoing task.  Reads the existing task config, swaps MentorNode, PUTs
+# back.  Wired: hub, sink, external.  Other task types are short stubs in the dispatch table --
+# uncomment + verify body shape on first use.
+#
+# INPUTS:
+#   target       REQUIRED.  Container/host to talk to (DB cluster leader works best).
+#   db_name      REQUIRED.  Database name.
+#   task_name    REQUIRED.  The ongoing task's Name field.
+#   task_type    REQUIRED.  hub | sink | external   (others not yet wired -- see _dispatch below)
+#   mentor_node  REQUIRED.  Cluster tag (A, B, C, ...).
+#
+# RUN EXAMPLES:
+#   ansible-playbook toolbox/tasks/set_mentor_node.yml -K -e target=1a -e db_name=Tenants \
+#       -e task_name=Filtered_Hub -e task_type=hub -e mentor_node=B
+#
+#   ansible-playbook toolbox/tasks/set_mentor_node.yml -K -e target=2a -e db_name=Tenants \
+#       -e task_name=Filtered_Sink -e task_type=sink -e mentor_node=C
+#
+#   ansible-playbook toolbox/tasks/set_mentor_node.yml -K -e target=1a -e db_name=Tenants \
+#       -e task_name=MyExternalRep -e task_type=external -e mentor_node=A
+##################################################################################################
+
+- name: Set MentorNode on an ongoing task
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    _dispatch:
+      hub:      { list_type: PullReplicationAsHub,  list_key: PullReplications,     put_path: "admin/tasks/pull-replication/hub" }
+      sink:     { list_type: PullReplicationAsSink, list_key: SinkPullReplications, put_path: "admin/tasks/sink-pull-replication" }
+      external: { list_type: Replication,           list_key: ExternalReplications, put_path: "admin/tasks/external-replication" }
+      # backup:        STUB -- list_type: Backup,           list_key: PeriodicBackups,    put_path: "admin/periodic-backup"
+      # subscription:  STUB -- list_type: Subscription,     list_key: Subscriptions,      put_path: "admin/subscriptions/update"
+      # raven_etl:     STUB -- list_type: RavenEtl,         list_key: RavenEtls,          put_path: "admin/etl?type=Raven"
+      # sql_etl:       STUB -- list_type: SqlEtl,           list_key: SqlEtls,            put_path: "admin/etl?type=Sql"
+      # olap_etl:      STUB -- list_type: OlapEtl,          list_key: OlapEtls,           put_path: "admin/etl?type=Olap"
+      # elastic_etl:   STUB -- list_type: ElasticSearchEtl, list_key: ElasticSearchEtls,  put_path: "admin/etl?type=ElasticSearch"
+      # queue_etl:     STUB -- list_type: QueueEtl,         list_key: QueueEtls,          put_path: "admin/etl?type=Queue"
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - target is defined
+          - db_name is defined
+          - task_name is defined
+          - task_type is defined
+          - task_type in (_dispatch.keys() | list)
+          - mentor_node is defined
+        fail_msg: "Required: -e target=<node> -e db_name=<db> -e task_name=<task> -e task_type=<one of {{ _dispatch.keys() | list }}> -e mentor_node=<TAG>"
+
+    - name: Resolve endpoint shape for this task_type
+      ansible.builtin.set_fact:
+        d: "{{ _dispatch[task_type] }}"
+
+    - name: GET existing tasks of the requested type
+      ansible.builtin.uri:
+        url: "https://{{ target }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/tasks?type={{ d.list_type }}"
+        method: GET
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        return_content: true
+      register: tasks_resp
+
+    - name: Find the task by name
+      ansible.builtin.set_fact:
+        matching_tasks: "{{ tasks_resp.json[d.list_key] | default([]) | selectattr('Name', 'eq', task_name) | list }}"
+
+    - name: Fail if task not found
+      ansible.builtin.assert:
+        that:
+          - matching_tasks | length > 0
+        fail_msg: >-
+          No {{ task_type }} task named '{{ task_name }}' found on {{ target }}/{{ db_name }}.
+          Available names: {{ tasks_resp.json[d.list_key] | default([]) | map(attribute='Name') | list }}
+
+    - name: Pick the matched task
+      ansible.builtin.set_fact:
+        existing_task: "{{ matching_tasks[0] }}"
+
+    - name: PUT the task back with MentorNode updated
+      ansible.builtin.uri:
+        url: "https://{{ target }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/{{ d.put_path }}"
+        method: PUT
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        body_format: json
+        body: "{{ existing_task | combine({'MentorNode': mentor_node}) }}"
+        status_code: [200, 201]
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: "MENTOR  task '{{ task_name }}' ({{ task_type }}) -> MentorNode={{ mentor_node }} on {{ target }}/{{ db_name }}"

@@ -1,0 +1,58 @@
+##################################################################################################
+# toolbox/writes/write_counters.yml
+#
+# Increments a named counter on a doc N times (each call applies `delta`).  Defaults match
+#
+# INPUTS:
+#   target         REQUIRED.  Container/host name.
+#   db_name        REQUIRED.  Database name.
+#   doc_id         REQUIRED.  The doc to attach the counter to.  Doc must already exist.
+#   counter_name   OPTIONAL.  Default "Likes".
+#   delta          OPTIONAL.  Default 1.  How much to increment per call.
+#   repeat         OPTIONAL.  Default 1.  How many increment calls to make.
+#
+# RUN EXAMPLES:
+#   ansible-playbook toolbox/writes/write_counters.yml \
+#       -e target=1a -e db_name=Tenants -e doc_id=users/1
+#
+#   ansible-playbook toolbox/writes/write_counters.yml \
+#       -e target=2a -e db_name=Tenants -e doc_id=users/1 -e counter_name=Likes -e delta=7 -e repeat=1
+##################################################################################################
+
+- name: Increment a named counter on a doc
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - target is defined
+          - db_name is defined
+          - doc_id is defined
+        fail_msg: "Required: -e target=<node> -e db_name=<db> -e doc_id=<id>"
+
+    - name: POST counter increment {{ repeat | default(1) }} time(s) on {{ target }}/{{ db_name }}/{{ doc_id }}
+      ansible.builtin.uri:
+        url: "https://{{ target }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/counters"
+        method: POST
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        body_format: json
+        body:
+          Documents:
+            - DocumentId: "{{ doc_id }}"
+              Operations:
+                - Type: Increment
+                  CounterName: "{{ counter_name | default('Likes') }}"
+                  Delta: "{{ delta | default(1) | int }}"
+        status_code: [200, 201, 204]
+      loop: "{{ range(repeat | default(1) | int) | list }}"
+      loop_control:
+        loop_var: n
+        label: "+{{ delta | default(1) }} -> {{ counter_name | default('Likes') }} (call {{ n + 1 }})"
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: "COUNTER  {{ counter_name | default('Likes') }} on {{ doc_id }} incremented by {{ (delta | default(1) | int) * (repeat | default(1) | int) }} ({{ repeat | default(1) }} call(s) x {{ delta | default(1) }})"

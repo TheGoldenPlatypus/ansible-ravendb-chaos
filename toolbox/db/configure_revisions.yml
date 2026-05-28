@@ -1,0 +1,45 @@
+##################################################################################################
+# toolbox/db/configure_revisions.yml
+#
+# Enables document revisions on a DB with a configurable MinimumRevisionsToKeep on the Default
+# config (applies to every collection unless overridden).  
+#
+# INPUTS:
+#   target               REQUIRED.  Container/host to talk to (any node of the DB's cluster).
+#   db_name              REQUIRED.  Database name.
+#   minimum_revisions    OPTIONAL.  Default 100.
+#
+# RUN EXAMPLES:
+#   ansible-playbook toolbox/db/configure_revisions.yml -K -e target=1a -e db_name=Tenants
+#   ansible-playbook toolbox/db/configure_revisions.yml -K -e target=1a -e db_name=Hub_DB -e minimum_revisions=50
+##################################################################################################
+
+- name: Enable revisions on a DB
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - target is defined
+          - db_name is defined
+        fail_msg: "Required: -e target=<node> -e db_name=<db>"
+
+    - name: POST revisions config
+      ansible.builtin.uri:
+        url: "https://{{ target }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/admin/revisions/config"
+        method: POST
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        body_format: json
+        body:
+          Default:
+            MinimumRevisionsToKeep: "{{ (minimum_revisions | default(100)) | int }}"
+            Disabled: false
+        status_code: [200, 201, 204]
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: "REVISIONS  enabled on {{ target }}/{{ db_name }} with MinimumRevisionsToKeep={{ minimum_revisions | default(100) }}"

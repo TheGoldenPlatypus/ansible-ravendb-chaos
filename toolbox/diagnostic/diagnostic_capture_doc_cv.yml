@@ -1,0 +1,96 @@
+##################################################################################################
+# toolbox/diagnostic/diagnostic_capture_doc_cv.yml
+#
+# Read-only.  For each (node, id) pair, fetches the document's @change-vector and writes one
+# file per pair to output_dir.  Files are named <node>__<id-encoded>.cv.  Missing docs are
+# recorded as <NOT_FOUND> so the absence is also captured.
+#
+# INPUTS:
+#   db_name      REQUIRED.  Database name.
+#   ids          REQUIRED.  JSON list of doc ids (e.g. '["users/1","users/2"]').
+#   nodes        OPTIONAL.  JSON list of node names to probe.  Default = auto-discovered lab nodes.
+#   output_dir   OPTIONAL.  Default = captures/doccv-<db>-<timestamp>/.
+#
+# RUN EXAMPLES:
+#   ansible-playbook toolbox/diagnostic/diagnostic_capture_doc_cv.yml -e db_name=Tenants \
+#       -e '{"ids":["users/1","users/42"]}'
+#   ansible-playbook toolbox/diagnostic/diagnostic_capture_doc_cv.yml -e db_name=Hub_DB \
+#       -e '{"ids":["users/a-1"],"nodes":["3a","3b","3c"]}'
+##################################################################################################
+
+- name: Capture per-node @change-vector for a list of doc ids
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - db_name is defined
+          - ids is defined
+          - ids | length > 0
+        fail_msg: "Required: -e db_name=<db> -e '{\"ids\":[...]}'"
+
+    - name: Resolve target_mode
+      ansible.builtin.set_fact:
+        effective_mode: "{{ target_mode | default('docker') }}"
+
+    - name: Auto-discover docker nodes
+      block:
+        - community.docker.docker_network_info:
+            name: "{{ docker_network_name }}"
+          register: net
+        - ansible.builtin.set_fact:
+            discovered_nodes: "{{ net.network.Containers.values() | map(attribute='Name') | list }}"
+      when: effective_mode == 'docker'
+
+    - name: Auto-discover ssh nodes
+      ansible.builtin.set_fact:
+        discovered_nodes: "{{ groups['ravendb_nodes'] | default([]) | list }}"
+      when: effective_mode == 'ssh'
+
+    - name: Resolve effective node list
+      ansible.builtin.set_fact:
+        effective_nodes: "{{ nodes | default(discovered_nodes) }}"
+
+    - name: Resolve output_dir
+      ansible.builtin.set_fact:
+        effective_output_dir: "{{ output_dir | default(playbook_dir.split('/toolbox')[0] ~ '/captures/doccv-' ~ db_name ~ '-' ~ lookup('pipe', 'date +%Y%m%d-%H%M%S')) }}"
+
+    - name: Build (node, id) cross product
+      ansible.builtin.set_fact:
+        pairs: "{{ effective_nodes | product(ids) | map('list') | list }}"
+
+    - name: Ensure output_dir exists
+      ansible.builtin.file:
+        path: "{{ effective_output_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Fetch each doc on each node
+      ansible.builtin.uri:
+        url: "https://{{ item.0 }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/docs?id={{ item.1 | urlencode }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        status_code: [200, 404, 500, 503]
+      register: docs
+      loop: "{{ pairs }}"
+      loop_control:
+        label: "{{ item.0 }}::{{ item.1 }}"
+
+    - name: Write per-(node, id) CV file
+      ansible.builtin.copy:
+        dest: "{{ effective_output_dir }}/{{ r.item.0 }}__{{ r.item.1 | regex_replace('[^A-Za-z0-9._-]', '_') }}.cv"
+        content: "{{ (r.json.Results[0]['@metadata']['@change-vector'] | default('<NOT_FOUND status=' ~ r.status ~ '>')) }}\n"
+        mode: '0644'
+      loop: "{{ docs.results }}"
+      loop_control:
+        loop_var: r
+        label: "{{ r.item.0 }}::{{ r.item.1 }}"
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg: >-
+          Wrote {{ pairs | length }} file(s) to {{ effective_output_dir }}/
+          ({{ effective_nodes | length }} nodes x {{ ids | length }} ids, db={{ db_name }})

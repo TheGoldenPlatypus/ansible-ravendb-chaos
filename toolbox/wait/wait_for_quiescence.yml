@@ -1,0 +1,105 @@
+##################################################################################################
+# toolbox/wait/wait_for_quiescence.yml
+#
+# Waits until replication is fully caught up across a set of nodes for a given DB.  "Caught up"
+# is defined directly: every node's `DatabaseChangeVector` (from /stats) is equal after parsing
+# entries and sorting -- byte-order differences in the CV string don't cause false negatives.
+#
+# How it works:
+#   1. First poll classifies the node list -- nodes returning 404/500/503 (DB not present) are
+#      dropped, the rest form the convergence set.
+#   2. A bounded outer loop (size = timeout / poll_interval) re-includes a small tasks file.
+#      Each iteration: poll the convergence set, compute "are all CVs equal?", flip a `quiescent`
+#      fact if true, sleep poll_interval if not.  All iterations after convergence skip via `when`.
+#   3. Final assert fails if quiescent never became true within the budget.
+#
+# INPUTS:
+#   db_name          REQUIRED.  Database name.
+#   nodes            OPTIONAL.  JSON list of node names.  Default = auto-discovered lab nodes.
+#   timeout          OPTIONAL.  Max wall-clock seconds to wait.  Default 180.
+#   poll_interval    OPTIONAL.  Seconds between polls.  Default 2.
+#
+# RUN EXAMPLES:
+#   ansible-playbook toolbox/wait/wait_for_quiescence.yml -e db_name=Tenants
+#   ansible-playbook toolbox/wait/wait_for_quiescence.yml -e db_name=Hub_DB -e timeout=300 -e '{"nodes":["1a","1b","1c"]}'
+##################################################################################################
+
+- name: Wait until every node's DatabaseChangeVector matches
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - db_name is defined
+        fail_msg: "Required: -e db_name=<db>"
+
+    - name: Resolve target_mode
+      ansible.builtin.set_fact:
+        effective_mode: "{{ target_mode | default('docker') }}"
+
+    - name: Auto-discover docker nodes
+      block:
+        - community.docker.docker_network_info:
+            name: "{{ docker_network_name }}"
+          register: net
+        - ansible.builtin.set_fact:
+            discovered_nodes: "{{ net.network.Containers.values() | map(attribute='Name') | list }}"
+      when: effective_mode == 'docker'
+
+    - name: Auto-discover ssh nodes
+      ansible.builtin.set_fact:
+        discovered_nodes: "{{ groups['ravendb_nodes'] | default([]) | list }}"
+      when: effective_mode == 'ssh'
+
+    - name: Resolve effective node list + params + initial state
+      ansible.builtin.set_fact:
+        effective_nodes: "{{ nodes | default(discovered_nodes) }}"
+        eff_timeout: "{{ (timeout | default(180)) | int }}"
+        eff_poll: "{{ (poll_interval | default(2)) | int }}"
+        quiescent: false
+        last_cvs: []
+
+    - name: Compute max attempts
+      ansible.builtin.set_fact:
+        max_attempts: "{{ ((eff_timeout | int) / (eff_poll | int)) | int }}"
+
+    - name: Classify nodes -- which ones actually have the DB
+      ansible.builtin.uri:
+        url: "https://{{ item }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/stats"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        status_code: [200, 404, 500, 503]
+      register: classify
+      loop: "{{ effective_nodes }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Compute convergence_set + skipped
+      ansible.builtin.set_fact:
+        convergence_set: "{{ classify.results | selectattr('status', '==', 200) | map(attribute='item') | list }}"
+        skipped_nodes: "{{ classify.results | rejectattr('status', '==', 200) | map(attribute='item') | list }}"
+
+    - name: Note any skipped nodes
+      ansible.builtin.debug:
+        msg: "SKIPPED (DB not present / unreachable): {{ skipped_nodes }}"
+      when: skipped_nodes | length > 0
+
+    - name: Fail if no node has the DB
+      ansible.builtin.assert:
+        that:
+          - convergence_set | length > 0
+        fail_msg: "No probed node has database '{{ db_name }}' -- nothing to wait on"
+
+    - name: Poll loop -- include a single-attempt tasks file up to max_attempts times
+      ansible.builtin.include_tasks: _wait_for_quiescence_attempt.yml
+      loop: "{{ range(max_attempts | int) | list }}"
+      loop_control:
+        loop_var: attempt_idx
+        label: "attempt {{ attempt_idx + 1 }}/{{ max_attempts }}"
+
+    - name: Timeout verdict (only reached if convergence never fired meta:end_play)
+      ansible.builtin.fail:
+        msg: "TIMEOUT after {{ max_attempts }} attempts ({{ eff_timeout }}s) -- CVs never converged"

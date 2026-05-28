@@ -1,0 +1,99 @@
+##################################################################################################
+# toolbox/writes/write_timeseries.yml
+#
+# Appends N timeseries entries to a doc, OR deletes a range from an existing timeseries.
+# Append mode (default): values are random ints in [50, 100], one entry per `interval_seconds`
+# starting at `start_timestamp` (default: 1 hour ago).
+# Delete-range mode: pass delete_from and delete_to to switch off appending and call deleteRange.
+#
+# INPUTS (append mode):
+#   target              REQUIRED.  Container/host name.
+#   db_name             REQUIRED.  Database name.
+#   doc_id              REQUIRED.  The doc the timeseries lives on.
+#   ts_name             OPTIONAL.  Default "Heartrate".
+#   count               OPTIONAL.  Default 100.  How many entries to append.
+#   start_timestamp     OPTIONAL.  Default now - 1h, ISO-8601 UTC.
+#   interval_seconds    OPTIONAL.  Default 6.  Spacing between entries.
+#
+# INPUTS (delete-range mode -- both required to switch modes):
+#   delete_from         REQUIRED for delete mode.  ISO-8601 UTC.
+#   delete_to           REQUIRED for delete mode.  ISO-8601 UTC.
+#
+# RUN EXAMPLES:
+#   # append 100 Heartrate entries
+#   ansible-playbook toolbox/writes/write_timeseries.yml \
+#       -e target=1a -e db_name=Tenants -e doc_id=users/1 -e count=100
+#
+#   # append 50 entries with custom name + start
+#   ansible-playbook toolbox/writes/write_timeseries.yml \
+#       -e target=2a -e db_name=Tenants -e doc_id=users/1 -e ts_name=Heartrate \
+#       -e count=50 -e start_timestamp=2026-05-28T12:00:00.000Z -e interval_seconds=12
+#
+#   # delete a 5-min range
+#   ansible-playbook toolbox/writes/write_timeseries.yml \
+#       -e target=2a -e db_name=Tenants -e doc_id=users/1 -e ts_name=Heartrate \
+#       -e delete_from=2026-05-28T12:55:00.000Z -e delete_to=2026-05-28T13:00:00.000Z
+##################################################################################################
+
+- name: Append timeseries entries or delete a range
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - target is defined
+          - db_name is defined
+          - doc_id is defined
+        fail_msg: "Required: -e target=<node> -e db_name=<db> -e doc_id=<id>"
+
+    - name: Resolve mode + defaults
+      ansible.builtin.set_fact:
+        delete_mode: "{{ (delete_from is defined) and (delete_to is defined) }}"
+        eff_ts_name: "{{ ts_name | default('Heartrate') }}"
+        eff_count: "{{ (count | default(100)) | int }}"
+        eff_interval: "{{ (interval_seconds | default(6)) | int }}"
+        eff_start: "{{ start_timestamp | default(lookup('pipe', 'date -u -d \"1 hour ago\" +%Y-%m-%dT%H:%M:%S.000Z')) }}"
+
+    - name: APPEND {{ eff_count }} entries to {{ doc_id }}/{{ eff_ts_name }}
+      ansible.builtin.uri:
+        url: "https://{{ target }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/timeseries?docId={{ doc_id | urlencode }}"
+        method: POST
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        body_format: json
+        body:
+          Name: "{{ eff_ts_name }}"
+          Appends:
+            - Timestamp: "{{ lookup('pipe', 'date -u -d \"' ~ eff_start ~ ' + ' ~ (n | int * eff_interval | int) ~ ' seconds\" +%Y-%m-%dT%H:%M:%S.000Z') }}"
+              Values: [72.0]
+              Tag: null
+        status_code: [200, 201, 204]
+      loop: "{{ range(eff_count | int) | list if not delete_mode else [] }}"
+      loop_control:
+        loop_var: n
+        label: "{{ eff_ts_name }}[{{ n }}]"
+      when: not delete_mode
+
+    - name: DELETE-RANGE on {{ doc_id }}/{{ eff_ts_name }}
+      ansible.builtin.uri:
+        url: "https://{{ target }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/timeseries?docId={{ doc_id | urlencode }}"
+        method: POST
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        body_format: json
+        body:
+          Name: "{{ eff_ts_name }}"
+          Deletes:
+            - From: "{{ delete_from }}"
+              To: "{{ delete_to }}"
+        status_code: [200, 201, 204]
+      when: delete_mode
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'DELETED range [' ~ delete_from ~ ' .. ' ~ delete_to ~ ']' if delete_mode else 'APPENDED ' ~ eff_count ~ ' entries starting at ' ~ eff_start ~ ' (every ' ~ eff_interval ~ 's)' }}
+          on {{ target }}/{{ db_name }}/{{ doc_id }}/{{ eff_ts_name }}

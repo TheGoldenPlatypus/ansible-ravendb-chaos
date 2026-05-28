@@ -1,0 +1,125 @@
+##################################################################################################
+# toolbox/network/heal_all.yml
+#
+# Flushes every chaos iptables rule from every node in one shot.  Unlike heal_node.yml (which
+# only removes rules for cluster-peers discovered via /cluster/topology), heal_all sweeps the
+# INPUT and OUTPUT chains for every REJECT or DROP rule and deletes them all -- which is what
+# you actually want after a partition_set chaos run, because those rules can span cluster
+# boundaries that no single node's topology knows about.
+#
+#
+# INPUTS:
+#   targets  OPTIONAL.  JSON list overriding auto-discovery (e.g. '["1a","2b"]').
+#
+# RUN EXAMPLES:
+#   # docker -- heal every container on the lab network
+#   ansible-playbook toolbox/network/heal_all.yml
+#
+#   # ssh -- heal every inventory host
+#   ansible-playbook -i inventory/ssh_hosts.yml toolbox/network/heal_all.yml -K
+#
+#   # surgical override -- heal only these two
+#   ansible-playbook toolbox/network/heal_all.yml -e '{"targets":["1a","1b"]}'
+##################################################################################################
+
+- name: Flush every chaos iptables rule from every node
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Resolve target_mode (default docker)
+      ansible.builtin.set_fact:
+        effective_mode: "{{ target_mode | default('docker') }}"
+
+    - name: Auto-discover docker containers on the lab network
+      block:
+        - name: Inspect docker network
+          community.docker.docker_network_info:
+            name: "{{ docker_network_name }}"
+          register: net
+
+        - name: Set discovered_targets from docker network
+          ansible.builtin.set_fact:
+            discovered_targets: "{{ net.network.Containers.values() | map(attribute='Name') | list }}"
+      when: effective_mode == 'docker'
+
+    - name: Auto-discover ssh hosts from inventory
+      ansible.builtin.set_fact:
+        discovered_targets: "{{ groups['ravendb_nodes'] | default([]) | list }}"
+      when: effective_mode == 'ssh'
+
+    - name: Use override targets if provided, else auto-discovered
+      ansible.builtin.set_fact:
+        effective_targets: "{{ targets | default(discovered_targets) }}"
+
+    - name: Sanity check at least one target
+      ansible.builtin.assert:
+        that:
+          - effective_targets | length > 0
+        fail_msg: "No targets to heal (auto-discovery empty and no -e targets=... override)"
+
+    - name: Print the plan
+      ansible.builtin.debug:
+        msg: "Will flush chaos rules on {{ effective_targets | length }} node(s) (mode={{ effective_mode }}): {{ effective_targets | join(', ') }}"
+
+    - name: Flush chaos rules (docker mode)
+      community.docker.docker_container_exec:
+        container: "{{ item }}"
+        command: >-
+          bash -lc "for chain in INPUT OUTPUT; do
+                      iptables -S $chain | grep -E -- '-j (REJECT|DROP)' |
+                      sed 's/^-A/-D/' |
+                      while read -r rule; do iptables $rule; done
+                    done; true"
+      loop: "{{ effective_targets }}"
+      loop_control:
+        label: "flush {{ item }}"
+      when: effective_mode == 'docker'
+
+    - name: Flush chaos rules (ssh mode)
+      ansible.builtin.shell: |
+        for chain in INPUT OUTPUT; do
+          iptables -S $chain | grep -E -- '-j (REJECT|DROP)' |
+          sed 's/^-A/-D/' |
+          while read -r rule; do iptables $rule; done
+        done
+        true
+      delegate_to: "{{ item }}"
+      become: true
+      loop: "{{ effective_targets }}"
+      loop_control:
+        label: "flush {{ item }}"
+      changed_when: true
+      when: effective_mode == 'ssh'
+
+    - name: Verify zero chaos rules remain (docker mode)
+      community.docker.docker_container_exec:
+        container: "{{ item }}"
+        command: >-
+          bash -lc "( iptables -S INPUT; iptables -S OUTPUT ) | grep -E -- '-j (REJECT|DROP)' | wc -l"
+      register: validate_docker
+      changed_when: false
+      failed_when: validate_docker.stdout | trim | int != 0
+      loop: "{{ effective_targets }}"
+      loop_control:
+        label: "{{ item }} should have 0 chaos rules"
+      when: effective_mode == 'docker'
+
+    - name: Verify zero chaos rules remain (ssh mode)
+      ansible.builtin.shell: "( iptables -S INPUT; iptables -S OUTPUT ) | grep -E -- '-j (REJECT|DROP)' | wc -l"
+      delegate_to: "{{ item }}"
+      become: true
+      register: validate_ssh
+      changed_when: false
+      failed_when: validate_ssh.stdout | trim | int != 0
+      loop: "{{ effective_targets }}"
+      loop_control:
+        label: "{{ item }} should have 0 chaos rules"
+      when: effective_mode == 'ssh'
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: >-
+          HEALED  {{ effective_targets | length }} node(s) (mode={{ effective_mode }}).
+          Every INPUT/OUTPUT REJECT and DROP rule has been removed.
