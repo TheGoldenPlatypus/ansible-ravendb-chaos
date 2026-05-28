@@ -1,6 +1,10 @@
 # ansible-ravendb-chaos
 
-A small ansible harness that spins up N docker containers, installs RavenDB on each, and merges them into clusters of 3 (or whatever you set). Use it to chaos-test cluster behaviour locally - kill a node, partition a network, restart a service, see what happens.
+## A small ansible harness that spins up N docker containers, installs RavenDB on each, and merges them into clusters of 3 (or whatever you set). Use it to chaos-test cluster behaviour locally - kill a node, partition a network, restart a service, see what happens.
+
+<p align="center">
+  <img src="assets/banner2.png" alt="ansible-ravendb-chaos" width="1600">
+</p>
 
 ---
 
