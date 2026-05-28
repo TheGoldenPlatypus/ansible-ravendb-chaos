@@ -1,0 +1,67 @@
+##################################################################################################
+# toolbox/restore_link.yml
+#
+# Removes the REJECT rules previously installed by cut_link.yml between two containers.
+# Symmetric inverse of cut_link.yml.  Safe to run even if the link was never cut --
+# iptables -D on a missing rule will just return non-zero (we tolerate it).
+#
+# INPUTS:
+#   node_a  REQUIRED.  First container.
+#   node_b  REQUIRED.  Second container.
+#
+# RUN EXAMPLE:
+#   ansible-playbook toolbox/restore_link.yml -e node_a=1a -e node_b=1b
+##################################################################################################
+
+- name: Restore the link between two containers
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - node_a is defined
+          - node_b is defined
+          - node_a != node_b
+        fail_msg: "Required: -e node_a=<container> -e node_b=<container> (and node_a != node_b)"
+
+    - name: Inspect docker network
+      community.docker.docker_network_info:
+        name: "{{ docker_network_name }}"
+      register: net
+
+    - name: Build name -> ip map
+      ansible.builtin.set_fact:
+        node_ip_map: "{{ node_ip_map | default({}) | combine({item.Name: item.IPv4Address.split('/')[0]}) }}"
+      loop: "{{ net.network.Containers.values() | list }}"
+
+    - name: Sanity check both containers exist on the network
+      ansible.builtin.assert:
+        that:
+          - node_a in node_ip_map
+          - node_b in node_ip_map
+        fail_msg: "One or both containers not found on {{ docker_network_name }}"
+
+    - name: Ensure iptables is installed in both containers
+      community.docker.docker_container_exec:
+        container: "{{ item }}"
+        command: bash -lc "command -v iptables || (apt-get update && apt-get install -y iptables)"
+      loop: ["{{ node_a }}", "{{ node_b }}"]
+
+    - name: "{{ node_a }} drops REJECT rules for {{ node_b }}"
+      community.docker.docker_container_exec:
+        container: "{{ node_a }}"
+        command: bash -lc "iptables -D INPUT -s {{ node_ip_map[node_b] }} -p tcp -j REJECT --reject-with tcp-reset; iptables -D OUTPUT -d {{ node_ip_map[node_b] }} -p tcp -j REJECT --reject-with tcp-reset"
+      failed_when: false
+
+    - name: "{{ node_b }} drops REJECT rules for {{ node_a }}"
+      community.docker.docker_container_exec:
+        container: "{{ node_b }}"
+        command: bash -lc "iptables -D INPUT -s {{ node_ip_map[node_a] }} -p tcp -j REJECT --reject-with tcp-reset; iptables -D OUTPUT -d {{ node_ip_map[node_a] }} -p tcp -j REJECT --reject-with tcp-reset"
+      failed_when: false
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: "RESTORED  {{ node_a }} <-> {{ node_b }}"

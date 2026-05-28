@@ -1,0 +1,80 @@
+##################################################################################################
+# toolbox/restart_ravendb.yml
+#
+# Restarts the RavenDB systemd service on a target node and waits for the HTTPS endpoint
+# to come back.  Useful for testing what happens to replication when one node bounces.
+#
+# Works in both target_modes:
+#   * docker -- systemctl runs inside the container via docker_container_exec from localhost.
+#   * ssh    -- systemctl runs natively on the host (the play targets `target` directly).
+#
+# INPUTS:
+#   target        REQUIRED.  Node name (e.g. 1a).
+#   timeout_secs  OPTIONAL.  Default 120.  Wait budget for the node to come back up.
+#
+# RUN EXAMPLES:
+#   # docker
+#   ansible-playbook toolbox/restart_ravendb.yml -e target=1b
+#
+#   # ssh
+#   ansible-playbook -i inventory/ssh_hosts.yml toolbox/restart_ravendb.yml -e target=1b
+##################################################################################################
+
+# ===== PLAY 1 -- validate inputs + restart in docker mode (no-op in ssh mode) ===================
+
+- name: Restart RavenDB on a target node (docker path)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - target is defined
+        fail_msg: "Required: -e target=<node>"
+
+    - name: (docker) systemctl restart ravendb inside {{ target }}
+      community.docker.docker_container_exec:
+        container: "{{ target }}"
+        command: systemctl restart ravendb
+      when: target_mode | default('docker') == 'docker'
+
+# ===== PLAY 2 -- ssh mode: restart natively on the target ========================================
+
+- name: (ssh) Restart RavenDB on {{ target }}
+  hosts: "{{ target }}"
+  gather_facts: false
+  become: true
+
+  tasks:
+    - name: Skip in docker mode (this play is ssh-only)
+      ansible.builtin.meta: end_host
+      when: target_mode | default('docker') != 'ssh'
+
+    - name: systemctl restart ravendb
+      ansible.builtin.shell: systemctl restart ravendb
+      changed_when: false
+
+# ===== PLAY 3 -- wait for HTTPS to come back =====================================================
+
+- name: Wait for {{ target }} HTTPS
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Wait for {{ target }} HTTPS to respond (accept 200/401/403)
+      ansible.builtin.uri:
+        url: "https://{{ target }}.{{ ravendb_domain }}:443/build/version"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        status_code: [200, 401, 403]
+      register: ready
+      retries: "{{ (timeout_secs | default(120) | int // 2) }}"
+      delay: 2
+      until: ready.status in [200, 401, 403]
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: "RESTARTED  {{ target }}  (up again on https://{{ target }}.{{ ravendb_domain }}:443)"

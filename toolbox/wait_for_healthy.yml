@@ -1,0 +1,64 @@
+##################################################################################################
+# toolbox/wait_for_healthy.yml
+#
+# Waits for a cluster to report healthy via the ravendb.ravendb.healthcheck module.
+# Use this as the post-chaos verification step in any scenario: after the chaos action
+# is undone, call this to confirm the cluster genuinely recovered (not just "iptables -D
+# returned 0").
+#
+# Available checks (pass as a comma-separated list via -e checks=...):
+#   node_alive            -- the entry-point node responds
+#   cluster_connectivity  -- cluster members can reach each other
+#
+# INPUTS:
+#   cluster_leader     REQUIRED.  Container name of a healthy node (e.g. 1a).
+#   checks             REQUIRED.  Comma-separated check names.
+#   max_wait           OPTIONAL.  Default 60.  Total wait budget per call.
+#   db_retry_interval  OPTIONAL.  Default 3.  Seconds between db-level retries.
+#
+# RUN EXAMPLES:
+#   # quick recovery check after restoring a link
+#   ansible-playbook toolbox/wait_for_healthy.yml \
+#       -e cluster_leader=1a -e checks=node_alive,cluster_connectivity
+#
+#   # full cluster verification (use at the end of a chaos scenario)
+#   ansible-playbook toolbox/wait_for_healthy.yml \
+#       -e cluster_leader=1a \
+#       -e checks=node_alive,cluster_connectivity
+##################################################################################################
+
+- name: Ensure ravendb python client is available on the controller
+  hosts: localhost
+  connection: local
+  gather_facts: true
+
+  roles:
+    - role: ravendb.ravendb.ravendb_python_client_prerequisites
+
+
+- name: Wait for cluster health gates to pass
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - cluster_leader is defined
+          - checks is defined
+        fail_msg: "Required: -e cluster_leader=<node> -e checks=<comma-separated list>"
+
+    - name: Run healthcheck
+      ravendb.ravendb.healthcheck:
+        url: "https://{{ cluster_leader }}.{{ ravendb_domain }}:443"
+        certificate_path: "{{ cert_dir }}/client.pem"
+        ca_cert_path: "{{ cert_ca_crt }}"
+        checks: "{{ checks.split(',') | map('trim') | list }}"
+        max_time_to_wait: "{{ max_wait | default(60) | int }}"
+        db_retry_interval_seconds: "{{ db_retry_interval | default(3) | int }}"
+      register: health
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: "HEALTHY  {{ cluster_leader }}  checks=[{{ checks }}]  ->  {{ health.msg | default('OK') }}"

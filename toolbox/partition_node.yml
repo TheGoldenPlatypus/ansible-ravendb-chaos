@@ -1,0 +1,78 @@
+##################################################################################################
+# toolbox/partition_node.yml
+#
+# Isolates one container from every other node in its cluster by cutting all links to its
+# peers in one go.  Peers are discovered by reading the target's /cluster/topology.
+#
+# INPUTS:
+#   target  REQUIRED.  Container name to partition.  Must currently be in a cluster.
+#
+# RUN EXAMPLE:
+#   ansible-playbook toolbox/partition_node.yml -e target=1c
+##################################################################################################
+
+- name: Partition a node from the rest of its cluster
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - target is defined
+        fail_msg: "Required: -e target=<container>"
+
+    - name: Inspect docker network
+      community.docker.docker_network_info:
+        name: "{{ docker_network_name }}"
+      register: net
+
+    - name: Build name -> ip map
+      ansible.builtin.set_fact:
+        node_ip_map: "{{ node_ip_map | default({}) | combine({item.Name: item.IPv4Address.split('/')[0]}) }}"
+      loop: "{{ net.network.Containers.values() | list }}"
+
+    - name: Get target's cluster topology
+      ansible.builtin.uri:
+        url: "https://{{ target }}.{{ ravendb_domain }}:443/cluster/topology"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+      register: topology
+
+    - name: Extract peer container names (everyone except target)
+      ansible.builtin.set_fact:
+        peer_names: >-
+          {{ ((topology.json.Topology.Members.values() | list)
+              + (topology.json.Topology.Promotables.values() | default([]) | list))
+              | map('regex_replace', '^https?://([^./:]+).*$', '\1')
+              | reject('equalto', target)
+              | list }}
+
+    - name: Sanity check we found peers
+      ansible.builtin.assert:
+        that:
+          - peer_names | length > 0
+        fail_msg: "No peers found for {{ target }} -- is it in a cluster?"
+
+    - name: Ensure iptables is installed in target and every peer
+      community.docker.docker_container_exec:
+        container: "{{ item }}"
+        command: bash -lc "command -v iptables || (apt-get update && apt-get install -y iptables)"
+      loop: "{{ [target] + peer_names }}"
+
+    - name: "{{ target }} REJECTs traffic to/from each peer"
+      community.docker.docker_container_exec:
+        container: "{{ target }}"
+        command: bash -lc "iptables -A INPUT -s {{ node_ip_map[item] }} -p tcp -j REJECT --reject-with tcp-reset; iptables -A OUTPUT -d {{ node_ip_map[item] }} -p tcp -j REJECT --reject-with tcp-reset"
+      loop: "{{ peer_names }}"
+
+    - name: Each peer REJECTs traffic to/from {{ target }}
+      community.docker.docker_container_exec:
+        container: "{{ item }}"
+        command: bash -lc "iptables -A INPUT -s {{ node_ip_map[target] }} -p tcp -j REJECT --reject-with tcp-reset; iptables -A OUTPUT -d {{ node_ip_map[target] }} -p tcp -j REJECT --reject-with tcp-reset"
+      loop: "{{ peer_names }}"
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: "PARTITIONED  {{ target }}  from peers [{{ peer_names | join(', ') }}]"

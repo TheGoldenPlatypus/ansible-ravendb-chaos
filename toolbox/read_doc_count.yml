@@ -1,0 +1,37 @@
+##################################################################################################
+# toolbox/read_doc_count.yml
+#
+# Reads CountOfDocuments from /stats on a target node and prints it.  Quick smoke check
+# for "did the docs land?" without opening Studio.
+#
+# INPUTS:
+#   target   REQUIRED.  Container name (e.g. 1a).
+#   db_name  REQUIRED.  Database name.
+#
+# RUN EXAMPLE:
+#   ansible-playbook toolbox/read_doc_count.yml -e target=1b -e db_name=Tenants
+##################################################################################################
+
+- name: Read doc count on a target node
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - target is defined
+          - db_name is defined
+        fail_msg: "Required: -e target=<node> -e db_name=<db>"
+
+    - name: GET /stats
+      ansible.builtin.uri:
+        url: "https://{{ target }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/stats"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+      register: stats
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: "{{ target }}/{{ db_name }}  ->  {{ stats.json.CountOfDocuments }} docs"

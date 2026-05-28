@@ -1,0 +1,78 @@
+##################################################################################################
+# toolbox/heal_node_ssh.yml
+#
+# SSH-mode variant of heal_node.yml.  Symmetric inverse of partition_node_ssh.yml.  Removes
+# every DROP rule between the target host and its cluster peers.  Peers are discovered from the
+# target's own /cluster/topology when reachable; falls back to "all inventory hosts whose name
+# shares the target's cluster_id prefix" if the target itself is unreachable.
+#
+# INPUTS:
+#   target  REQUIRED.  Host to heal (must be in inventory's ravendb_nodes group).
+#
+# RUN EXAMPLE:
+#   ansible-playbook -i inventory/ssh_hosts.yml toolbox/heal_node_ssh.yml -e target=1c
+##################################################################################################
+
+- name: Heal a previously-partitioned SSH host
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - target is defined
+          - target in groups['ravendb_nodes'] | default([])
+        fail_msg: "Required: -e target=<host> (and it must be in inventory's ravendb_nodes group)"
+
+    - name: Build name -> ip map from inventory's ansible_host
+      ansible.builtin.set_fact:
+        node_ip_map: "{{ dict(groups['ravendb_nodes'] | zip(groups['ravendb_nodes'] | map('extract', hostvars, 'ansible_host'))) }}"
+
+    - name: Get target's cluster topology (best-effort -- target may be unreachable)
+      ansible.builtin.uri:
+        url: "https://{{ target }}.{{ ravendb_domain }}:443/cluster/topology"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+      register: topology
+      failed_when: false
+
+    - name: Extract peer names from topology
+      ansible.builtin.set_fact:
+        peer_names: >-
+          {{ ((topology.json.Topology.Members.values() | default([]) | list)
+              + (topology.json.Topology.Promotables.values() | default([]) | list))
+              | map('regex_replace', '^https?://([^./:]+).*$', '\1')
+              | reject('equalto', target)
+              | list }}
+      when: topology.status | default(0) == 200
+
+    - name: Fallback -- derive peers from same cluster_id prefix in inventory
+      ansible.builtin.set_fact:
+        peer_names: "{{ groups['ravendb_nodes'] | select('match', '^' ~ target[:-1] ~ '[a-z]$') | reject('equalto', target) | list }}"
+      when: peer_names is not defined
+
+    - name: "{{ target }} removes DROP rules for each peer"
+      ansible.builtin.shell: |
+        iptables -D INPUT  -s {{ node_ip_map[item] }} -p tcp -j DROP
+        iptables -D OUTPUT -d {{ node_ip_map[item] }} -p tcp -j DROP
+      delegate_to: "{{ target }}"
+      become: true
+      loop: "{{ peer_names }}"
+      failed_when: false
+      changed_when: true
+
+    - name: Each peer removes DROP rules for {{ target }}
+      ansible.builtin.shell: |
+        iptables -D INPUT  -s {{ node_ip_map[target] }} -p tcp -j DROP
+        iptables -D OUTPUT -d {{ node_ip_map[target] }} -p tcp -j DROP
+      delegate_to: "{{ item }}"
+      become: true
+      loop: "{{ peer_names }}"
+      failed_when: false
+      changed_when: true
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: "HEALED  {{ target }}  with peers [{{ peer_names | default([]) | join(', ') }}]"

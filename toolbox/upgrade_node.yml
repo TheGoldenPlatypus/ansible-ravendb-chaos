@@ -1,0 +1,146 @@
+##################################################################################################
+# toolbox/upgrade_node.yml
+#
+# Upgrades (or downgrades) RavenDB on a single node.  Reuses the upstream
+# ravendb.ravendb.ravendb_node role with state=present + a new version -- the role
+# detects the existing install and swaps binaries in place.  Use this as the building
+# block for rolling-upgrade scenarios.
+#
+# Works in both target_modes:
+#   * docker -- adds the target to ravendb_nodes with docker-connection, runs the role.
+#   * ssh    -- the target is already in ravendb_nodes (from inventory/ssh_hosts.yml), runs the role.
+#
+# INPUTS:
+#   target        REQUIRED.  Node name (e.g. 1a).
+#   rdb_version   OPTIONAL.  Exact RavenDB version to install (e.g. 7.2.3).
+#                            Either this OR custom_build must be set.
+#   custom_build  OPTIONAL.  Path or URL to a .deb to upgrade to.
+#                            Requires --skip-tags download.
+#   timeout_secs  OPTIONAL.  Default 120.  Wait budget for the node to come back.
+#
+# RUN EXAMPLES:
+#   # docker -- specific version
+#   ansible-playbook toolbox/upgrade_node.yml -e target=1a -e rdb_version=7.2.3
+#
+#   # docker -- custom build
+#   ansible-playbook toolbox/upgrade_node.yml -e target=1a -e custom_build=/tmp/raven-x.deb --skip-tags download
+#
+#   # ssh
+#   ansible-playbook -i inventory/ssh_hosts.yml toolbox/upgrade_node.yml -e target=1a -e rdb_version=7.2.3
+##################################################################################################
+
+
+- name: Register target for docker mode (no-op in ssh mode)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    _is_ssh: "{{ target_mode | default('docker') == 'ssh' }}"
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - target is defined
+          - (rdb_version is defined) or (custom_build is defined)
+          - not ((rdb_version is defined) and (custom_build is defined))
+        fail_msg: "Required: -e target=<node> and exactly one of -e rdb_version=... or -e custom_build=..."
+
+    - name: (docker) Add target to ravendb_nodes group
+      ansible.builtin.add_host:
+        name: "{{ target }}"
+        groups: ravendb_nodes
+        ansible_connection: community.docker.docker
+        ansible_python_interpreter: /usr/bin/python3
+      changed_when: false
+      when: not _is_ssh
+
+    - name: (ssh) Verify target is in inventory
+      ansible.builtin.assert:
+        that:
+          - target in groups['ravendb_nodes'] | default([])
+        fail_msg: "{{ target }} is not in the inventory's ravendb_nodes group -- check -i inventory/ssh_hosts.yml"
+      when: _is_ssh
+
+
+- name: Pre-stage custom build on target (only when custom_build is provided)
+  hosts: "{{ target }}"
+  gather_facts: false
+
+  tasks:
+    - name: Download remote custom build to /tmp/ravendb.deb
+      ansible.builtin.get_url:
+        url: "{{ custom_build }}"
+        dest: /tmp/ravendb.deb
+        mode: '0644'
+      when:
+        - custom_build is defined
+        - custom_build is match('^https?://')
+
+    - name: Copy local custom build to /tmp/ravendb.deb
+      ansible.builtin.copy:
+        src: "{{ custom_build }}"
+        dest: /tmp/ravendb.deb
+        mode: '0644'
+      when:
+        - custom_build is defined
+        - custom_build is not match('^https?://')
+
+
+- name: Capture "before" version and run the upgrade
+  hosts: "{{ target }}"
+  gather_facts: true
+
+  tasks:
+    - name: Record current RavenDB version (before)
+      ansible.builtin.command: /usr/lib/ravendb/server/Raven.Server --version
+      register: before_version
+      changed_when: false
+
+    - name: Include ravendb_node role (state=present triggers in-place upgrade)
+      ansible.builtin.include_role:
+        name: ravendb.ravendb.ravendb_node
+      vars:
+        ravendb_state: present
+        ravendb_version: "{{ rdb_version | default(omit) }}"
+        ravendb_release_channel: stable
+        # arm64 on aarch64 hosts, x64 elsewhere
+        ravendb_arch: "{{ 'linux-arm64' if ansible_architecture in ['aarch64','arm64'] else 'linux-x64' }}"
+        ravendb_settings_preset: default
+        ravendb_secured_self_signed_enabled: true
+        ravendb_license_file: "{{ cert_license }}"
+        ravendb_certificate_file: "{{ cert_server_pfx }}"
+        ravendb_certificate_password: ""
+        ravendb_ca_certificate_file: "{{ cert_ca_crt }}"
+        ravendb_ca_key_file: "{{ cert_ca_key }}"
+        ravendb_node_tag: "{{ inventory_hostname[-1:] | upper }}"
+        ravendb_self_signed_public_server_url: "https://{{ inventory_hostname }}.{{ ravendb_domain }}:443"
+        ravendb_self_signed_public_server_url_tcp: "tcp://{{ inventory_hostname }}.{{ ravendb_domain }}:38888"
+
+    - name: Record new RavenDB version (after)
+      ansible.builtin.command: /usr/lib/ravendb/server/Raven.Server --version
+      register: after_version
+      changed_when: false
+
+
+- name: Wait for the upgraded node to come back, then print summary
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Wait for {{ target }} HTTPS to respond (accept 200/401/403)
+      ansible.builtin.uri:
+        url: "https://{{ target }}.{{ ravendb_domain }}:443/build/version"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        status_code: [200, 401, 403]
+      register: ready
+      retries: "{{ (timeout_secs | default(120) | int // 2) }}"
+      delay: 2
+      until: ready is succeeded
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: "UPGRADED  {{ target }}  {{ hostvars[target].before_version.stdout }}  ->  {{ hostvars[target].after_version.stdout }}"

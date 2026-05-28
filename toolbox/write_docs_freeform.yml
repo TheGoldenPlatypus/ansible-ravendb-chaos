@@ -1,0 +1,56 @@
+##################################################################################################
+# toolbox/write_docs_freeform.yml
+#
+# Writes N "freeform" docs to a target node:
+#   - random GUID id (no slash, no collection prefix)
+#   - "@collection": null in metadata
+#
+# Use this for chaos scenarios that need writes with no predictable shape -- the burst-PUT
+# pattern in toolbox/write_docs.yml with predictable ids can fail to trigger certain
+# replication-race bugs that DO trigger when ids don't follow a known prefix.
+#
+# INPUTS:
+#   target   REQUIRED.  Container name to write to (e.g. 2a).
+#   db_name  REQUIRED.  Database name.
+#   count    REQUIRED.  Integer.  How many docs to write.  Typically small (1-3).
+#
+# RUN EXAMPLE:
+#   ansible-playbook toolbox/write_docs_freeform.yml -K \
+#       -e target=2a -e db_name=Tenants -e count=1
+##################################################################################################
+
+- name: Write N freeform docs (random GUID ids, null collection)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - target is defined
+          - db_name is defined
+          - count is defined
+          - (count | int) > 0
+        fail_msg: "Required: -e target=<node> -e db_name=<db> -e count=<positive int>"
+
+    - name: PUT {{ count }} freeform docs to {{ target }}/{{ db_name }}
+      ansible.builtin.uri:
+        url: "https://{{ target }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/docs?id={{ 99999999999999 | random | to_uuid }}"
+        method: PUT
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        body_format: json
+        body:
+          Name: "freeform-doc-{{ n }}-on-{{ target }}"
+          "@metadata":
+            "@collection": null
+        status_code: [200, 201]
+      loop: "{{ range(count | int) | list }}"
+      loop_control:
+        loop_var: n
+        label: "freeform doc #{{ n }} on {{ target }}"
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: "WROTE  {{ count }} freeform docs to {{ target }}/{{ db_name }}"

@@ -1,0 +1,65 @@
+##################################################################################################
+# toolbox/cut_link.yml
+#
+# REJECTs all TCP traffic between two containers in both directions.  Uses
+# `-p tcp -j REJECT --reject-with tcp-reset` so existing connections are torn down
+# immediately (DROP would silently black-hole packets and existing TCP would survive).
+#
+# INPUTS:
+#   node_a  REQUIRED.  First container.
+#   node_b  REQUIRED.  Second container.
+#
+# RUN EXAMPLE:
+#   ansible-playbook toolbox/cut_link.yml -e node_a=1a -e node_b=1b
+##################################################################################################
+
+- name: Cut the link between two containers
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - node_a is defined
+          - node_b is defined
+          - node_a != node_b
+        fail_msg: "Required: -e node_a=<container> -e node_b=<container> (and node_a != node_b)"
+
+    - name: Inspect docker network
+      community.docker.docker_network_info:
+        name: "{{ docker_network_name }}"
+      register: net
+
+    - name: Build name -> ip map
+      ansible.builtin.set_fact:
+        node_ip_map: "{{ node_ip_map | default({}) | combine({item.Name: item.IPv4Address.split('/')[0]}) }}"
+      loop: "{{ net.network.Containers.values() | list }}"
+
+    - name: Sanity check both containers exist on the network
+      ansible.builtin.assert:
+        that:
+          - node_a in node_ip_map
+          - node_b in node_ip_map
+        fail_msg: "One or both containers not found on {{ docker_network_name }}"
+
+    - name: Ensure iptables is installed in both containers
+      community.docker.docker_container_exec:
+        container: "{{ item }}"
+        command: bash -lc "command -v iptables || (apt-get update && apt-get install -y iptables)"
+      loop: ["{{ node_a }}", "{{ node_b }}"]
+
+    - name: "{{ node_a }} REJECTs traffic to/from {{ node_b }}"
+      community.docker.docker_container_exec:
+        container: "{{ node_a }}"
+        command: bash -lc "iptables -A INPUT -s {{ node_ip_map[node_b] }} -p tcp -j REJECT --reject-with tcp-reset; iptables -A OUTPUT -d {{ node_ip_map[node_b] }} -p tcp -j REJECT --reject-with tcp-reset"
+
+    - name: "{{ node_b }} REJECTs traffic to/from {{ node_a }}"
+      community.docker.docker_container_exec:
+        container: "{{ node_b }}"
+        command: bash -lc "iptables -A INPUT -s {{ node_ip_map[node_a] }} -p tcp -j REJECT --reject-with tcp-reset; iptables -A OUTPUT -d {{ node_ip_map[node_a] }} -p tcp -j REJECT --reject-with tcp-reset"
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: "CUT  {{ node_a }} <-> {{ node_b }}  (TCP REJECT both directions)"

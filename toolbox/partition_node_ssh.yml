@@ -1,0 +1,75 @@
+##################################################################################################
+# toolbox/partition_node_ssh.yml
+#
+# SSH-mode variant of partition_node.yml.  Isolates one host from every other node in its
+# cluster by cutting all links to its peers in one go.  Peers are discovered from the target's
+# /cluster/topology.  Uses DROP (silent), not REJECT -- see cut_link_ssh.yml header for the
+# reason.
+#
+# INPUTS:
+#   target  REQUIRED.  Host to partition (must be in inventory's ravendb_nodes group).
+#
+# RUN EXAMPLE:
+#   ansible-playbook -i inventory/ssh_hosts.yml toolbox/partition_node_ssh.yml -e target=1c
+##################################################################################################
+
+- name: Partition an SSH host from the rest of its cluster
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - target is defined
+          - target in groups['ravendb_nodes'] | default([])
+        fail_msg: "Required: -e target=<host> (and it must be in inventory's ravendb_nodes group)"
+
+    - name: Build name -> ip map from inventory's ansible_host
+      ansible.builtin.set_fact:
+        node_ip_map: "{{ dict(groups['ravendb_nodes'] | zip(groups['ravendb_nodes'] | map('extract', hostvars, 'ansible_host'))) }}"
+
+    - name: Get target's cluster topology
+      ansible.builtin.uri:
+        url: "https://{{ target }}.{{ ravendb_domain }}:443/cluster/topology"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+      register: topology
+
+    - name: Extract peer names (everyone in topology except target)
+      ansible.builtin.set_fact:
+        peer_names: >-
+          {{ ((topology.json.Topology.Members.values() | list)
+              + (topology.json.Topology.Promotables.values() | default([]) | list))
+              | map('regex_replace', '^https?://([^./:]+).*$', '\1')
+              | reject('equalto', target)
+              | list }}
+
+    - name: Sanity check we found peers
+      ansible.builtin.assert:
+        that:
+          - peer_names | length > 0
+        fail_msg: "No peers found for {{ target }} -- is it in a cluster?"
+
+    - name: "{{ target }} DROPs all TCP to/from each peer"
+      ansible.builtin.shell: |
+        iptables -A INPUT  -s {{ node_ip_map[item] }} -p tcp -j DROP
+        iptables -A OUTPUT -d {{ node_ip_map[item] }} -p tcp -j DROP
+      delegate_to: "{{ target }}"
+      become: true
+      loop: "{{ peer_names }}"
+      changed_when: true
+
+    - name: Each peer DROPs all TCP to/from {{ target }}
+      ansible.builtin.shell: |
+        iptables -A INPUT  -s {{ node_ip_map[target] }} -p tcp -j DROP
+        iptables -A OUTPUT -d {{ node_ip_map[target] }} -p tcp -j DROP
+      delegate_to: "{{ item }}"
+      become: true
+      loop: "{{ peer_names }}"
+      changed_when: true
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: "PARTITIONED  {{ target }}  from peers [{{ peer_names | join(', ') }}]"

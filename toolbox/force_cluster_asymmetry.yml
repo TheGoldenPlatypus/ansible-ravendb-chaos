@@ -1,0 +1,86 @@
+##################################################################################################
+# toolbox/force_cluster_asymmetry.yml
+#
+# Forces a cluster into an ASYMMETRIC version state by upgrading specific nodes to specific
+# RavenDB versions (or custom builds), per a user-supplied version_map.  Useful for testing
+# backward-compat scenarios during a rolling upgrade -- a real fix often has to keep
+# replication functional while some nodes are on the new build and others are still on the
+# old build, since customers can't upgrade every node in lockstep.
+#
+# Implementation note: this is a thin wrapper that shells out to toolbox/upgrade_node.yml
+# once per entry in version_map.  Each entry's value is interpreted as:
+#   * a URL or local .deb path -> passed as -e custom_build=... --skip-tags download
+#   * anything else            -> passed as -e rdb_version=...
+#
+# The parent's -K prompt is forwarded to child invocations via ANSIBLE_BECOME_PASS.
+#
+# INPUTS:
+#   version_map  REQUIRED.  Dict mapping container names to target versions or build paths.
+#                           Pass as JSON on the CLI.
+#
+# RUN EXAMPLES:
+#   # asymmetric hub: 1b on 7.2.3, 1c on a dev .deb, 1a left untouched
+#   ansible-playbook toolbox/force_cluster_asymmetry.yml -K \
+#       -e '{"version_map":{"1b":"7.2.3","1c":"/tmp/raven-feature-branch.deb"}}'
+#
+#   # asymmetric across clusters: hub on new version, sink left on old (cross-version repl test)
+#   ansible-playbook toolbox/force_cluster_asymmetry.yml -K \
+#       -e '{"version_map":{"1a":"7.2.3","1b":"7.2.3","1c":"7.2.3"}}'
+#
+#   # symmetric upgrade of the whole hub cluster (degenerate case -- all entries same version)
+#   ansible-playbook toolbox/force_cluster_asymmetry.yml -K \
+#       -e '{"version_map":{"1a":"/tmp/raven-x.deb","1b":"/tmp/raven-x.deb","1c":"/tmp/raven-x.deb"}}'
+##################################################################################################
+
+- name: Force a cluster into the requested asymmetric version state
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - version_map is defined
+          - version_map | type_debug == 'dict'
+          - version_map | length > 0
+        fail_msg: >-
+          Required: -e '{"version_map":{"<container>":"<version-or-deb-path>", ...}}'
+
+    - name: Print the plan
+      ansible.builtin.debug:
+        msg: "Will upgrade {{ item.key }} -> {{ item.value }}"
+      loop: "{{ version_map | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: Run toolbox/upgrade_node.yml for each entry
+      ansible.builtin.command:
+        cmd: >-
+          ansible-playbook toolbox/upgrade_node.yml
+          -e target={{ item.key }}
+          {% if (item.value is match('^https?://')) or (item.value is search('\.deb$')) %}
+          -e custom_build={{ item.value }}
+          --skip-tags download
+          {% else %}
+          -e rdb_version={{ item.value }}
+          {% endif %}
+        chdir: "{{ playbook_dir }}/.."
+      environment:
+        ANSIBLE_BECOME_PASS: "{{ ansible_become_pass | default('') }}"
+      register: upgrade_runs
+      loop: "{{ version_map | dict2items }}"
+      loop_control:
+        label: "{{ item.key }} -> {{ item.value }}"
+
+    - name: Print each child upgrade's tail-of-stdout
+      ansible.builtin.debug:
+        msg: "{{ r.item.key }} -> {{ r.item.value }}: last line = {{ (r.stdout_lines | default([]))[-1] | default('(no stdout)') }}"
+      loop: "{{ upgrade_runs.results }}"
+      loop_control:
+        loop_var: r
+        label: "{{ r.item.key }}"
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: "ASYMMETRY APPLIED  {{ version_map | length }} node(s) reconciled to the requested versions"

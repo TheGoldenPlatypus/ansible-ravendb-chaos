@@ -1,0 +1,55 @@
+##################################################################################################
+# toolbox/write_docs.yml
+#
+# Writes N small docs to a target node's database.  Each doc id is `<id_prefix>/<n>`,
+# zero-indexed.  Useful for seeding traffic before a chaos action, or for re-running
+# convergence checks.
+#
+# INPUTS:
+#   target     REQUIRED.  Container name to write to (e.g. 1a).
+#   db_name    REQUIRED.  Database name.
+#   count      REQUIRED.  Integer.  How many docs to write.
+#   id_prefix  OPTIONAL.  Default "micro/doc".  Doc ids become <id_prefix>/0..N-1.
+#
+# RUN EXAMPLES:
+#   # write 50 docs with id pattern micro/doc/0 .. micro/doc/49
+#   ansible-playbook toolbox/write_docs.yml \
+#       -e target=1a -e db_name=Tenants -e count=50
+#
+#   # custom id prefix
+#   ansible-playbook toolbox/write_docs.yml \
+#       -e target=1a -e db_name=Tenants -e count=20 -e id_prefix=probe/burst1
+##################################################################################################
+
+- name: Write N docs to a target node
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - target is defined
+          - db_name is defined
+          - count is defined
+          - (count | int) > 0
+        fail_msg: "Required: -e target=<node> -e db_name=<db> -e count=<positive int>"
+
+    - name: PUT {{ count }} docs to {{ target }}/{{ db_name }}
+      ansible.builtin.uri:
+        url: "https://{{ target }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/docs?id={{ id_prefix | default('micro/doc') }}/{{ n }}"
+        method: PUT
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        body_format: json
+        body: { "@metadata": { "@collection": "MicroDocs" } }
+        status_code: [200, 201]
+      loop: "{{ range(count | int) | list }}"
+      loop_control:
+        loop_var: n
+        label: "{{ id_prefix | default('micro/doc') }}/{{ n }}"
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: "WROTE  {{ count }} docs to {{ target }}/{{ db_name }} (prefix: {{ id_prefix | default('micro/doc') }})"

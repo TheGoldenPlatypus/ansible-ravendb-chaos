@@ -1,0 +1,66 @@
+##################################################################################################
+# toolbox/cut_link_ssh.yml
+#
+# SSH-mode variant of cut_link.yml.  DROPs all TCP traffic between two hosts in both directions.
+#
+# Why DROP and not REJECT (the docker variant):
+#   REJECT --reject-with tcp-reset emits TCP RST packets.  In SSH-mode setups on WSL2/Hyper-V,
+#   those RSTs flow through Windows's network stack and wedge its stateful filter -- subsequent
+#   TCP attempts from the controller to the peers get silently dropped.  DROP is silent (no RST),
+#   so Windows doesn't wedge.  The tradeoff is existing TCP connections hang/timeout instead of
+#   dying immediately -- which is actually more realistic for "the peer disappeared" chaos.
+#
+# Verify the cut FROM INSIDE one of the cut peers (not from the controller!):
+#   ssh worker4@<1a> 'curl -k --max-time 3 https://1b.hubsink.test:443/build/version 2>&1'
+#   -> should time out / fail.  Verifying from the controller hits a different path entirely.
+#
+# INPUTS:
+#   node_a  REQUIRED.  First host (must be in inventory's ravendb_nodes group).
+#   node_b  REQUIRED.  Second host.
+#
+# RUN EXAMPLE:
+#   ansible-playbook -i inventory/ssh_hosts.yml toolbox/cut_link_ssh.yml -e node_a=1a -e node_b=1b
+##################################################################################################
+
+- name: Cut the link between two SSH hosts
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - node_a is defined
+          - node_b is defined
+          - node_a != node_b
+          - node_a in groups['ravendb_nodes'] | default([])
+          - node_b in groups['ravendb_nodes'] | default([])
+        fail_msg: "Required: -e node_a=<host> -e node_b=<host>, both in inventory's ravendb_nodes group"
+
+    - name: Build name -> ip map from inventory's ansible_host
+      ansible.builtin.set_fact:
+        node_ip_map: "{{ dict(groups['ravendb_nodes'] | zip(groups['ravendb_nodes'] | map('extract', hostvars, 'ansible_host'))) }}"
+
+    - name: "{{ node_a }} DROPs all TCP to/from {{ node_b }}"
+      ansible.builtin.shell: |
+        iptables -A INPUT  -s {{ node_ip_map[node_b] }} -p tcp -j DROP
+        iptables -A OUTPUT -d {{ node_ip_map[node_b] }} -p tcp -j DROP
+      delegate_to: "{{ node_a }}"
+      become: true
+      changed_when: true
+
+    - name: "{{ node_b }} DROPs all TCP to/from {{ node_a }}"
+      ansible.builtin.shell: |
+        iptables -A INPUT  -s {{ node_ip_map[node_a] }} -p tcp -j DROP
+        iptables -A OUTPUT -d {{ node_ip_map[node_a] }} -p tcp -j DROP
+      delegate_to: "{{ node_b }}"
+      become: true
+      changed_when: true
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: >-
+          CUT  {{ node_a }} <-> {{ node_b }}  (TCP DROP both directions).
+          Verify from inside a peer, e.g.:
+          ssh {{ hostvars[node_a].ansible_user | default('worker') }}@{{ node_ip_map[node_a] }} 'curl -k --max-time 3 https://{{ node_b }}.{{ ravendb_domain }}:443/build/version'

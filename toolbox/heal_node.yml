@@ -1,0 +1,76 @@
+##################################################################################################
+# toolbox/heal_node.yml
+#
+# Symmetric inverse of partition_node.yml.  Removes every REJECT rule between the target
+# and its cluster peers.  Peers are discovered from the target's own /cluster/topology.
+#
+# INPUTS:
+#   target  REQUIRED.  Container name to heal.
+#
+# RUN EXAMPLE:
+#   ansible-playbook toolbox/heal_node.yml -e target=1c
+##################################################################################################
+
+- name: Heal a previously-partitioned node
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - target is defined
+        fail_msg: "Required: -e target=<container>"
+
+    - name: Inspect docker network
+      community.docker.docker_network_info:
+        name: "{{ docker_network_name }}"
+      register: net
+
+    - name: Build name -> ip map
+      ansible.builtin.set_fact:
+        node_ip_map: "{{ node_ip_map | default({}) | combine({item.Name: item.IPv4Address.split('/')[0]}) }}"
+      loop: "{{ net.network.Containers.values() | list }}"
+
+    - name: Get target's cluster topology
+      ansible.builtin.uri:
+        url: "https://{{ target }}.{{ ravendb_domain }}:443/cluster/topology"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+      register: topology
+      failed_when: false
+
+    - name: Extract peer container names
+      ansible.builtin.set_fact:
+        peer_names: >-
+          {{ ((topology.json.Topology.Members.values() | default([]) | list)
+              + (topology.json.Topology.Promotables.values() | default([]) | list))
+              | map('regex_replace', '^https?://([^./:]+).*$', '\1')
+              | reject('equalto', target)
+              | list }}
+      when: topology.status == 200
+
+    - name: Ensure iptables is installed in target and every peer
+      community.docker.docker_container_exec:
+        container: "{{ item }}"
+        command: bash -lc "command -v iptables || (apt-get update && apt-get install -y iptables)"
+      loop: "{{ [target] + peer_names }}"
+
+    - name: "{{ target }} removes REJECT rules for each peer"
+      community.docker.docker_container_exec:
+        container: "{{ target }}"
+        command: bash -lc "iptables -D INPUT -s {{ node_ip_map[item] }} -p tcp -j REJECT --reject-with tcp-reset; iptables -D OUTPUT -d {{ node_ip_map[item] }} -p tcp -j REJECT --reject-with tcp-reset"
+      loop: "{{ peer_names }}"
+      failed_when: false
+
+    - name: Each peer removes REJECT rules for {{ target }}
+      community.docker.docker_container_exec:
+        container: "{{ item }}"
+        command: bash -lc "iptables -D INPUT -s {{ node_ip_map[target] }} -p tcp -j REJECT --reject-with tcp-reset; iptables -D OUTPUT -d {{ node_ip_map[target] }} -p tcp -j REJECT --reject-with tcp-reset"
+      loop: "{{ peer_names }}"
+      failed_when: false
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: "HEALED  {{ target }}  with peers [{{ peer_names | default([]) | join(', ') }}]"

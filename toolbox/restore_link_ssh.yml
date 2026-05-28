@@ -1,0 +1,56 @@
+##################################################################################################
+# toolbox/restore_link_ssh.yml
+#
+# SSH-mode variant of restore_link.yml.  Removes the DROP rules previously installed by
+# cut_link_ssh.yml between two hosts.  Safe to run even if the link was never cut -- iptables -D
+# on a missing rule returns non-zero and we tolerate it.
+#
+# INPUTS:
+#   node_a  REQUIRED.  First host (must be in inventory's ravendb_nodes group).
+#   node_b  REQUIRED.  Second host.
+#
+# RUN EXAMPLE:
+#   ansible-playbook -i inventory/ssh_hosts.yml toolbox/restore_link_ssh.yml -e node_a=1a -e node_b=1b
+##################################################################################################
+
+- name: Restore the link between two SSH hosts
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - node_a is defined
+          - node_b is defined
+          - node_a != node_b
+          - node_a in groups['ravendb_nodes'] | default([])
+          - node_b in groups['ravendb_nodes'] | default([])
+        fail_msg: "Required: -e node_a=<host> -e node_b=<host>, both in inventory's ravendb_nodes group"
+
+    - name: Build name -> ip map from inventory's ansible_host
+      ansible.builtin.set_fact:
+        node_ip_map: "{{ dict(groups['ravendb_nodes'] | zip(groups['ravendb_nodes'] | map('extract', hostvars, 'ansible_host'))) }}"
+
+    - name: "{{ node_a }} drops DROP rules for {{ node_b }}"
+      ansible.builtin.shell: |
+        iptables -D INPUT  -s {{ node_ip_map[node_b] }} -p tcp -j DROP
+        iptables -D OUTPUT -d {{ node_ip_map[node_b] }} -p tcp -j DROP
+      delegate_to: "{{ node_a }}"
+      become: true
+      failed_when: false
+      changed_when: true
+
+    - name: "{{ node_b }} drops DROP rules for {{ node_a }}"
+      ansible.builtin.shell: |
+        iptables -D INPUT  -s {{ node_ip_map[node_a] }} -p tcp -j DROP
+        iptables -D OUTPUT -d {{ node_ip_map[node_a] }} -p tcp -j DROP
+      delegate_to: "{{ node_b }}"
+      become: true
+      failed_when: false
+      changed_when: true
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: "RESTORED  {{ node_a }} <-> {{ node_b }}"

@@ -1,0 +1,55 @@
+##################################################################################################
+# toolbox/create_database.yml
+#
+# Creates a database on the cluster reachable via cluster_leader, using the ravendb.ravendb
+# `database` module.  Defaults to replication_factor=3 so all 3 nodes host it.
+#
+# INPUTS:
+#   cluster_leader      REQUIRED.  Container name of any node in the cluster (e.g. 1a).
+#   db_name             REQUIRED.  Database name to create.
+#   replication_factor  OPTIONAL.  Default 3.
+#
+# RUN EXAMPLES:
+#   # create Tenants on cluster 1 with default replication factor 3
+#   ansible-playbook toolbox/create_database.yml -K \
+#       -e cluster_leader=1a -e db_name=Tenants
+#
+#   # create a single-node DB
+#   ansible-playbook toolbox/create_database.yml -K \
+#       -e cluster_leader=1a -e db_name=MyTestDb -e replication_factor=1
+##################################################################################################
+
+- name: Ensure ravendb python client is available on the controller
+  hosts: localhost
+  connection: local
+  gather_facts: true
+
+  roles:
+    - role: ravendb.ravendb.ravendb_python_client_prerequisites
+
+
+- name: Create a database via the ravendb.ravendb.database module
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - cluster_leader is defined
+          - db_name is defined
+        fail_msg: "Required: -e cluster_leader=<node> -e db_name=<db>"
+
+    - name: Create database
+      ravendb.ravendb.database:
+        url: "https://{{ cluster_leader }}.{{ ravendb_domain }}:443"
+        database_name: "{{ db_name }}"
+        certificate_path: "{{ cert_dir }}/client.pem"
+        ca_cert_path: "{{ cert_ca_crt }}"
+        replication_factor: "{{ replication_factor | default(3) }}"
+        state: present
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: "CREATED  {{ db_name }} on cluster reachable via {{ cluster_leader }} (replication_factor={{ replication_factor | default(3) }})"
