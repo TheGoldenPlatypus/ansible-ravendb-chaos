@@ -1,6 +1,6 @@
 # ansible-ravendb-chaos
 
-## A small ansible harness that spins up N docker containers, installs RavenDB on each, and merges them into clusters of 3 (or whatever you set). Use it to chaos-test cluster behaviour locally - kill a node, partition a network, restart a service, see what happens.
+### A small ansible harness that spins up N docker containers (or talks to N VMs), installs RavenDB on each, and merges them into clusters of 3 (or whatever you set). Use it to chaos-test cluster behaviour locally - kill a node, partition a network, restart a service, see what happens.
 
 <p align="center">
   <img src="assets/banner2.png" alt="ansible-ravendb-chaos" width="1600">
@@ -8,15 +8,7 @@
 
 ---
 
-## What ansible is (30-second version)
-
-Ansible reads YAML files called **playbooks** and runs the tasks in them against one or more **hosts**. Hosts can be remote machines over SSH, your local machine, or - what we do here - docker containers (it `docker exec`s into them).
-
-You run `ansible-playbook some.yml` and it does its thing.
-
----
-
-## What you need installed
+## What you need
 
 | tool | why |
 |---|---|
@@ -24,7 +16,7 @@ You run `ansible-playbook some.yml` and it does its thing.
 | python 3 | ansible runs on python |
 | ansible (>= 2.15) | the playbook runner |
 
-The `ravendb.ravendb` ansible collection ships with the standard ansible distribution, so you don't have to install it separately (we are included yay <3 ).
+The `ravendb.ravendb` ansible collection ships with the standard ansible distribution, so you don't have to install it separately.
 
 ### Linux / WSL2
 
@@ -36,387 +28,220 @@ sudo apt install -y ansible python3 python3-pip docker.io openssl
 <details>
 <summary>If you don't already have docker / python3 / ansible installed (click to expand)</summary>
 
-#### docker
-
 ```bash
-sudo apt update
+# docker
 sudo apt install -y docker.io
 sudo systemctl enable --now docker
+sudo usermod -aG docker $USER   # log out + back in for the group change
 
-# let your user run docker without sudo
-sudo usermod -aG docker $USER
-# log out + back in (or run `newgrp docker`) for the group change to take effect
-
-# sanity check
-docker run --rm hello-world
-```
-
-#### python 3
-
-```bash
+# python 3
 sudo apt install -y python3 python3-pip
-python3 --version    # should be >= 3.9
-```
 
-#### ansible
-
-```bash
+# ansible (use pip if your distro's package is too old)
 sudo apt install -y ansible
-ansible --version    # should be >= 2.15
-```
-
-If your distro's ansible is too old, install via pip instead:
-
-```bash
-python3 -m pip install --user "ansible-core>=2.15"
+# or:  python3 -m pip install --user "ansible-core>=2.15"
 ```
 
 </details>
 
 ### Windows
 
-Running ansible directly on Windows is painful. Install **WSL2 + Docker Desktop** (toggle "Use WSL 2 based engine" in Docker Desktop settings), install Ubuntu from the Microsoft Store, and follow the Linux steps inside the Ubuntu shell. Docker Desktop on Windows runs the containers through the WSL2 engine, so everything you do from Ubuntu reaches them.
-
-Keep the project under `~/...` inside WSL, not `/mnt/c/...`. Files under `/mnt/c` are world-writable from ansible's point of view, which makes it ignore `ansible.cfg`.
+Install **WSL2 + Docker Desktop** (toggle "Use WSL 2 based engine"), install Ubuntu from the Microsoft Store, follow the Linux steps inside Ubuntu. Keep the project under `~/...` inside WSL, not `/mnt/c/...` (files there are world-writable from ansible's POV and `ansible.cfg` gets ignored).
 
 ---
 
-## Certs and license
+## Certs & license
 
-You don't generate the TLS material. Four pre-built cert files (`ca.crt`, `ca.key`, `server.pfx`, `client.pfx`) live in a shared drive folder:
+Four pre-built cert files (`ca.crt`, `ca.key`, `server.pfx`, `client.pfx`) live in a shared drive folder:
 
 > https://drive.google.com/file/d/1frqQp_3ZeSvoDfTBhj8YoSO6XgFc76q8/view?usp=sharing
 
-You **do** need to bring your own `license.json` - grab one from your RavenDB account and drop it next to the four cert files.
-
-So in the end your local folder should contain five files:
-
-```
-ca.crt
-ca.key
-server.pfx
-client.pfx
-license.json
-```
-
-The default path the playbooks look in is `/mnt/c/dev/hub-sink/selfsignedmaterials/`. If you put the folder somewhere else, override `cert_dir` in `inventory/group_vars/all.yml`.
+Bring your own `license.json` (from your RavenDB account) and drop it next to the four cert files. Default lookup path is `/mnt/c/dev/hub-sink/selfsignedmaterials/` - override `cert_dir` in `inventory/group_vars/all.yml` if you put it elsewhere.
 
 ---
 
-## How the layout works
+## Layout convention
 
-Every container's docker name is `<cluster_id><node_letter>`:
+Every node's name is `<cluster_id><node_letter>`. `cluster_id` is an integer, `node_letter` is `a..z` (max 26 nodes per cluster). The node ending in `a` is the cluster's leader. Studio tags shown inside each cluster are `A`, `B`, `C`...
 
 | cluster_id | nodes |
 |---|---|
 | 1 | 1a, 1b, 1c |
 | 2 | 2a, 2b, 2c |
-| 3 | 3a, 3b, 3c |
 | ... | ... |
 
-- `cluster_id` is just an incrementing integer.
-- Node letters come from the fixed alphabet `a..z`, so the hard cap is 26 nodes per cluster.
-- The node ending in `a` is always the cluster's leader (the one the others join into).
-- Inside each cluster the node tags shown in RavenDB Studio are `A`, `B`, `C`, ...
-- The hostname every node announces to its peers (`PublicServerUrl`) is `https://<container_name>.hubsink.test:443`.
-
-The number of clusters and the number of nodes per cluster are the two knobs. Defaults in `inventory/group_vars/all.yml`:
-
-```yaml
-clusters_count: 1
-nodes_per_cluster: 3
-```
-
-Override on the command line:
+Two scaling knobs in `inventory/group_vars/all.yml`: `clusters_count`, `nodes_per_cluster`. Override on the CLI:
 
 ```bash
-ansible-playbook playbooks/provision_nodes.yml -e clusters_count=5 -e nodes_per_cluster=4
+ansible-playbook playbooks/provision_nodes.yml -e clusters_count=3 -e nodes_per_cluster=4
 ```
-
-That gives you 5 independent clusters x 4 nodes each = 20 containers. Each cluster is self-contained; cluster 1 doesn't know about cluster 2.
 
 ---
 
-## Running it
-
-Four playbooks, run in order:
+## Bring-up - docker mode
 
 ```bash
-# 1. spin up the containers
-#    e.g. 3 clusters x 3 nodes each = 9 containers named 1a/1b/1c, 2a/2b/2c, 3a/3b/3c
 ansible-playbook playbooks/provision_nodes.yml -e clusters_count=3 -e nodes_per_cluster=3
-
-# 2. install RavenDB on every container, register the admin cert on each leader
 ansible-playbook playbooks/install_ravendb.yml
-
-# 3. merge each cluster's nodes into one RavenDB cluster
-#    (-K because it edits the controller's /etc/hosts)
 ansible-playbook playbooks/form_clusters.yml -K
 ```
 
-At the end of step 3 you get a summary like:
+Studio: open `https://1a.hubsink.test/studio`. Teardown: `ansible-playbook playbooks/teardown_containers.yml -K`.
 
-```
-TASK [Print the final cluster layout (tag / container / url per cluster)]
-*************************************************************************
-ok: [localhost] =>
-  msg:
-================================================================
-  Formed 3 cluster(s) with 9 node(s) on hubsinknet
-================================================================
+`provision_nodes.yml` also creates a named docker volume `lab_backups` mounted at `/backups` in every container, so `toolbox/backup/backup_database.yml` outputs are visible across all containers without `docker cp`. The volume survives teardown - `docker volume rm lab_backups` to nuke.
 
-Cluster 1
-  tag   container   url
-  A     1a          https://1a.hubsink.test:443
-  B     1b          https://1b.hubsink.test:443
-  C     1c          https://1c.hubsink.test:443
-
-Cluster 2
-  tag   container   url
-  A     2a          https://2a.hubsink.test:443
-  B     2b          https://2b.hubsink.test:443
-  C     2c          https://2c.hubsink.test:443
-
-Cluster 3
-  tag   container   url
-  A     3a          https://3a.hubsink.test:443
-  B     3b          https://3b.hubsink.test:443
-  C     3c          https://3c.hubsink.test:443
-
-================================================================
-```
-
-Studio: open `https://1a.hubsink.test/studio` in a browser.
-
-### Teardown
+## Bring-up - SSH mode
 
 ```bash
-ansible-playbook playbooks/teardown_containers.yml -K
-```
-
-Removes every container on the network, removes the network, strips the `/etc/hosts` block.
-
----
-
-## SSH mode (VMs / bare metal / other computers)
-
-Everything above runs against docker containers by default. The same harness also runs against
-real machines reachable over SSH - useful for lab VMs, bare-metal servers, cloud instances,
-or any persistent host rather than an ephemeral container.
-
-### Switching modes
-
-`target_mode` is set by the inventory file you pass. There is no environment switch - passing
-`-i inventory/ssh_hosts.yml` selects ssh mode; running with no `-i` (or with a docker inventory)
-selects docker mode. The setup/install/form playbooks and the read-only toolbox tools work in
-either mode without code changes. **The network-chaos toolbox tools are split into two parallel
-sets** - see "Network-chaos tools" below.
-
-### Bring-up
-
-```bash
-# 1. copy the inventory template and fill in your hosts
-cp inventory/ssh_hosts.yml.example inventory/ssh_hosts.yml
-# edit inventory/ssh_hosts.yml -- set ansible_host (LAN IP) and ansible_user per host
-
-# 2. verify SSH access + install apt prereqs (iptables, python3)
+cp inventory/ssh_hosts.yml.example inventory/ssh_hosts.yml    # then fill in your hosts
 ansible-playbook -i inventory/ssh_hosts.yml playbooks/setup_ssh_targets.yml
-
-# 3. install RavenDB on every host (~5-10 min, slowest step; pulls arm64 deb on aarch64)
 ansible-playbook -i inventory/ssh_hosts.yml playbooks/install_ravendb.yml
-
-# 4. merge them into a cluster (also writes /etc/hosts on the controller + each host)
 ansible-playbook -i inventory/ssh_hosts.yml playbooks/form_clusters.yml
 ```
 
-The hosts in `inventory/ssh_hosts.yml` follow the same `<cluster_id><letter>` convention as docker
-(`1a`/`1b`/`1c`...). Scenarios and read-only toolbox tools reference these names - same CLI as docker.
+Teardown: `ansible-playbook -i inventory/ssh_hosts.yml playbooks/cleanup_ssh_targets.yml` (uninstalls RavenDB, flushes chaos rules, strips `/etc/hosts`; the machines themselves stay).
 
-### Network-chaos tools (`*_ssh.yml`)
+Network-chaos tools have `_ssh` variants (`toolbox/network/cut_link_ssh.yml`, etc.) because the docker tools use `docker_container_exec` and don't speak SSH. **Mode-aware** tools (e.g. `partition_set.yml`, `heal_all.yml`, every `diagnostic_*` and `wait_*` tool) auto-detect the mode and don't need a separate file.
 
-The four iptables-based chaos primitives have **separate SSH variants** because the docker tools
-run iptables *inside containers* (via `docker_container_exec`) and don't speak SSH at all:
-
-| docker | ssh variant |
-|---|---|
-| `toolbox/cut_link.yml` | `toolbox/cut_link_ssh.yml` |
-| `toolbox/restore_link.yml` | `toolbox/restore_link_ssh.yml` |
-| `toolbox/partition_node.yml` | `toolbox/partition_node_ssh.yml` |
-| `toolbox/heal_node.yml` | `toolbox/heal_node_ssh.yml` |
-
-```bash
-# example: cut 1a <-> 1b in ssh mode
-ansible-playbook -i inventory/ssh_hosts.yml toolbox/cut_link_ssh.yml -e node_a=1a -e node_b=1b
-```
-
-Use `*_ssh.yml` when targets are inventory hosts. Use the docker-named variants when targets are
-docker containers. They don't overlap - pick the one that matches your inventory.
-
-Mechanism difference: SSH variants use `iptables -j DROP` instead of `REJECT --reject-with tcp-reset`.
-DROP is silent (no TCP RST is emitted), which is more realistic for "the peer disappeared" chaos
-and avoids triggering the WSL/Hyper-V caveat below.
-
-### Teardown
-
-```bash
-ansible-playbook -i inventory/ssh_hosts.yml playbooks/cleanup_ssh_targets.yml
-```
-
-Uninstalls RavenDB via the role's `state=absent` (stops service, purges package, removes
-`/usr/lib/ravendb`, `/var/lib/ravendb`, `/etc/ravendb`, `/var/log/ravendb`, removes ravendb user
-and group). Also flushes leftover chaos iptables rules and strips the `/etc/hosts` block. The
-machines themselves stay; only what the harness installed is removed.
-
-
-### Things that bite in SSH mode
-
-- **WSL/Hyper-V wedge - driving SSH-mode chaos from WSL2 is unreliable.**  
-  WSL2 with `networkingMode=mirrored` shares the Windows host's network through a Hyper-V
-  virtual switch. Windows's stateful filter sits in the path. When iptables-based chaos cuts
-  fire (either docker-mode REJECT or SSH-mode DROP), the resulting TCP failure patterns cause
-  Windows to silently wedge subsequent WSL→VM TCP. Symptom: SSH from WSL to the cut VMs hangs
-  forever (ICMP ping still works), even though iptables on the VMs has nothing blocking the
-  controller's source IP.
-  
-- **Hardware capacity**: chaos scenarios assume RavenDB restarts in seconds. On very small
-  hardware (< 1 GB RAM) restarts can take ~50s+ and timing-sensitive scenarios won't behave
-  usefully. Aim for ≥ 2 GB RAM per node for real testing.
+**See [NOTES.md](NOTES.md) for the WSL/Hyper-V wedge, hardware caveats, SSH-mode backups, and per-tool quirks.**
 
 ---
 
-## Custom RavenDB builds
+## Playbooks (full reference)
 
-By default `install_ravendb.yml` pulls the version from `rdb_version` (group_vars) off the official daily-builds bucket. To install a developer build instead - a branch artifact, a nightly, a local `.deb` - pass `custom_build` and skip the role's download step:
+All playbooks live under `playbooks/`. Pass `-K` whenever the playbook needs sudo (most do, for `/etc/hosts` edits). `-e key=value` for any input.
 
-```bash
-# from a URL (e.g. internal CI artifact)
-ansible-playbook playbooks/install_ravendb.yml \
-    -e custom_build=https://internal.example.com/raven-feature-branch.deb \
-    --skip-tags download
-
-# from a local file on the controller
-ansible-playbook playbooks/install_ravendb.yml \
-    -e custom_build=/home/me/raven-feature-branch.deb \
-    --skip-tags download
-```
-
-The `--skip-tags download` is required - it tells the upstream role to leave `/tmp/ravendb.deb` alone (we pre-staged our file there) instead of wiping and re-fetching the official build.
-
-Same flag is supported by `add_node.yml` (below) and `toolbox/upgrade_node.yml`.
+| playbook | mode | what it does | required vars | optional vars |
+|---|---|---|---|---|
+| `provision_nodes.yml` | docker | creates the shared docker network + `lab_backups` volume + one privileged systemd-ready container per `<cluster_id><letter>` | - | `clusters_count`<br>`nodes_per_cluster`<br>`container_memory`<br>`docker_network_name`<br>`docker_image`<br>`backups_volume_name` |
+| `setup_ssh_targets.yml` | ssh | verifies SSH reachability + installs `iptables` / `python3` apt prereqs + creates `/backups` | (inventory must populate `ravendb_nodes`) | - |
+| `install_ravendb.yml` | both | discovers targets, trusts CA on controller, runs `ravendb.ravendb.ravendb_node` role, registers admin cert on cluster leaders, chowns `/backups` to the ravendb user | - | `rdb_version`<br>`custom_build` (+ `--skip-tags download`)<br>`cert_dir`<br>`ravendb_domain` |
+| `form_clusters.yml` | both | writes `/etc/hosts` on controller + each host, then merges each cluster's nodes into one RavenDB cluster via the `ravendb.ravendb.node` module | - | `clusters_count`<br>`nodes_per_cluster`<br>`cert_dir`<br>`ravendb_domain` |
+| `add_node.yml` | docker | adds one extra container; can join it to an existing cluster, stay passive, or bootstrap as its own 1-node cluster | `node_name` | `join_to`<br>`node_tag`<br>`passive`<br>`custom_build` (+ `--skip-tags download`)<br>`container_memory`<br>`rdb_version` |
+| `teardown_containers.yml` | docker | removes every container on the network, drops the network, strips `/etc/hosts`. The `lab_backups` volume survives. | - | `docker_network_name` |
+| `cleanup_ssh_targets.yml` | ssh | uninstalls RavenDB via the role's `state=absent` on each host, flushes leftover chaos rules, strips `/etc/hosts`. Hosts themselves stay. | - | - |
 
 ---
 
-## Adding a node later
+## Toolbox (full reference)
 
-`playbooks/add_node.yml` provisions ONE extra container and optionally joins it to an existing cluster. Use it to grow a cluster mid-test, add a standalone node with a different RavenDB version, or chaos-test "what happens when a node joins live."
+Single-purpose playbooks under `toolbox/<group>/`. Each one is CLI-runnable on its own and importable from a scenario playbook via `import_playbook`.
 
-Three real shapes:
+**Naming convention:**
 
-```bash
-# standalone bootstrapped 1-node cluster
-ansible-playbook playbooks/add_node.yml -K -e node_name=solo1
+- **Unprefixed** = mutator. Changes state.
+- **`wait_for_*`** = sync. Blocks until a condition is met, with a timeout.
+- **`diagnostic_*`** = read-only. Never changes state.
 
-# standalone PASSIVE -- not bootstrapped, ready to be added to a cluster manually via Studio
-ansible-playbook playbooks/add_node.yml -K -e node_name=xyz3 -e passive=true
+### `toolbox/network/` - connectivity chaos
 
-# join an existing cluster (here: grow cluster 1 with a 4th node)
-ansible-playbook playbooks/add_node.yml -K -e node_name=1d -e join_to=1a
-```
+| playbook | mode | what it does | required | optional |
+|---|---|---|---|---|
+| `cut_link.yml` | docker | REJECT all TCP between two containers (forces TCP reset) | `node_a`<br>`node_b` | - |
+| `cut_link_ssh.yml` | ssh | DROP all TCP between two inventory hosts (silent, no RST) | `node_a`<br>`node_b` | - |
+| `restore_link.yml` | docker | symmetric inverse of `cut_link` | `node_a`<br>`node_b` | - |
+| `restore_link_ssh.yml` | ssh | symmetric inverse of `cut_link_ssh` | `node_a`<br>`node_b` | - |
+| `partition_node.yml` | docker | cut every link between one node and every cluster peer (peers via `/cluster/topology`) | `target` | - |
+| `partition_node_ssh.yml` | ssh | same, over SSH | `target` | - |
+| `heal_node.yml` | docker | symmetric inverse of `partition_node` | `target` | - |
+| `heal_node_ssh.yml` | ssh | symmetric inverse of `partition_node_ssh` | `target` | - |
+| `partition_set.yml` | both | bidirectionally cut every pair in `set_a × set_b`, with TCP-connect validation; cross-cluster generalization of `cut_link` | `set_a` (JSON list)<br>`set_b` (JSON list) | - |
+| `heal_all.yml` | both | flush every chaos iptables rule on every node in one shot | - | `targets` (JSON list; default = auto-discover all) |
 
-See the file's header for all six documented variants (custom build, explicit tag, non-convention names, etc.).
+### `toolbox/db/` - database lifecycle
+
+| playbook | what it does | required | optional |
+|---|---|---|---|
+| `create_database.yml` | create a DB via the ravendb collection's `database` module | `cluster_leader`<br>`db_name` | `replication_factor` (default 3) |
+| `delete_database.yml` | hard-delete + poll until gone (stops service, wipes on-disk dir, restarts on every peer) | `cluster_leader`<br>`db_name` | `timeout_secs` (default 60) |
+| `configure_revisions.yml` | enable document revisions with `MinimumRevisionsToKeep` on Default config | `target`<br>`db_name` | `minimum_revisions` (default 100) |
+
+### `toolbox/writes/` - mutating writes
+
+| playbook | what it does | required | optional |
+|---|---|---|---|
+| `write_docs.yml` | PUT N docs to a target node (single id-prefix) | `target`<br>`db_name`<br>`count` | `id_prefix` (default `micro/doc`) |
+| `write_docs_interleaved.yml` | PUT N docs round-robin across multiple id-prefixes | `target`<br>`db_name`<br>`count`<br>`prefixes` (JSON list) | - |
+| `write_docs_freeform.yml` | PUT N freeform docs (random GUID id, null collection) | `target`<br>`db_name`<br>`count` | - |
+| `delete_docs.yml` | DELETE by explicit id-list OR by id-prefix + count | `target`<br>`db_name`<br>(`ids` OR `id_prefix`+`count`) | - |
+| `write_attachments.yml` | PUT N attachments onto existing docs | `target`<br>`db_name`<br>`count` | `doc_id_prefix` (default `micro/doc`)<br>`attachment_name` (default `data`)<br>`payload` |
+| `write_counters.yml` | increment a named counter on a doc N times | `target`<br>`db_name`<br>`doc_id` | `counter_name` (default `Likes`)<br>`delta` (default 1)<br>`repeat` (default 1) |
+| `write_timeseries.yml` | append N TS entries OR delete a range (inclusive on both bounds) | `target`<br>`db_name`<br>`doc_id` | `ts_name` (default `Heartrate`)<br>`count` (default 100)<br>`start_timestamp`<br>`interval_seconds` (default 6)<br>`delete_from` + `delete_to` (switches to delete-range mode) |
+| `restore_revision.yml` | restore an older revision as the new live doc (exercises attachment-from-revision recreate) | `target`<br>`db_name`<br>`doc_id`<br>`revision_cv` | - |
+
+### `toolbox/tasks/` - ongoing-task ops
+
+| playbook | what it does | required | optional |
+|---|---|---|---|
+| `set_mentor_node.yml` | flip `MentorNode` on a pull-rep hub / sink / external task (other task types pre-stubbed) | `target`<br>`db_name`<br>`task_name`<br>`task_type` (`hub` / `sink` / `external`)<br>`mentor_node` | - |
+
+### `toolbox/backup/` - backup & restore
+
+| playbook | what it does | required | optional |
+|---|---|---|---|
+| `backup_database.yml` | trigger an on-demand Logical or Snapshot backup; waits for completion | `target`<br>`db_name` | `backup_type` (`Backup` / `Snapshot`, default `Backup`)<br>`backup_path`<br>`timeout` (default 300)<br>`poll_interval` (default 3) |
+| `restore_backup.yml` | restore a backup folder as a new DB; waits for completion. `backup_path` is the FOLDER containing the `.ravendb-snapshot` file, not the file. | `target`<br>`backup_path`<br>`new_db_name` | `timeout` (default 600)<br>`poll_interval` (default 3) |
+
+### `toolbox/subscriptions/` - subscriptions
+
+| playbook | what it does | required | optional |
+|---|---|---|---|
+| `open_subscription.yml` | **STUB** - running it fails with implementation guidance. M10 needs a Python consumer; see file header. | - | - |
+
+### `toolbox/service/` - node operations
+
+| playbook | what it does | required | optional |
+|---|---|---|---|
+| `restart_ravendb.yml` | `systemctl restart ravendb` + wait for HTTPS to come back | `target` | `timeout_secs` (default 120) |
+| `upgrade_node.yml` | upgrade (or downgrade) RavenDB on one node | `target` | `rdb_version`<br>`custom_build` (+ `--skip-tags download`)<br>`timeout_secs` |
+| `force_cluster_asymmetry.yml` | upgrade specific nodes to specific versions per a map (shells out to `upgrade_node.yml`) | `version_map` (JSON dict) | - |
+| `remove_node.yml` | remove a node from its cluster via the admin API; verifies | `cluster_leader`<br>`target_tag` | - |
+
+### `toolbox/diagnostic/` - read-only inspection
+
+Output for the `_capture_*` tools lands under repo-root `captures/` (gitignored).
+
+| playbook | what it does | required | optional |
+|---|---|---|---|
+| `diagnostic_doc_count.yml` | print `CountOfDocuments` from `/stats` | `target`<br>`db_name` | - |
+| `diagnostic_replication.yml` | dump incoming + outgoing replication connections for a DB | `target`<br>`db_name` | - |
+| `diagnostic_capture_cv.yml` | fetch `DatabaseChangeVector` from every node of a DB; one file per node | `db_name` | `nodes` (default auto-discover)<br>`output_dir` |
+| `diagnostic_capture_doc_cv.yml` | for a list of doc ids, fetch `@change-vector` from every node holding the doc | `db_name`<br>`ids` (JSON list) | `nodes`<br>`output_dir` |
+| `diagnostic_scan_fltr.yml` | recursively grep captured CVs for literal `FLTR:`; PASS/FAIL exit | `capture_dir` | `strict` (default true) |
+| `diagnostic_partition_list.yml` | enumerate active chaos iptables rules across every node + IP→name legend | - | `targets` |
+
+### `toolbox/wait/` - synchronization gates
+
+| playbook | what it does | required | optional |
+|---|---|---|---|
+| `wait_for_healthy.yml` | wrap `ravendb.ravendb.healthcheck` | `cluster_leader`<br>`checks` (CSV: `node_alive`,`cluster_connectivity`) | `max_wait` (default 120) |
+| `wait_for_rehab.yml` | block until target node enters DB-level rehab (Promotables / Rehabs) | `cluster_leader`<br>`db_name`<br>`target` | `timeout_secs` (default 120) |
+| `wait_for_member.yml` | block until target node is back as a full Member | `cluster_leader`<br>`db_name`<br>`target` | `timeout_secs` (default 300) |
+| `wait_for_quiescence.yml` | poll until every node's `DatabaseChangeVector` matches (replication caught up) | `db_name` | `nodes` (default auto-discover)<br>`timeout` (default 180)<br>`poll_interval` (default 2) |
 
 ---
 
-## Toolbox
+## Tweaking
 
-Small, single-purpose playbooks under `toolbox/`. Each one is CLI-runnable on its own AND importable from a scenario playbook via `import_playbook`. Compose chaos scenarios by chaining them.
-
-| playbook | what it does |
-|---|---|
-| `cut_link.yml` | (docker) REJECT all TCP between two containers (forces TCP reset, so existing connections die) |
-| `restore_link.yml` | (docker) symmetric inverse |
-| `partition_node.yml` | (docker) cut every link between one node and every cluster peer |
-| `heal_node.yml` | (docker) symmetric inverse |
-| `cut_link_ssh.yml` | (ssh) DROP all TCP between two inventory hosts (silent, no RST -- see "Things that bite") |
-| `restore_link_ssh.yml` | (ssh) symmetric inverse |
-| `partition_node_ssh.yml` | (ssh) cut every link between one inventory host and every cluster peer |
-| `heal_node_ssh.yml` | (ssh) symmetric inverse |
-| `restart_ravendb.yml` | `systemctl restart ravendb` + wait for HTTPS to come back |
-| `write_docs.yml` | PUT N docs to a target node (single prefix) |
-| `write_docs_interleaved.yml` | PUT N docs to a target node, round-robin across multiple id prefixes |
-| `write_docs_freeform.yml` | PUT N freeform docs (random GUID id, null collection) -- useful for chaos writes with no predictable shape |
-| `delete_docs.yml` | DELETE docs by explicit id-list or by id-prefix + count |
-| `force_cluster_asymmetry.yml` | upgrade specific nodes to specific versions per a version-map (force the cluster into an asymmetric version state for backward-compat tests) |
-| `read_doc_count.yml` | print `CountOfDocuments` from `/stats` |
-| `create_database.yml` | create a database via the ravendb collection's `database` module |
-| `delete_database.yml` | delete + poll until `/databases` no longer lists it |
-| `remove_node.yml` | remove a node from its cluster (cluster admin API + verify) |
-| `upgrade_node.yml` | upgrade (or downgrade) RavenDB on one container; supports `rdb_version` or `custom_build` |
-| `show_replication.yml` | dump incoming + outgoing replication connections for a database |
-| `wait_for_healthy.yml` | wrap `ravendb.ravendb.healthcheck` (currently `node_alive` + `cluster_connectivity` only) |
-| `wait_for_rehab.yml` | block until a target node enters DB-level rehab (Promotables/Rehabs); fails if it doesn't |
-| `wait_for_member.yml` | block until a target node is back as a full Member (not Promotable/Rehab) |
-
-Each playbook validates its inputs, prints a one-line "what just happened" debug, and is idempotent where it makes sense. Headers in each file show the inputs and 1-3 run examples.
-
-### Examples
-
-```bash
-# cut 1a <-> 1b, then put it back
-ansible-playbook toolbox/cut_link.yml     -e node_a=1a -e node_b=1b
-ansible-playbook toolbox/restore_link.yml -e node_a=1a -e node_b=1b
-
-# partition 1c from the whole cluster
-ansible-playbook toolbox/partition_node.yml -e target=1c
-
-# rolling upgrade across a 3-node cluster, with health gate between each step
-for n in 1a 1b 1c; do
-  ansible-playbook toolbox/upgrade_node.yml -e target=$n -e rdb_version=7.2.3
-  ansible-playbook toolbox/wait_for_healthy.yml \
-      -e cluster_leader=1a -e checks=node_alive,cluster_connectivity
-done
-
-# write 50 docs to 1a, then verify they landed on every node
-ansible-playbook toolbox/create_database.yml -K -e cluster_leader=1a -e db_name=Tenants
-ansible-playbook toolbox/write_docs.yml      -e target=1a -e db_name=Tenants -e count=50
-for n in 1a 1b 1c; do
-  ansible-playbook toolbox/read_doc_count.yml -e target=$n -e db_name=Tenants
-done
-```
-
----
-
-## What each playbook does, briefly
-
-| playbook | does |
-|---|---|
-| `provision_nodes.yml` | (docker) creates the shared docker network (`hubsinknet`), launches one privileged systemd-ready ubuntu container per `<cluster_id><node_letter>` |
-| `setup_ssh_targets.yml` | (ssh) verifies SSH reachability + apt prereqs (iptables, python3) on every host in the inventory's `ravendb_nodes` group; SSH-mode equivalent of `provision_nodes.yml` (the hosts already exist; you brought them) |
-| `install_ravendb.yml` | (both modes) discovers targets, trusts the CA on the controller, runs the `ravendb.ravendb.ravendb_node` role on every node (installs the deb, deploys the server cert, configures self-signed TLS, picks arm64 deb on aarch64), then registers `client.pfx` as the admin certificate **only on cluster leaders** (intentional - registering on followers commits them to their own cluster topology and blocks the merge). Supports `custom_build` for dev artifacts. |
-| `form_clusters.yml` | (both modes) writes `<name>.hubsink.test -> ip` into `/etc/hosts` on the controller and on every node (disables cloud-init's `manage_etc_hosts` first in ssh mode so the block persists across reboots), then for each cluster joins the non-leader nodes to the leader using the `ravendb.ravendb.node` ansible module |
-| `add_node.yml` | (docker only) adds a single extra container; can join it to an existing cluster, stay passive for manual join later, or come up as its own standalone 1-node cluster; supports `custom_build` |
-| `teardown_containers.yml` | (docker) reverse of provision + strips `/etc/hosts` |
-| `cleanup_ssh_targets.yml` | (ssh) uninstalls RavenDB via the role's `state=absent` on each host, flushes leftover chaos iptables rules, strips the `/etc/hosts` block. Hosts themselves stay. |
-| `toolbox/*.yml` | small chaos primitives - cut/restore/partition/heal/restart/read/write/etc. - see the table above |
-
-Everything is idempotent. Re-running a playbook is safe.
-
----
-
-## Tweaking things
-
-Everything tweakable lives in `inventory/group_vars/all.yml`:
+Globals in `inventory/group_vars/all.yml`:
 
 | var | meaning |
 |---|---|
-| `clusters_count` | number of independent clusters to create |
-| `nodes_per_cluster` | number of nodes per cluster (1..26) |
-| `docker_network_name` | docker network name |
-| `docker_image` | container image |
-| `ravendb_domain` | domain used in every node's PublicServerUrl |
+| `clusters_count` | number of independent clusters |
+| `nodes_per_cluster` | nodes per cluster (1..26) |
+| `docker_network_name` | shared docker network name |
+| `docker_image` | container base image |
+| `ravendb_domain` | domain stamped into each node's PublicServerUrl |
 | `rdb_version` | RavenDB version to install |
-| `cert_dir` | folder containing the cert/license files |
+| `cert_dir` | folder containing cert + license files |
 
-For one-off overrides, pass `-e key=value` on the command line. Same flag works for any input listed in a playbook's header.
+One-off overrides: `-e key=value` on the command line.
 
 ---
+
+## More
+
+- **[CHEATSHEET.md](CHEATSHEET.md)** - copy-paste runner for every playbook + tool, including optional-var variants.
+- **[NOTES.md](NOTES.md)** - environment caveats (WSL wedge, hardware), per-tool quirks (timeseries date shell-out, delete-range inclusive bounds, backup folder path, etc.), and design decisions (why mode-aware over `_ssh` variants, why CV equality not etag stability, why no `workload_mixed.yml`).
+- **`scenarios/hub-sink/`** - pre-wired hub-sink chaos scenarios that compose the toolbox tools.
+- **`.github/CODEOWNERS`** - repo ownership.

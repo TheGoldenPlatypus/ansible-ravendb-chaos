@@ -18,3 +18,6 @@ inventory/ssh_hosts.yml
 .vscode/
 .idea/
 *.swp
+
+# diagnostic_capture_cv / diagnostic_capture_doc_cv outputs
+captures/

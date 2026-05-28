@@ -92,178 +92,368 @@ ansible-playbook playbooks/teardown_containers.yml -K
 
 ```bash
 # Cut all TCP between two containers (forces TCP reset).
-ansible-playbook toolbox/cut_link.yml -K -e node_a=1a -e node_b=1b
+ansible-playbook toolbox/network/cut_link.yml -K -e node_a=1a -e node_b=1b
 ```
 
 ### `restore_link.yml`
 
 ```bash
 # Undo a previous cut_link between two containers.
-ansible-playbook toolbox/restore_link.yml -K -e node_a=1a -e node_b=1b
+ansible-playbook toolbox/network/restore_link.yml -K -e node_a=1a -e node_b=1b
 ```
 
 ### `partition_node.yml`
 
 ```bash
 # Cut one node off from every cluster peer in one go.
-ansible-playbook toolbox/partition_node.yml -K -e target=1c
+ansible-playbook toolbox/network/partition_node.yml -K -e target=1c
 ```
 
 ### `heal_node.yml`
 
 ```bash
 # Undo a previous partition_node by restoring every peer link.
-ansible-playbook toolbox/heal_node.yml -K -e target=1c
+ansible-playbook toolbox/network/heal_node.yml -K -e target=1c
 ```
 
 ### `restart_ravendb.yml`
 
 ```bash
 # Restart the RavenDB service inside one container and wait for HTTPS.
-ansible-playbook toolbox/restart_ravendb.yml -K -e target=1b
+ansible-playbook toolbox/service/restart_ravendb.yml -K -e target=1b
 
 # Same, with a custom wait budget (seconds).
-ansible-playbook toolbox/restart_ravendb.yml -K -e target=1b -e timeout_secs=240
+ansible-playbook toolbox/service/restart_ravendb.yml -K -e target=1b -e timeout_secs=240
 ```
 
 ### `write_docs.yml`
 
 ```bash
 # Write 50 docs with the default id_prefix (micro/doc/0..49).
-ansible-playbook toolbox/write_docs.yml -K -e target=1a -e db_name=Tenants -e count=50
+ansible-playbook toolbox/writes/write_docs.yml -K -e target=1a -e db_name=Tenants -e count=50
 
 # Write 20 docs with a custom id prefix.
-ansible-playbook toolbox/write_docs.yml -K -e target=1a -e db_name=Tenants -e count=20 -e id_prefix=probe/burst1
+ansible-playbook toolbox/writes/write_docs.yml -K -e target=1a -e db_name=Tenants -e count=20 -e id_prefix=probe/burst1
 ```
 
 ### `write_docs_interleaved.yml`
 
 ```bash
 # Round-robin write across two prefixes (A-0, B-0, A-1, B-1, ...).
-ansible-playbook toolbox/write_docs_interleaved.yml -K -e target=1a -e db_name=Tenants -e count=20 -e '{"prefixes":["tenants/cluster2/x","other/x"]}'
+ansible-playbook toolbox/writes/write_docs_interleaved.yml -K -e target=1a -e db_name=Tenants -e count=20 -e '{"prefixes":["tenants/cluster2/x","other/x"]}'
 
 # Round-robin across three prefixes (X-0, Y-0, Z-0, X-1, ...).
-ansible-playbook toolbox/write_docs_interleaved.yml -K -e target=1a -e db_name=Tenants -e count=15 -e '{"prefixes":["X","Y","Z"]}'
+ansible-playbook toolbox/writes/write_docs_interleaved.yml -K -e target=1a -e db_name=Tenants -e count=15 -e '{"prefixes":["X","Y","Z"]}'
 ```
 
-### `read_doc_count.yml`
+### `diagnostic_doc_count.yml`
 
 ```bash
 # Print CountOfDocuments from /stats on a target node.
-ansible-playbook toolbox/read_doc_count.yml -K -e target=1b -e db_name=Tenants
+ansible-playbook toolbox/diagnostic/diagnostic_doc_count.yml -K -e target=1b -e db_name=Tenants
 ```
 
 ### `create_database.yml`
 
 ```bash
 # Create the DB on every node in the cluster (default replication_factor=3).
-ansible-playbook toolbox/create_database.yml -K -e cluster_leader=1a -e db_name=Tenants
+ansible-playbook toolbox/db/create_database.yml -K -e cluster_leader=1a -e db_name=Tenants
 
 # Create a single-node DB (replication_factor=1).
-ansible-playbook toolbox/create_database.yml -K -e cluster_leader=1a -e db_name=MyTestDb -e replication_factor=1
+ansible-playbook toolbox/db/create_database.yml -K -e cluster_leader=1a -e db_name=MyTestDb -e replication_factor=1
 ```
 
 ### `delete_database.yml`
 
 ```bash
 # Delete a DB and poll until it's gone (default 60s wait budget).
-ansible-playbook toolbox/delete_database.yml -K -e cluster_leader=1a -e db_name=Tenants
+ansible-playbook toolbox/db/delete_database.yml -K -e cluster_leader=1a -e db_name=Tenants
 
 # Same, with a longer wait budget.
-ansible-playbook toolbox/delete_database.yml -K -e cluster_leader=1a -e db_name=Tenants -e timeout_secs=180
+ansible-playbook toolbox/db/delete_database.yml -K -e cluster_leader=1a -e db_name=Tenants -e timeout_secs=180
 ```
 
 ### `remove_node.yml`
 
 ```bash
 # Remove the node with cluster tag D from cluster 1.
-ansible-playbook toolbox/remove_node.yml -K -e cluster_leader=1a -e target_tag=D
+ansible-playbook toolbox/service/remove_node.yml -K -e cluster_leader=1a -e target_tag=D
 ```
 
 ### `upgrade_node.yml`
 
 ```bash
 # Upgrade one node to a specific version from daily-builds.
-ansible-playbook toolbox/upgrade_node.yml -K -e target=1a -e rdb_version=7.2.3
+ansible-playbook toolbox/service/upgrade_node.yml -K -e target=1a -e rdb_version=7.2.3
 
 # Upgrade one node from a custom .deb (dev branch artifact).
-ansible-playbook toolbox/upgrade_node.yml -K -e target=1a -e custom_build=/tmp/raven-branch.deb --skip-tags download
+ansible-playbook toolbox/service/upgrade_node.yml -K -e target=1a -e custom_build=/tmp/raven-branch.deb --skip-tags download
 
 # Upgrade with a longer wait budget for the node to come back.
-ansible-playbook toolbox/upgrade_node.yml -K -e target=1a -e rdb_version=7.2.3 -e timeout_secs=300
+ansible-playbook toolbox/service/upgrade_node.yml -K -e target=1a -e rdb_version=7.2.3 -e timeout_secs=300
 
 # Rolling upgrade across a 3-node cluster, with a health gate between each step.
-for n in 1a 1b 1c; do ansible-playbook toolbox/upgrade_node.yml -K -e target=$n -e rdb_version=7.2.3; ansible-playbook toolbox/wait_for_healthy.yml -K -e cluster_leader=1a -e checks=node_alive,cluster_connectivity; done
+for n in 1a 1b 1c; do ansible-playbook toolbox/service/upgrade_node.yml -K -e target=$n -e rdb_version=7.2.3; ansible-playbook toolbox/wait/wait_for_healthy.yml -K -e cluster_leader=1a -e checks=node_alive,cluster_connectivity; done
 ```
 
-### `show_replication.yml`
+### `diagnostic_replication.yml`
 
 ```bash
 # Dump incoming + outgoing replication connections for the DB on a node.
-ansible-playbook toolbox/show_replication.yml -K -e target=2a -e db_name=Tenants
+ansible-playbook toolbox/diagnostic/diagnostic_replication.yml -K -e target=2a -e db_name=Tenants
 ```
 
 ### `wait_for_healthy.yml`
 
 ```bash
 # Cheap recovery check (entry-point node responds + members can talk).
-ansible-playbook toolbox/wait_for_healthy.yml -K -e cluster_leader=1a -e checks=node_alive,cluster_connectivity
+ansible-playbook toolbox/wait/wait_for_healthy.yml -K -e cluster_leader=1a -e checks=node_alive,cluster_connectivity
 
 # Same, with a longer total wait budget.
-ansible-playbook toolbox/wait_for_healthy.yml -K -e cluster_leader=1a -e checks=node_alive,cluster_connectivity -e max_wait=180
+ansible-playbook toolbox/wait/wait_for_healthy.yml -K -e cluster_leader=1a -e checks=node_alive,cluster_connectivity -e max_wait=180
 ```
 
 ### `wait_for_rehab.yml`
 
 ```bash
 # Block until 1b enters Promotables/Rehabs on Tenants's topology (fails if it doesn't within 120s).
-ansible-playbook toolbox/wait_for_rehab.yml -K -e cluster_leader=1a -e db_name=Tenants -e target=1b
+ansible-playbook toolbox/wait/wait_for_rehab.yml -K -e cluster_leader=1a -e db_name=Tenants -e target=1b
 
 # Longer wait budget.
-ansible-playbook toolbox/wait_for_rehab.yml -K -e cluster_leader=1a -e db_name=Tenants -e target=1b -e timeout_secs=300
+ansible-playbook toolbox/wait/wait_for_rehab.yml -K -e cluster_leader=1a -e db_name=Tenants -e target=1b -e timeout_secs=300
 ```
 
 ### `wait_for_member.yml`
 
 ```bash
 # Block until 1b is back as a full Member of Tenants's topology (default 300s budget).
-ansible-playbook toolbox/wait_for_member.yml -K -e cluster_leader=1a -e db_name=Tenants -e target=1b
+ansible-playbook toolbox/wait/wait_for_member.yml -K -e cluster_leader=1a -e db_name=Tenants -e target=1b
 
 # Longer wait budget for slow rehab phases.
-ansible-playbook toolbox/wait_for_member.yml -K -e cluster_leader=1a -e db_name=Tenants -e target=1b -e timeout_secs=600
+ansible-playbook toolbox/wait/wait_for_member.yml -K -e cluster_leader=1a -e db_name=Tenants -e target=1b -e timeout_secs=600
 ```
 
 ### `write_docs_freeform.yml`
 
 ```bash
 # Write 1 freeform doc to 2a (random GUID id, null collection).
-ansible-playbook toolbox/write_docs_freeform.yml -K -e target=2a -e db_name=Tenants -e count=1
+ansible-playbook toolbox/writes/write_docs_freeform.yml -K -e target=2a -e db_name=Tenants -e count=1
 
 # Write 5 freeform docs to 2b.
-ansible-playbook toolbox/write_docs_freeform.yml -K -e target=2b -e db_name=Tenants -e count=5
+ansible-playbook toolbox/writes/write_docs_freeform.yml -K -e target=2b -e db_name=Tenants -e count=5
 ```
 
 ### `delete_docs.yml`
 
 ```bash
 # Delete 50 docs that match the default write_docs.yml prefix.
-ansible-playbook toolbox/delete_docs.yml -K -e target=1a -e db_name=Tenants -e id_prefix=micro/doc -e count=50
+ansible-playbook toolbox/writes/delete_docs.yml -K -e target=1a -e db_name=Tenants -e id_prefix=micro/doc -e count=50
 
 # Delete an explicit list of ids.
-ansible-playbook toolbox/delete_docs.yml -K -e target=1a -e db_name=Tenants -e '{"ids":["users/1","users/42"]}'
+ansible-playbook toolbox/writes/delete_docs.yml -K -e target=1a -e db_name=Tenants -e '{"ids":["users/1","users/42"]}'
 ```
 
 ### `force_cluster_asymmetry.yml`
 
 ```bash
 # Asymmetric hub: 1b on 7.2.3, 1c on a dev .deb, 1a untouched.
-ansible-playbook toolbox/force_cluster_asymmetry.yml -K -e '{"version_map":{"1b":"7.2.3","1c":"/tmp/raven-feature-branch.deb"}}'
+ansible-playbook toolbox/service/force_cluster_asymmetry.yml -K -e '{"version_map":{"1b":"7.2.3","1c":"/tmp/raven-feature-branch.deb"}}'
 
 # Whole hub cluster to the same new version (regular rolling upgrade in one shot).
-ansible-playbook toolbox/force_cluster_asymmetry.yml -K -e '{"version_map":{"1a":"7.2.3","1b":"7.2.3","1c":"7.2.3"}}'
+ansible-playbook toolbox/service/force_cluster_asymmetry.yml -K -e '{"version_map":{"1a":"7.2.3","1b":"7.2.3","1c":"7.2.3"}}'
 
 # Hub upgraded, sink left on old version -- cross-version replication test.
-ansible-playbook toolbox/force_cluster_asymmetry.yml -K -e '{"version_map":{"1a":"7.2.3","1b":"7.2.3","1c":"7.2.3"}}'
+ansible-playbook toolbox/service/force_cluster_asymmetry.yml -K -e '{"version_map":{"1a":"7.2.3","1b":"7.2.3","1c":"7.2.3"}}'
+```
+
+### `partition_set.yml`
+
+```bash
+# Karmel P1-style: isolate hub mentor 1a from the other 8 nodes (cross-cluster).
+ansible-playbook toolbox/network/partition_set.yml -K -e '{"set_a":["1a"],"set_b":["1b","1c","2a","2b","2c","3a","3b","3c"]}'
+
+# Karmel P2-style: isolate Sink_A from Hub + Sink_B.
+ansible-playbook toolbox/network/partition_set.yml -K -e '{"set_a":["2a","2b","2c"],"set_b":["1a","1b","1c","3a","3b","3c"]}'
+
+# Overlapping sets -- self-pairs auto-skipped (here: 3 effective pairs 1a-1b, 1a-1c, 1b-1c).
+ansible-playbook toolbox/network/partition_set.yml -K -e '{"set_a":["1a","1b"],"set_b":["1b","1c"]}'
+
+# SSH mode (same syntax + inventory flag).
+ansible-playbook -i inventory/ssh_hosts.yml toolbox/network/partition_set.yml -K \
+    -e '{"set_a":["2a","2b","2c"],"set_b":["1a","1b","1c"]}'
+```
+
+### `heal_all.yml`
+
+```bash
+# Flush every chaos rule on every container in one shot.
+ansible-playbook toolbox/network/heal_all.yml -K
+
+# SSH mode.
+ansible-playbook -i inventory/ssh_hosts.yml toolbox/network/heal_all.yml -K
+
+# Surgical override -- only heal these two.
+ansible-playbook toolbox/network/heal_all.yml -K -e '{"targets":["1a","1b"]}'
+```
+
+### `diagnostic_partition_list.yml`
+
+```bash
+# List every active chaos iptables rule across the lab.
+ansible-playbook toolbox/diagnostic/diagnostic_partition_list.yml
+
+# SSH mode.
+ansible-playbook -i inventory/ssh_hosts.yml toolbox/diagnostic/diagnostic_partition_list.yml -K
+
+# Restrict the listing to a subset.
+ansible-playbook toolbox/diagnostic/diagnostic_partition_list.yml -e '{"targets":["1a","1b"]}'
+```
+
+### `diagnostic_capture_cv.yml`
+
+```bash
+# Auto-discover all lab nodes; write one .cv file per node to captures/cv-Tenants-<timestamp>/.
+ansible-playbook toolbox/diagnostic/diagnostic_capture_cv.yml -e db_name=Tenants
+
+# Scoped to a cluster + named output dir.
+ansible-playbook toolbox/diagnostic/diagnostic_capture_cv.yml -e db_name=Tenants \
+    -e '{"nodes":["1a","1b","1c"]}' -e output_dir=captures/m1-baseline
+```
+
+### `diagnostic_capture_doc_cv.yml`
+
+```bash
+# Capture per-doc CVs across all 9 nodes for 3 ids (27 files).
+ansible-playbook toolbox/diagnostic/diagnostic_capture_doc_cv.yml -e db_name=Tenants \
+    -e '{"ids":["micro/doc/0","micro/doc/25","micro/doc/49"]}'
+
+# Scoped + custom output dir.
+ansible-playbook toolbox/diagnostic/diagnostic_capture_doc_cv.yml -e db_name=Tenants \
+    -e '{"ids":["users/a-1"],"nodes":["1a","1b","1c"]}' \
+    -e output_dir=captures/m1-docs
+```
+
+### `diagnostic_scan_fltr.yml`
+
+```bash
+# Strict scan (default) -- fails non-zero on any FLTR hit.
+ansible-playbook toolbox/diagnostic/diagnostic_scan_fltr.yml -e capture_dir=captures/m1-baseline
+
+# Report-only -- prints LEAK lines but exits 0.
+ansible-playbook toolbox/diagnostic/diagnostic_scan_fltr.yml -e capture_dir=captures/m1-baseline -e strict=false
+```
+
+### `wait_for_quiescence.yml`
+
+```bash
+# Default: auto-discover all nodes; drops the ones returning 404/500/503 from the convergence set.
+ansible-playbook toolbox/wait/wait_for_quiescence.yml -e db_name=Tenants
+
+# Scoped to one cluster + tighter budget.
+ansible-playbook toolbox/wait/wait_for_quiescence.yml -e db_name=Tenants \
+    -e '{"nodes":["1a","1b","1c"]}' -e timeout=60 -e poll_interval=2
+```
+
+### `write_attachments.yml`
+
+```bash
+# 3 attachments named data/0..data/2 on existing docs files/hub/0..files/hub/2.
+ansible-playbook toolbox/writes/write_attachments.yml -K -e target=1a -e db_name=Tenants -e count=3 \
+    -e doc_id_prefix=files/hub -e attachment_name=data
+```
+
+### `write_counters.yml`
+
+```bash
+# Increment Likes by 1 once.
+ansible-playbook toolbox/writes/write_counters.yml -K -e target=1a -e db_name=Tenants -e doc_id=users/0
+
+# Increment Likes by 2 three times (total +6).
+ansible-playbook toolbox/writes/write_counters.yml -K -e target=1a -e db_name=Tenants \
+    -e doc_id=users/0 -e counter_name=Likes -e delta=2 -e repeat=3
+```
+
+### `write_timeseries.yml`
+
+```bash
+# Append 5 Heartrate entries at 1-minute spacing.
+ansible-playbook toolbox/writes/write_timeseries.yml -K -e target=1a -e db_name=Tenants \
+    -e doc_id=users/0 -e count=5 -e interval_seconds=60 \
+    -e start_timestamp=2026-05-28T12:00:00.000Z
+
+# Delete-range mode (inclusive on both ends).
+ansible-playbook toolbox/writes/write_timeseries.yml -K -e target=1a -e db_name=Tenants \
+    -e doc_id=users/0 -e ts_name=Heartrate \
+    -e delete_from=2026-05-28T12:01:00.000Z -e delete_to=2026-05-28T12:03:00.000Z
+```
+
+### `configure_revisions.yml`
+
+```bash
+# Enable revisions with default MinimumRevisionsToKeep=100.
+ansible-playbook toolbox/db/configure_revisions.yml -K -e target=1a -e db_name=Tenants
+
+# Override the count.
+ansible-playbook toolbox/db/configure_revisions.yml -K -e target=1a -e db_name=Tenants -e minimum_revisions=50
+```
+
+### `restore_revision.yml`
+
+```bash
+# Restore an older revision as the new live doc. Get revision_cv from /revisions?id=... or
+# from a prior diagnostic_capture_doc_cv capture.
+ansible-playbook toolbox/writes/restore_revision.yml -K -e target=1a -e db_name=Tenants \
+    -e doc_id=files/1 -e revision_cv='A:3-uQvp4csQpESZNSbifH8hxQ'
+```
+
+### `set_mentor_node.yml`
+
+```bash
+# Hub pull-replication task -> mentor=B.
+ansible-playbook toolbox/tasks/set_mentor_node.yml -K -e target=1a -e db_name=Tenants \
+    -e task_name=bidirectional-tenants -e task_type=hub -e mentor_node=B
+
+# Sink task -> mentor=C.
+ansible-playbook toolbox/tasks/set_mentor_node.yml -K -e target=2a -e db_name=Tenants \
+    -e task_name=<sink-task-name> -e task_type=sink -e mentor_node=C
+
+# External replication task.
+ansible-playbook toolbox/tasks/set_mentor_node.yml -K -e target=1a -e db_name=Tenants \
+    -e task_name=MyExternalRep -e task_type=external -e mentor_node=A
+```
+
+### `backup_database.yml`
+
+```bash
+# Default Logical backup to /backups/<db>-<timestamp>/.
+ansible-playbook toolbox/backup/backup_database.yml -K -e target=1a -e db_name=Tenants
+
+# Snapshot to a named path.
+ansible-playbook toolbox/backup/backup_database.yml -K -e target=1a -e db_name=Tenants \
+    -e backup_type=Snapshot -e backup_path=/backups/snap-test
+```
+
+### `restore_backup.yml`
+
+```bash
+# Restore on the same cluster (same shared /backups volume in docker mode).
+# backup_path must point at the FOLDER containing the .ravendb-snapshot file, not the file itself.
+ansible-playbook toolbox/backup/restore_backup.yml -K -e target=1a \
+    -e backup_path=/backups/snap-test/<dated-folder> \
+    -e new_db_name=Tenants_restored
+
+# Cross-cluster restore (no docker cp needed -- shared volume).
+ansible-playbook toolbox/backup/restore_backup.yml -K -e target=2a \
+    -e backup_path=/backups/snap-test/<dated-folder> \
+    -e new_db_name=Tenants_from_1a
+```
+
+### `open_subscription.yml`  (STUB)
+
+```bash
+# NOT IMPLEMENTED. Running it fails loudly with implementation guidance.
+# See the file header for what to build (REST create/drop + Python consumer using ravendb client).
+ansible-playbook toolbox/subscriptions/open_subscription.yml
 ```
 
 ---
@@ -301,21 +491,21 @@ ansible-playbook scenarios/hub-sink/chaos_failover.yml -K
 ansible-playbook playbooks/provision_nodes.yml -K -e clusters_count=2 -e nodes_per_cluster=3
 ansible-playbook playbooks/install_ravendb.yml -K
 ansible-playbook playbooks/form_clusters.yml -K
-ansible-playbook toolbox/create_database.yml -K -e cluster_leader=1a -e db_name=Tenants
-ansible-playbook toolbox/create_database.yml -K -e cluster_leader=2a -e db_name=Tenants
+ansible-playbook toolbox/db/create_database.yml -K -e cluster_leader=1a -e db_name=Tenants
+ansible-playbook toolbox/db/create_database.yml -K -e cluster_leader=2a -e db_name=Tenants
 ansible-playbook scenarios/hub-sink/tasks/define_hub.yml -K -e clusters_count=2
 ansible-playbook scenarios/hub-sink/tasks/attach_sinks.yml -K -e clusters_count=2
 ```
 
 HEAL:
 ```
-ansible-playbook toolbox/heal_node.yml -e target=1a
-ansible-playbook toolbox/heal_node.yml -e target=1b
-ansible-playbook toolbox/heal_node.yml -e target=1c
-ansible-playbook toolbox/delete_database.yml -K -e cluster_leader=1a -e db_name=Tenants
-ansible-playbook toolbox/delete_database.yml -K -e cluster_leader=2a -e db_name=Tenants
-ansible-playbook toolbox/create_database.yml -K -e cluster_leader=1a -e db_name=Tenants
-ansible-playbook toolbox/create_database.yml -K -e cluster_leader=2a -e db_name=Tenants
+ansible-playbook toolbox/network/heal_node.yml -e target=1a
+ansible-playbook toolbox/network/heal_node.yml -e target=1b
+ansible-playbook toolbox/network/heal_node.yml -e target=1c
+ansible-playbook toolbox/db/delete_database.yml -K -e cluster_leader=1a -e db_name=Tenants
+ansible-playbook toolbox/db/delete_database.yml -K -e cluster_leader=2a -e db_name=Tenants
+ansible-playbook toolbox/db/create_database.yml -K -e cluster_leader=1a -e db_name=Tenants
+ansible-playbook toolbox/db/create_database.yml -K -e cluster_leader=2a -e db_name=Tenants
 ansible-playbook scenarios/hub-sink/tasks/define_hub.yml -K -e clusters_count=2
 ansible-playbook scenarios/hub-sink/tasks/attach_sinks.yml -K -e clusters_count=2
 ansible-playbook scenarios/hub-sink/chaos_failover.yml -K
@@ -347,19 +537,19 @@ ansible-playbook -i inventory/ssh_hosts.yml playbooks/form_clusters.yml
 
 ```bash
 # Cut a link between two SSH hosts.
-ansible-playbook -i inventory/ssh_hosts.yml toolbox/cut_link.yml -e node_a=1a -e node_b=1b
+ansible-playbook -i inventory/ssh_hosts.yml toolbox/network/cut_link.yml -e node_a=1a -e node_b=1b
 
 # Partition one host from its peers.
-ansible-playbook -i inventory/ssh_hosts.yml toolbox/partition_node.yml -e target=1c
+ansible-playbook -i inventory/ssh_hosts.yml toolbox/network/partition_node.yml -e target=1c
 
 # Restart RavenDB on a host (systemctl over SSH, then wait for HTTPS).
-ansible-playbook -i inventory/ssh_hosts.yml toolbox/restart_ravendb.yml -e target=1a
+ansible-playbook -i inventory/ssh_hosts.yml toolbox/service/restart_ravendb.yml -e target=1a
 
 # Hard-delete a database (REST API + stop/rm-rf/start on each peer over SSH).
-ansible-playbook -i inventory/ssh_hosts.yml toolbox/delete_database.yml -e cluster_leader=1a -e db_name=Tenants
+ansible-playbook -i inventory/ssh_hosts.yml toolbox/db/delete_database.yml -e cluster_leader=1a -e db_name=Tenants
 
 # Upgrade one host to a specific version.
-ansible-playbook -i inventory/ssh_hosts.yml toolbox/upgrade_node.yml -e target=1a -e rdb_version=7.2.3
+ansible-playbook -i inventory/ssh_hosts.yml toolbox/service/upgrade_node.yml -e target=1a -e rdb_version=7.2.3
 ```
 
 ### Teardown
