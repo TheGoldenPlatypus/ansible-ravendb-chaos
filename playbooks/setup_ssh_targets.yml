@@ -68,6 +68,14 @@
         state: present
         update_cache: true
 
+    - name: Ensure /backups exists (used by backup_database.yml / restore_backup.yml)
+      ansible.builtin.file:
+        path: /backups
+        state: directory
+        mode: "0777"
+      # Note: chowned to ravendb after install_ravendb.yml runs the ravendb_node role.
+      # Until then 0777 keeps the dir usable without knowing the uid.
+
 
 - name: Done
   hosts: localhost

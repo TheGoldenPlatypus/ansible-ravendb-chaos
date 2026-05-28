@@ -171,6 +171,15 @@
         ravendb_self_signed_public_server_url: "https://{{ inventory_hostname }}.{{ ravendb_domain }}:443"
         ravendb_self_signed_public_server_url_tcp: "tcp://{{ inventory_hostname }}.{{ ravendb_domain }}:38888"
 
+    - name: Ensure /backups exists and is writable by the ravendb user
+      ansible.builtin.file:
+        path: /backups
+        state: directory
+        owner: ravendb
+        group: ravendb
+        mode: "0775"
+      become: true
+
 
 - name: Register the admin client certificate on each cluster leader (<id>a only)
   hosts: ravendb_nodes

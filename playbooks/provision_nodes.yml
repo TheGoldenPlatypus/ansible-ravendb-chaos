@@ -45,6 +45,11 @@
         name: "{{ docker_network_name }}"
         state: present
 
+    - name: Create the shared backups volume (mounted at /backups in every container)
+      community.docker.docker_volume:
+        name: "{{ backups_volume_name | default('lab_backups') }}"
+        state: present
+
     - name: Launch a privileged systemd-ready container per node
       community.docker.docker_container:
         name: "{{ item }}"
@@ -64,6 +69,7 @@
         purge_networks: true
         volumes:
           - /sys/fs/cgroup:/sys/fs/cgroup:rw
+          - "{{ backups_volume_name | default('lab_backups') }}:/backups:rw"
         tmpfs:
           - /run
           - /tmp
