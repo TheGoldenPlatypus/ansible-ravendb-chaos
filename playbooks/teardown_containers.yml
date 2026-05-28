@@ -34,8 +34,8 @@
   become: true
 
   tasks:
-    - name: Remove the ANSIBLE MANAGED HUBSINK block from /etc/hosts
+    - name: Remove the ANSIBLE MANAGED CHAOS LAB block from /etc/hosts
       ansible.builtin.blockinfile:
         path: /etc/hosts
-        marker: "# {mark} ANSIBLE MANAGED HUBSINK"
+        marker: "# {mark} ANSIBLE MANAGED CHAOS LAB"
         state: absent
