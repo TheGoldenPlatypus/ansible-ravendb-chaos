@@ -1,15 +1,77 @@
-- name: Discover every container on hubsinknet and add it to ravendb_nodes
+##################################################################################################
+# playbooks/install_ravendb.yml
+#
+# Installs RavenDB on every docker container currently attached to the shared network.
+# Containers must already exist (run playbooks/provision_nodes.yml first).
+#
+# Works in both target_modes:
+#   * docker -- discovers containers from docker_network_name, adds them to ravendb_nodes.
+#   * ssh    -- expects ravendb_nodes already populated from an inventory file (e.g.
+#               inventory/ssh_hosts.yml).  Use playbooks/setup_ssh_targets.yml to bootstrap first.
+#
+# What it does, in order:
+#   1. (docker mode only) Discovers every container on docker_network_name and adds them
+#      to the ravendb_nodes group.  In ssh mode this step is a no-op.
+#   2. Trusts the self-signed CA on the controller (so curl-from-controller will work later).
+#   3. Runs the ravendb.ravendb.ravendb_node role on every container -- installs the deb,
+#      drops the server cert + license, configures secured self-signed TLS, sets the public
+#      server URL to https://<container>.<ravendb_domain>:443.
+#   4. ONLY on each cluster's leader (container name ending in 'a'): extracts the server cert
+#      as PEM/key, copies the admin client PFX in, and registers it against RavenDB as a
+#      ClusterAdmin certificate.  Followers are skipped intentionally -- registering on them
+#      would commit them to their own one-node cluster and block the later form_clusters merge.
+#
+# INPUTS (all overridable via `-e key=value`; defaults live in inventory/group_vars/all.yml):
+#   docker_network_name  shared docker network to discover containers from   (default: hubsinknet)
+#   rdb_version          RavenDB version to install                          (default: 7.2.2)
+#   ravendb_domain       domain stamped into each node's PublicServerUrl     (default: hubsink.test)
+#   cert_dir             folder containing the cert + license files          (default: /mnt/c/dev/hub-sink/selfsignedmaterials)
+#                        cert_ca_crt / cert_server_pfx / cert_client_pfx /
+#                        cert_license / cert_ca_key are derived from this.
+#   custom_build         OPTIONAL.  Path or URL to a custom RavenDB .deb.
+#                        When set, the file is pre-staged at /tmp/ravendb.deb
+#                        on every container and the role's download step is
+#                        bypassed (you must pass --skip-tags download yourself).
+#
+# RUN EXAMPLES:
+#   # use all defaults -- installs current rdb_version on every existing container
+#   ansible-playbook playbooks/install_ravendb.yml
+#
+#   # install a specific RavenDB version
+#   ansible-playbook playbooks/install_ravendb.yml -e rdb_version=6.2.6
+#
+#   # install a CUSTOM build from a URL (e.g. internal CI artifact)
+#   ansible-playbook playbooks/install_ravendb.yml \
+#       -e custom_build=https://internal.example.com/raven-feature-branch.deb \
+#       --skip-tags download
+#
+#   # install a CUSTOM build from a local .deb on the controller
+#   ansible-playbook playbooks/install_ravendb.yml \
+#       -e custom_build=/home/me/raven-feature-branch.deb \
+#       --skip-tags download
+#
+# NOTES:
+#   * Slowest playbook in the chain (~5-10 min) -- the deb install + cert setup runs per container.
+#   * Idempotent: re-running on already-installed containers is a no-op.
+#   * Custom-build mode requires passing `--skip-tags download`.  That tells the upstream
+#     role NOT to wipe and re-fetch /tmp/ravendb.deb, so our pre-staged file is what gets
+#     installed.  Without --skip-tags, the role overwrites our file with the official build.
+##################################################################################################
+
+- name: Discover targets and populate ravendb_nodes
   hosts: localhost
   connection: local
   gather_facts: false
 
   tasks:
-    - name: Inspect the shared docker network
+    # ---------- docker mode: discover containers from the shared network -----------------------
+    - name: (docker mode) Inspect the shared docker network
       community.docker.docker_network_info:
         name: "{{ docker_network_name }}"
       register: network_info
+      when: target_mode | default('docker') == 'docker'
 
-    - name: Register each container as a host in the ravendb_nodes group
+    - name: (docker mode) Register each container as a host in the ravendb_nodes group
       ansible.builtin.add_host:
         name: "{{ item.Name }}"
         groups: ravendb_nodes
@@ -17,6 +79,17 @@
         ansible_python_interpreter: /usr/bin/python3
       loop: "{{ network_info.network.Containers.values() | list }}"
       changed_when: false
+      when: target_mode | default('docker') == 'docker'
+
+    # ---------- ssh mode: hosts already populated from inventory --------------------------------
+    - name: (ssh mode) Confirm ravendb_nodes is non-empty (inventory must populate it)
+      ansible.builtin.assert:
+        that:
+          - (groups['ravendb_nodes'] | default([])) | length > 0
+        fail_msg: >-
+          ssh-mode requires an inventory file that populates the ravendb_nodes group.
+          Pass -i inventory/ssh_hosts.yml and run setup_ssh_targets.yml first.
+      when: target_mode | default('docker') == 'ssh'
 
 
 - name: Trust the self-signed CA on the controller
@@ -40,6 +113,39 @@
       when: ca_copy.changed
 
 
+# ------------------------------------------------------------------------------------------------
+# Optional: pre-stage a custom RavenDB build on every container.
+# Only runs when `custom_build` is provided.  Accepts:
+#   - a URL  (http:// or https://)  -> downloaded directly into the container
+#   - a local path on the controller -> copied into the container
+# The role's download step (tagged `download` in the role) must be skipped on the CLI:
+#     ansible-playbook playbooks/install_ravendb.yml -e custom_build=<url-or-path> --skip-tags download
+# ------------------------------------------------------------------------------------------------
+
+- name: Pre-stage custom RavenDB build (only when custom_build is provided)
+  hosts: ravendb_nodes
+  gather_facts: false
+
+  tasks:
+    - name: Download remote custom build to /tmp/ravendb.deb
+      ansible.builtin.get_url:
+        url: "{{ custom_build }}"
+        dest: /tmp/ravendb.deb
+        mode: '0644'
+      when:
+        - custom_build is defined
+        - custom_build is match('^https?://')
+
+    - name: Copy local custom build to /tmp/ravendb.deb
+      ansible.builtin.copy:
+        src: "{{ custom_build }}"
+        dest: /tmp/ravendb.deb
+        mode: '0644'
+      when:
+        - custom_build is defined
+        - custom_build is not match('^https?://')
+
+
 - name: Install RavenDB (self-signed, secured) on every node
   hosts: ravendb_nodes
   gather_facts: true
@@ -52,7 +158,8 @@
         ravendb_state: present
         ravendb_version: "{{ rdb_version }}"
         ravendb_release_channel: stable
-        ravendb_arch: linux-x64
+        # arm64 on aarch64 hosts, x64 elsewhere
+        ravendb_arch: "{{ 'linux-arm64' if ansible_architecture in ['aarch64','arm64'] else 'linux-x64' }}"
         ravendb_settings_preset: default
         ravendb_secured_self_signed_enabled: true
         ravendb_license_file: "{{ cert_license }}"
@@ -74,6 +181,11 @@
     - name: Skip followers (anything that does not end with 'a')
       ansible.builtin.meta: end_host
       when: not inventory_hostname.endswith('a')
+
+    - name: Install curl (used to call /admin/certificates from inside the container)
+      ansible.builtin.package:
+        name: curl
+        state: present
 
     - name: Extract server certificate as PEM (used as auth to call /admin/certificates)
       ansible.builtin.command: >-
@@ -109,9 +221,27 @@
         group: root
         mode: "0600"
 
+    # Wait until the freshly-installed RavenDB has actually finished booting and is responding
+    # on https://localhost:443.  Without this, the next curl can hit a not-yet-listening port
+    # (on fast x86 it boots in seconds; on small SSH targets it can take minutes), causing the
+    # cert-registration PUT to hang.  We accept 200/401 because at this point the server is up
+    # but no admin cert is registered yet -- 401 from /build/version means "alive but rejecting
+    # unauthenticated callers", which is exactly what we want.
+    - name: Wait until RavenDB is listening on https://localhost:443
+      ansible.builtin.uri:
+        url: "https://localhost:443/build/version"
+        method: GET
+        validate_certs: false
+        status_code: [200, 401, 403]
+        timeout: 10
+      register: rdb_ready
+      retries: 60
+      delay: 5
+      until: rdb_ready.status in [200, 401, 403]
+
     - name: Register the admin client certificate against RavenDB as ClusterAdmin
       ansible.builtin.shell: >-
-        curl -sS -X PUT "https://localhost:443/admin/certificates"
+        curl -sS --max-time 30 -X PUT "https://localhost:443/admin/certificates"
         -H "Content-Type: application/json"
         --cert /etc/ravendb/security/server.pem
         --key /etc/ravendb/security/server.key
@@ -122,5 +252,5 @@
           "SecurityClearance": "ClusterAdmin"
         }'
       register: cert_register
-      changed_when: '"error" not in cert_register.stdout'
-      failed_when: '"InvalidAuth" in cert_register.stdout'
+      changed_when: cert_register.rc == 0 and "error" not in cert_register.stdout
+      failed_when: cert_register.rc != 0 or "InvalidAuth" in cert_register.stdout

@@ -1,0 +1,395 @@
+##################################################################################################
+# playbooks/add_node.yml
+#
+# Provisions ONE new container, installs RavenDB on it, and OPTIONALLY joins it as a Member
+# to an existing cluster.  Use this to grow a cluster mid-test, add a standalone node with
+# a different RavenDB version, or chaos-test "what happens when a new node joins live."
+#
+# What it does, in order:
+#   1. Validates node_name and computes the effective node tag.
+#   2. Launches the new docker container on the shared network.
+#   3. Refreshes the /etc/hosts ANSIBLE MANAGED CHAOS LAB block on the controller AND inside
+#      every existing container, so <new-node>.<ravendb_domain> resolves everywhere.
+#   4. Optionally pre-stages a custom RavenDB build on the new node (custom_build).
+#   5. Installs RavenDB on the new node only.
+#   6. If join_to is set: waits for the new node to come up, then joins it to the leader
+#      named by join_to as a Member.  If join_to is NOT set: stops here, leaves the node
+#      as a standalone single-node cluster.
+#   7. Prints the build version of the new node.
+#
+# INPUTS:
+#   node_name      REQUIRED.  Any container name (e.g. 1d, xyz3, custom_42).  Must not
+#                  already exist on the docker network.
+#   rdb_version    OPTIONAL.  RavenDB version to install.  Defaults to group_vars rdb_version.
+#   custom_build   OPTIONAL.  Path or URL to a custom .deb.  Requires --skip-tags download.
+#   join_to        OPTIONAL.  Container name of the leader to join (e.g. join_to=1a).
+#                  If omitted, the new node stays standalone -- no cluster join is attempted.
+#   node_tag       OPTIONAL.  Single-letter cluster tag for the new node (e.g. D).
+#                  Defaults to the last char of node_name (if a single lowercase letter,
+#                  uppercased), else 'A'.  Override when node_name doesn't end in a letter
+#                  AND you're joining a cluster (the tag must be unique within that cluster).
+#   passive        OPTIONAL (default false).  When true AND join_to is not set, skip the
+#                  admin-cert registration so the node stays in passive state and can be
+#                  added to a cluster manually later (e.g. via Studio).  Access Studio on
+#                  the new node via its setup wizard (no client cert required while passive).
+#   container_memory OPTIONAL.  cgroup memory cap for the new container (default 2500m).
+#
+# RUN EXAMPLES:
+#
+#   # TEST 1 -- standalone bootstrapped 1-node cluster.
+#   # Good for: quickly getting a fresh node with admin access, to poke at it via Studio
+#   # or to start writing docs immediately.  Node comes up as its own cluster tag A.
+#   ansible-playbook playbooks/add_node.yml -K -e node_name=solo1
+#
+#   # TEST 2 -- standalone PASSIVE (not bootstrapped, no cluster identity).
+#   # Good for: provisioning a node you intend to later add to an existing cluster
+#   # MANUALLY via Studio (the "Add Node" flow on the destination cluster).
+#   # Browse https://<node>.hubsink.test/ to see the setup wizard.
+#   ansible-playbook playbooks/add_node.yml -K -e node_name=xyz3 -e passive=true
+#
+#   # TEST 3 -- grow cluster 1 with a 4th node (convention-following name).
+#   # Good for: scaling an existing cluster.  Tag D is auto-derived from 'd' in '1d'.
+#   ansible-playbook playbooks/add_node.yml -K -e node_name=1d -e join_to=1a
+#
+#   # TEST 4 -- non-convention name + explicit tag, joining cluster 1's leader.
+#   # Good for: when the convention name doesn't fit (e.g. a memorable name for a chaos
+#   # node) but you still want it inside an existing cluster with a tag you choose.
+#   ansible-playbook playbooks/add_node.yml -K \
+#       -e node_name=myextra \
+#       -e join_to=1a \
+#       -e node_tag=E
+#
+#   # TEST 5 -- standalone bootstrapped node from a custom .deb (local file).
+#   # Good for: chaos-testing a developer branch build before it ships.  Skip-tags
+#   # tells the upstream role NOT to wipe and re-download our pre-staged .deb.
+#   # Tip: prime /tmp with a local .deb once and reuse it across runs to avoid S3:
+#   #   curl -L -o /tmp/ravendb-7.2.2.deb \
+#   #     "https://daily-builds.s3.amazonaws.com/ravendb_7.2.2-0_ubuntu.22.04_amd64.deb"
+#   ansible-playbook playbooks/add_node.yml -K \
+#       -e node_name=customsolo \
+#       -e custom_build=/tmp/ravendb-7.2.2.deb \
+#       --skip-tags download
+#
+#   # TEST 6 -- custom .deb + join an existing cluster.
+#   # Good for: dropping a dev-branch node directly into a running cluster (mid-test).
+#   # Combines custom_build (skip-tags download) with join_to + explicit tag.
+#   ansible-playbook playbooks/add_node.yml -K \
+#       -e node_name=customjoin \
+#       -e custom_build=/tmp/ravendb-7.2.2.deb \
+#       -e join_to=1a \
+#       -e node_tag=F \
+#       --skip-tags download
+#
+# NOTES:
+#   * Requires sudo (-K) because it edits /etc/hosts on the controller.
+#   * The new node is always joined as a Member (never a Promotable or Watcher).
+#   * RavenDB Free license caps clusters at 3 nodes.  Adding a 4th to a Free-licensed
+#     cluster will fail with a licensing error at join time.
+#   * Standalone nodes (no join_to) come up as their own 1-node cluster with tag 'A'.
+##################################################################################################
+
+
+- name: Provision the new container
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate node_name is provided
+      ansible.builtin.assert:
+        that:
+          - node_name is defined
+          - node_name | length > 0
+        fail_msg: "node_name must be set, e.g. -e node_name=1d"
+
+    - name: Compute effective node_tag (explicit > last-char-of-name > 'A')
+      ansible.builtin.set_fact:
+        effective_node_tag: >-
+          {{ (node_tag | upper) if (node_tag is defined and node_tag | length == 1)
+             else (node_name[-1:] | upper) if (node_name[-1:] is match('^[a-zA-Z]$'))
+             else 'A' }}
+
+    - name: Show resolved node parameters
+      ansible.builtin.debug:
+        msg: "node_name={{ node_name }}  tag={{ effective_node_tag }}  join_to={{ join_to | default('(standalone, no join)') }}"
+
+    - name: Launch the new container on the shared docker network
+      community.docker.docker_container:
+        name: "{{ node_name }}"
+        hostname: "{{ node_name }}"
+        image: "{{ docker_image }}"
+        state: started
+        restart_policy: unless-stopped
+        privileged: true
+        command: /usr/sbin/init
+        cgroupns_mode: host
+        memory: "{{ container_memory | default('2500m') }}"
+        memory_swap: "{{ container_memory | default('2500m') }}"
+        networks:
+          - name: "{{ docker_network_name }}"
+        networks_cli_compatible: true
+        purge_networks: true
+        volumes:
+          - /sys/fs/cgroup:/sys/fs/cgroup:rw
+        tmpfs:
+          - /run
+          - /tmp
+
+
+- name: Ensure ravendb python client is available on the controller (needed only when joining)
+  hosts: localhost
+  connection: local
+  gather_facts: true
+
+  tasks:
+    - name: Include ravendb python client prerequisites role
+      ansible.builtin.include_role:
+        name: ravendb.ravendb.ravendb_python_client_prerequisites
+      when: join_to is defined
+
+
+- name: Discover all containers (existing + new) and rebuild the /etc/hosts block
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Inspect the shared docker network
+      community.docker.docker_network_info:
+        name: "{{ docker_network_name }}"
+      register: network_info
+
+    - name: Build {name -> ip} for every container
+      ansible.builtin.set_fact:
+        node_ip_map: "{{ node_ip_map | default({}) | combine({item.Name: item.IPv4Address.split('/')[0]}) }}"
+      loop: "{{ network_info.network.Containers.values() | list }}"
+
+    - name: Sort container names for stable iteration
+      ansible.builtin.set_fact:
+        container_names: "{{ node_ip_map.keys() | list | sort }}"
+
+    - name: Build the /etc/hosts block
+      ansible.builtin.set_fact:
+        hosts_block: |-
+          {% for name in container_names %}
+          {{ node_ip_map[name] }} {{ name }}.{{ ravendb_domain }}
+          {% endfor %}
+
+    - name: Register every container in ravendb_nodes
+      ansible.builtin.add_host:
+        name: "{{ item }}"
+        groups: ravendb_nodes
+        ansible_connection: community.docker.docker
+        ansible_python_interpreter: /usr/bin/python3
+      loop: "{{ container_names }}"
+      changed_when: false
+
+
+- name: Upsert /etc/hosts on the controller
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: true
+
+  tasks:
+    - name: Upsert the ANSIBLE MANAGED CHAOS LAB block
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} ANSIBLE MANAGED CHAOS LAB"
+        block: "{{ hostvars['localhost'].hosts_block }}"
+
+
+- name: Upsert /etc/hosts inside every container (including the new one)
+  hosts: ravendb_nodes
+  gather_facts: false
+  become: true
+
+  tasks:
+    - name: Upsert the ANSIBLE MANAGED CHAOS LAB block (inside container)
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} ANSIBLE MANAGED CHAOS LAB"
+        block: "{{ hostvars['localhost'].hosts_block }}"
+        unsafe_writes: true
+
+
+- name: Pre-stage custom RavenDB build on the new node (only when custom_build is provided)
+  hosts: "{{ node_name }}"
+  gather_facts: false
+
+  tasks:
+    - name: Download remote custom build to /tmp/ravendb.deb
+      ansible.builtin.get_url:
+        url: "{{ custom_build }}"
+        dest: /tmp/ravendb.deb
+        mode: '0644'
+      when:
+        - custom_build is defined
+        - custom_build is match('^https?://')
+
+    - name: Copy local custom build to /tmp/ravendb.deb
+      ansible.builtin.copy:
+        src: "{{ custom_build }}"
+        dest: /tmp/ravendb.deb
+        mode: '0644'
+      when:
+        - custom_build is defined
+        - custom_build is not match('^https?://')
+
+
+- name: Install RavenDB on the new node only
+  hosts: "{{ node_name }}"
+  gather_facts: true
+
+  tasks:
+    - name: Include ravendb_node role
+      ansible.builtin.include_role:
+        name: ravendb.ravendb.ravendb_node
+      vars:
+        ravendb_state: present
+        ravendb_version: "{{ rdb_version }}"
+        ravendb_release_channel: stable
+        ravendb_arch: linux-x64
+        ravendb_settings_preset: default
+        ravendb_secured_self_signed_enabled: true
+        ravendb_license_file: "{{ cert_license }}"
+        ravendb_certificate_file: "{{ cert_server_pfx }}"
+        ravendb_certificate_password: ""
+        ravendb_ca_certificate_file: "{{ cert_ca_crt }}"
+        ravendb_ca_key_file: "{{ cert_ca_key }}"
+        ravendb_node_tag: "{{ hostvars['localhost'].effective_node_tag }}"
+        ravendb_self_signed_public_server_url: "https://{{ inventory_hostname }}.{{ ravendb_domain }}:443"
+        ravendb_self_signed_public_server_url_tcp: "tcp://{{ inventory_hostname }}.{{ ravendb_domain }}:38888"
+
+
+- name: Register the admin client certificate on the new node (only when standalone -- no join_to)
+  hosts: "{{ node_name }}"
+  gather_facts: false
+  become: true
+
+  tasks:
+    - name: Skip if joining an existing cluster (admin cert syncs via cluster topology)
+      ansible.builtin.meta: end_play
+      when: join_to is defined
+
+    - name: Skip if caller asked to leave the node passive (so it can be joined to a cluster later via Studio)
+      ansible.builtin.meta: end_play
+      when: passive | default(false) | bool
+
+    - name: Install curl (used to call /admin/certificates from inside the container)
+      ansible.builtin.package:
+        name: curl
+        state: present
+
+    - name: Extract server certificate as PEM (used as auth to call /admin/certificates)
+      ansible.builtin.command: >-
+        openssl pkcs12
+        -in /etc/ravendb/security/server.pfx
+        -clcerts -nokeys
+        -out /etc/ravendb/security/server.pem
+        -legacy -passin pass:
+
+    - name: Extract server private key
+      ansible.builtin.command: >-
+        openssl pkcs12
+        -in /etc/ravendb/security/server.pfx
+        -nocerts -nodes
+        -out /etc/ravendb/security/server.key
+        -legacy -passin pass:
+
+    - name: Lock down extracted server material (root:root 0600)
+      ansible.builtin.file:
+        path: "{{ item }}"
+        mode: "0600"
+        owner: root
+        group: root
+      loop:
+        - /etc/ravendb/security/server.pem
+        - /etc/ravendb/security/server.key
+
+    - name: Copy the pre-built admin client PFX onto the new node
+      ansible.builtin.copy:
+        src: "{{ cert_client_pfx }}"
+        dest: /etc/ravendb/security/client.pfx
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Register the admin client certificate against RavenDB as ClusterAdmin
+      ansible.builtin.shell: >-
+        curl -sS -X PUT "https://localhost:443/admin/certificates"
+        -H "Content-Type: application/json"
+        --cert /etc/ravendb/security/server.pem
+        --key /etc/ravendb/security/server.key
+        -k
+        -d '{
+          "Name": "AdminClientCert",
+          "Certificate": "'"$(base64 -w 0 /etc/ravendb/security/client.pfx)"'",
+          "SecurityClearance": "ClusterAdmin"
+        }'
+      register: cert_register
+      changed_when: cert_register.rc == 0 and "error" not in cert_register.stdout
+      failed_when: cert_register.rc != 0 or "InvalidAuth" in cert_register.stdout
+
+
+- name: Join the new node to the requested cluster (only when join_to is provided)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Wait until the new node's HTTPS endpoint is up (any auth response counts -- 401/403 just means the cert isn't known yet, which is expected on a fresh node)
+      ansible.builtin.uri:
+        url: "https://{{ node_name }}.{{ ravendb_domain }}:443/cluster/topology"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        status_code: [200, 401, 403]
+      register: new_node_ready
+      retries: 30
+      delay: 2
+      until: new_node_ready is succeeded
+      when: join_to is defined
+
+    - name: Add the new node as a Member to join_to's leader
+      ravendb.ravendb.node:
+        tag: "{{ effective_node_tag }}"
+        type: Member
+        url: "https://{{ node_name }}.{{ ravendb_domain }}:443"
+        leader_url: "https://{{ join_to }}.{{ ravendb_domain }}:443"
+        certificate_path: "{{ cert_dir }}/client.pem"
+        ca_cert_path: "{{ cert_ca_crt }}"
+      when: join_to is defined
+
+
+- name: Verify what's running on the new node
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Print summary (passive mode -- skipping /build/version since cert auth is not yet usable)
+      ansible.builtin.debug:
+        msg: "{{ node_name }} standalone PASSIVE (not bootstrapped, not joined)  ->  add it to a cluster via Studio when ready"
+      when: passive | default(false) | bool
+
+    - name: End play here for passive nodes (avoid the cert-authenticated /build/version call)
+      ansible.builtin.meta: end_play
+      when: passive | default(false) | bool
+
+    - name: Ask /build/version (with retries -- RavenDB takes a few seconds to bind 443)
+      ansible.builtin.uri:
+        url: "https://{{ node_name }}.{{ ravendb_domain }}:443/build/version"
+        method: GET
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+      register: new_build_info
+      retries: 30
+      delay: 2
+      until: new_build_info is succeeded
+
+    - name: Print summary
+      ansible.builtin.debug:
+        msg: >-
+          {{ node_name }} {{ 'joined ' ~ join_to if join_to is defined else 'standalone (not joined)' }}
+          ->  tag={{ effective_node_tag }}, {{ new_build_info.json.ProductVersion }}
+          (build {{ new_build_info.json.BuildVersion }}, commit {{ new_build_info.json.CommitHash }})

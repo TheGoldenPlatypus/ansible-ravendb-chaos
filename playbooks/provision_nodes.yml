@@ -1,3 +1,28 @@
+##################################################################################################
+# playbooks/provision_nodes.yml
+#
+# Creates one docker container per (cluster_id, node_letter) on a shared docker network.
+# RavenDB is NOT installed here -- this just lays out the empty containers.  Names follow
+# the convention <cluster_id><node_letter>, e.g. 1a, 1b, 1c, 2a, ...
+#
+# INPUTS (all overridable via `-e key=value`; defaults live in inventory/group_vars/all.yml):
+#   clusters_count       how many cluster ids to generate names for          (default: 1)
+#   nodes_per_cluster    how many letters per cluster id (max 26)            (default: 3)
+#   docker_network_name  shared docker network the containers attach to      (default: hubsinknet)
+#   docker_image         image to launch                                     (default: ubuntu2204-ansible)
+#   container_memory     per-container cgroup memory cap                     (default: 2500m)
+#
+# RUN EXAMPLES:
+#   # use all defaults (1 cluster x 3 nodes = 3 containers)
+#   ansible-playbook playbooks/provision_nodes.yml
+#
+#   # 2 clusters x 3 nodes = 6 containers ([1a,1b,1c], [2a,2b,2c])
+#   ansible-playbook playbooks/provision_nodes.yml -e clusters_count=2
+#
+#   # 3 clusters x 5 nodes = 15 containers ([1a,1b,1c,1d,1e]... [3a,3b,3c,3d,3e]), tighter memory cap 
+#   ansible-playbook playbooks/provision_nodes.yml -e clusters_count=3 -e nodes_per_cluster=5 -e container_memory=1500m
+##################################################################################################
+
 - name: Provision docker containers for RavenDB chaos lab
   hosts: localhost
   connection: local
@@ -30,6 +55,9 @@
         privileged: true
         command: /usr/sbin/init
         cgroupns_mode: host
+
+        memory: "{{ container_memory | default('2500m') }}"
+        memory_swap: "{{ container_memory | default('2500m') }}"
         networks:
           - name: "{{ docker_network_name }}"
         networks_cli_compatible: true
