@@ -1,5 +1,5 @@
 ##################################################################################################
-# toolbox/show_replication.yml
+# toolbox/diagnostic/diagnostic_replication.yml
 #
 # Dumps the incoming + outgoing replication connections for a database on a target node.
 # Useful for diagnosing "who's talking to whom right now" -- e.g. finding the responsible
@@ -10,7 +10,7 @@
 #   db_name  REQUIRED.  Database name.
 #
 # RUN EXAMPLE:
-#   ansible-playbook toolbox/show_replication.yml -e target=2a -e db_name=Tenants
+#   ansible-playbook toolbox/diagnostic/diagnostic_replication.yml -e target=2a -e db_name=Tenants
 ##################################################################################################
 
 - name: Show active replication connections on a target node

@@ -1,5 +1,5 @@
 ##################################################################################################
-# toolbox/read_doc_count.yml
+# toolbox/diagnostic/diagnostic_doc_count.yml
 #
 # Reads CountOfDocuments from /stats on a target node and prints it.  Quick smoke check
 # for "did the docs land?" without opening Studio.
@@ -9,7 +9,7 @@
 #   db_name  REQUIRED.  Database name.
 #
 # RUN EXAMPLE:
-#   ansible-playbook toolbox/read_doc_count.yml -e target=1b -e db_name=Tenants
+#   ansible-playbook toolbox/diagnostic/diagnostic_doc_count.yml -e target=1b -e db_name=Tenants
 ##################################################################################################
 
 - name: Read doc count on a target node
