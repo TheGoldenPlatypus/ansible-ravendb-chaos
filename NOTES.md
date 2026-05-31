@@ -32,7 +32,7 @@ usefully. **Aim for ≥ 2 GB RAM per node for real testing.**
 on VMs.
 
 - Same-host backup→restore: works out of the box.
-- Cross-host restore (Karmel's M11/P7 on VMs): you must copy the backup folder between hosts
+- Cross-host restore: you must copy the backup folder between hosts
   yourself:
   ```bash
   scp -r worker4@192.168.100.14:/backups/<folder> /tmp/relay
@@ -137,22 +137,13 @@ with `upgrade_node.yml`). The added value is mode-aware dispatch (`cut_link.yml`
 
 CV equality is RavenDB's actual replication-consistency primitive. Two nodes have the same data
 exactly when their DB CVs are equal (modulo entry order). "Etag stopped moving for N seconds" is
-an indirect inference; CV equality is the direct check, and it's what every Karmel scenario
-asserts as the headline invariant anyway.
+an indirect inference; CV equality is the direct check.
 
 ### Why `set_mentor_node.yml` reads the existing task and `combine()`s instead of building a body from scratch
 
 Each task type's PUT body has its own required fields (Backup needs `BackupType` +
 `LocalSettings`, ETLs need connection-string refs, etc.). GET-modify-PUT means we never have to
 know what those fields are -- we just preserve whatever is there and tweak `MentorNode`.
-
-### Why no `workload_mixed.yml`
-
-Karmel's plan referenced `tools/qa/filtered-workload.ps1` -- a script, not a playbook. Real
-sustained rate-limited concurrent writers with CSV logging are easy in Python and miserable in
-Ansible. Atomic writers (`write_docs`, `write_attachments`, `write_counters`, `write_timeseries`)
-cover everything Karmel actually asserts; "mixed at sustained rate" was an aesthetic preference,
-not a test invariant.
 
 ### Why the `diagnostic_` / `wait_for_` prefixes (Option B was picked)
 

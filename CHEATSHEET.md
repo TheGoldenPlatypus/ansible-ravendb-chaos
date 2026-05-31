@@ -269,10 +269,10 @@ ansible-playbook toolbox/service/force_cluster_asymmetry.yml -K -e '{"version_ma
 ### `partition_set.yml`
 
 ```bash
-# Karmel P1-style: isolate hub mentor 1a from the other 8 nodes (cross-cluster).
+# isolate hub mentor 1a from the other 8 nodes (cross-cluster).
 ansible-playbook toolbox/network/partition_set.yml -K -e '{"set_a":["1a"],"set_b":["1b","1c","2a","2b","2c","3a","3b","3c"]}'
 
-# Karmel P2-style: isolate Sink_A from Hub + Sink_B.
+# isolate Sink_A from Hub + Sink_B.
 ansible-playbook toolbox/network/partition_set.yml -K -e '{"set_a":["2a","2b","2c"],"set_b":["1a","1b","1c","3a","3b","3c"]}'
 
 # Overlapping sets -- self-pairs auto-skipped (here: 3 effective pairs 1a-1b, 1a-1c, 1b-1c).
