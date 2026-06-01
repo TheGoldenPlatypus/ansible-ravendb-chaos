@@ -6,8 +6,8 @@ selfsignedmaterials/
 *.csr
 license.json
 
-# per-sink replication certs minted at runtime by scenarios/hub-sink/tasks/define_hub.yml
-scenarios/hub-sink/replication-certs/
+# per-sink replication certs minted at runtime by toolbox/replication/define_hub.yml
+replication-certs/
 
 # real SSH inventory: contains plaintext passwords + internal LAN IPs.  Keep .example tracked.
 inventory/ssh_hosts.yml
@@ -21,3 +21,6 @@ inventory/ssh_hosts.yml
 
 # diagnostic_capture_cv / diagnostic_capture_doc_cv outputs
 captures/
+
+# RavenDB .debs built by scripts/build_ravendb_pr.sh
+builds/

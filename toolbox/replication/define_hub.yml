@@ -1,0 +1,161 @@
+##################################################################################################
+# toolbox/replication/define_hub.yml
+#
+# Hub-side setup for filtered pull-replication.  Defines the Hub task on a cluster leader,
+# then for each sink cluster: mints a fresh per-sink replication PFX, saves it under
+# `replication_certs_dir`, and registers a Hub Access entry with that sink's allowed paths.
+#
+# Generic -- all config is explicit input.  No vars_files; no hardcoded prefix template.
+# Pair with toolbox/replication/attach_sinks.yml to wire the sinks.
+#
+# INPUTS:
+#   hub_leader              REQUIRED.  Container/host name of the hub cluster's leader (e.g. 1a).
+#   db_name                 REQUIRED.  Database name shared across hub + sinks.
+#   hub_task_name           REQUIRED.  Name to give the PullReplicationAsHub task.
+#   sink_cluster_ids        REQUIRED.  JSON list of sink cluster ids (e.g. [2, 3]).  Per-sink
+#                                      Hub Access entries are minted in this order.
+#   sink_allowed_paths      REQUIRED.  Dict: sink_cluster_id -> list of allowed HubToSink path
+#                                      prefixes for that sink (e.g. {2: ["users/sink1/*"]}).
+#   replication_mode        OPTIONAL.  Default "HubToSink, SinkToHub".  Other values:
+#                                      "HubToSink" / "SinkToHub".
+#   sink_to_hub_paths       OPTIONAL.  Dict per sink id -> list of allowed SinkToHub prefixes.
+#                                      Default ["*"] for every sink.
+#   replication_certs_dir   OPTIONAL.  Where to write per-sink PFX files.  Default
+#                                      <repo_root>/replication-certs/.
+#
+# OUTPUT (side effects):
+#   * Hub task created (if absent) at hub_leader.
+#   * One PFX per sink saved to <replication_certs_dir>/cluster<id>.replication.pfx (binary)
+#     and .pfx.b64 (base64 for attach_sinks.yml to read).
+#   * One Hub Access entry per sink registered with the sink's allowed paths.
+#
+# RUN EXAMPLES:
+#   # one sink, single prefix
+#   ansible-playbook toolbox/replication/define_hub.yml -K \
+#       -e hub_leader=1a -e db_name=Tenants -e hub_task_name=hub-sink1 \
+#       -e '{"sink_cluster_ids":[2], "sink_allowed_paths":{"2":["users/sink1/*"]}}'
+#
+#   # two sinks, disjoint prefixes
+#   ansible-playbook toolbox/replication/define_hub.yml -K \
+#       -e hub_leader=1a -e db_name=Tenants -e hub_task_name=hub-T4 \
+#       -e '{"sink_cluster_ids":[2,3],
+#            "sink_allowed_paths":{"2":["users/sink1/*","orders/sink1/*"],
+#                                  "3":["users/sink2/*","orders/sink2/*"]}}'
+##################################################################################################
+
+- name: Define hub-side pull replication (generic)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - hub_leader is defined
+          - db_name is defined
+          - hub_task_name is defined
+          - sink_cluster_ids is defined
+          - sink_cluster_ids is iterable
+          - (sink_cluster_ids | length) > 0
+          - sink_allowed_paths is defined
+          - sink_allowed_paths is mapping
+        fail_msg: >-
+          Required: -e hub_leader=<node> -e db_name=<db> -e hub_task_name=<name>
+          -e '{"sink_cluster_ids":[...], "sink_allowed_paths":{<id>:[<path>,...]}}'
+
+    - name: Resolve defaults
+      ansible.builtin.set_fact:
+        eff_mode: "{{ replication_mode | default('HubToSink, SinkToHub') }}"
+        eff_certs_dir: "{{ replication_certs_dir | default(playbook_dir.split('/toolbox')[0] ~ '/replication-certs') }}"
+        hub_url: "https://{{ hub_leader }}.{{ ravendb_domain }}:443"
+
+    - name: Ensure replication_certs_dir exists
+      ansible.builtin.file:
+        path: "{{ eff_certs_dir }}"
+        state: directory
+        mode: "0755"
+
+    # --- Hub task -----------------------------------------------------------------------------
+
+    - name: Check whether the Hub task '{{ hub_task_name }}' already exists
+      ansible.builtin.uri:
+        url: "{{ hub_url }}/databases/{{ db_name }}/tasks?type=PullReplicationAsHub"
+        method: GET
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        return_content: true
+      register: hub_tasks_before
+
+    - name: PUT the Hub pull-replication task (skipped if it already exists)
+      ansible.builtin.uri:
+        url: "{{ hub_url }}/databases/{{ db_name }}/admin/tasks/pull-replication/hub"
+        method: PUT
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        body_format: json
+        body:
+          Name: "{{ hub_task_name }}"
+          TaskId: null
+          DelayReplicationFor: null
+          Mode: "{{ eff_mode }}"
+          Disabled: false
+          PreventDeletionsMode: "None"
+          WithFiltering: true
+        status_code: [200, 201]
+      when: hub_tasks_before.json.PullReplications | default([]) | selectattr('Name', 'eq', hub_task_name) | list | length == 0
+
+    # --- Per-sink: generate cert -> save -> register Hub Access -------------------------------
+
+    - name: Mint a replication certificate per sink (RavenDB issues it)
+      ansible.builtin.uri:
+        url: "{{ hub_url }}/databases/{{ db_name }}/admin/pull-replication/generate-certificate?validMonths=12"
+        method: POST
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        return_content: true
+      register: sink_cert_results
+      loop: "{{ sink_cluster_ids }}"
+      loop_control:
+        label: "cluster {{ item }}"
+
+    - name: Save each sink's PFX (base64) for attach_sinks.yml to consume
+      ansible.builtin.copy:
+        dest: "{{ eff_certs_dir }}/cluster{{ item.item }}.replication.pfx.b64"
+        content: "{{ item.json.Certificate }}"
+        mode: "0600"
+      loop: "{{ sink_cert_results.results }}"
+      loop_control:
+        label: "cluster {{ item.item }}"
+
+    - name: Save each sink's PFX (binary) for human / Studio import
+      ansible.builtin.copy:
+        dest: "{{ eff_certs_dir }}/cluster{{ item.item }}.replication.pfx"
+        content: "{{ item.json.Certificate | b64decode }}"
+        mode: "0600"
+      loop: "{{ sink_cert_results.results }}"
+      loop_control:
+        label: "cluster {{ item.item }}"
+
+    - name: Register a Hub Access entry per sink with its allowed paths
+      ansible.builtin.uri:
+        url: "{{ hub_url }}/databases/{{ db_name }}/admin/tasks/pull-replication/hub/access?name={{ hub_task_name }}"
+        method: PUT
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        body_format: json
+        body:
+          Name: "access-cluster{{ item.item }}"
+          CertificateBase64: "{{ item.json.PublicKey }}"
+          AllowedHubToSinkPaths: "{{ sink_allowed_paths[item.item | string] | default(sink_allowed_paths[item.item] | default(['*'])) }}"
+          AllowedSinkToHubPaths: "{{ (sink_to_hub_paths | default({}))[item.item | string] | default((sink_to_hub_paths | default({}))[item.item] | default(['*'])) }}"
+        status_code: [200, 201]
+      loop: "{{ sink_cert_results.results }}"
+      loop_control:
+        label: "cluster {{ item.item }} paths={{ sink_allowed_paths[item.item | string] | default(sink_allowed_paths[item.item] | default(['*'])) }}"
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: >-
+          DEFINED  hub task '{{ hub_task_name }}' on {{ hub_leader }} + access entries for sinks
+          {{ sink_cluster_ids }}.  PFXs in {{ eff_certs_dir }}/.
