@@ -118,10 +118,7 @@ provide a shared `lab_backups` volume.
 
 ### `lab_backups` docker volume
 
-- Created by `provision_nodes.yml`. **Survives `teardown_containers.yml`.** Nuke separately:
-  ```bash
-  docker volume rm lab_backups
-  ```
+- Created by `provision_nodes.yml`. Removed by `teardown_containers.yml` alongside the containers and `captures/`.
 
 ---
 

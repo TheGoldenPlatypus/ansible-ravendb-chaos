@@ -88,7 +88,7 @@ ansible-playbook playbooks/form_clusters.yml -K
 
 Studio: open `https://1a.hubsink.test/studio`. Teardown: `ansible-playbook playbooks/teardown_containers.yml -K`.
 
-`provision_nodes.yml` also creates a named docker volume `lab_backups` mounted at `/backups` in every container, so `toolbox/backup/backup_database.yml` outputs are visible across all containers without `docker cp`. The volume survives teardown - `docker volume rm lab_backups` to nuke.
+`provision_nodes.yml` also creates a named docker volume `lab_backups` mounted at `/backups` in every container, so `toolbox/backup/backup_database.yml` outputs are visible across all containers without `docker cp`. The volume is removed by `teardown_containers.yml`.
 
 ## Bring-up - SSH mode
 
@@ -118,7 +118,7 @@ All playbooks live under `playbooks/`. Pass `-K` whenever the playbook needs sud
 | `install_ravendb.yml` | both | discovers targets, trusts CA on controller, runs `ravendb.ravendb.ravendb_node` role, registers admin cert on cluster leaders, chowns `/backups` to the ravendb user | - | `rdb_version`<br>`custom_build` (+ `--skip-tags download`)<br>`cert_dir`<br>`ravendb_domain` |
 | `form_clusters.yml` | both | writes `/etc/hosts` on controller + each host, then merges each cluster's nodes into one RavenDB cluster via the `ravendb.ravendb.node` module | - | `clusters_count`<br>`nodes_per_cluster`<br>`cert_dir`<br>`ravendb_domain` |
 | `add_node.yml` | docker | adds one extra container; can join it to an existing cluster, stay passive, or bootstrap as its own 1-node cluster | `node_name` | `join_to`<br>`node_tag`<br>`passive`<br>`custom_build` (+ `--skip-tags download`)<br>`container_memory`<br>`rdb_version` |
-| `teardown_containers.yml` | docker | removes every container on the network, drops the network, strips `/etc/hosts`. The `lab_backups` volume survives. | - | `docker_network_name` |
+| `teardown_containers.yml` | docker | removes every container on the network, drops the network, removes the `lab_backups` volume, wipes `captures/` at repo root, kills any leftover background workloads (`workload_w1.sh` + `/tmp/w1-*.pid`), strips `/etc/hosts`. | - | `docker_network_name`<br>`backups_volume_name` |
 | `cleanup_ssh_targets.yml` | ssh | uninstalls RavenDB via the role's `state=absent` on each host, flushes leftover chaos rules, strips `/etc/hosts`. Hosts themselves stay. | - | - |
 
 ---
@@ -191,6 +191,9 @@ Each tool's file header has the full inputs + run examples - click the link to r
   **Optional:** `ts_name` (default `Heartrate`), `count` (default 100), `start_timestamp`, `interval_seconds` (default 6), `delete_from`+`delete_to` (switches to delete-range mode).
 - [`restore_revision.yml`](toolbox/writes/restore_revision.yml) - restore an older revision as the new live doc; exercises the attachment-from-revision recreate path.
   **Required:** `target`, `db_name`, `doc_id`, `revision_cv`.
+- [`write_docs_revisions.yml`](toolbox/writes/write_docs_revisions.yml) - PUT N docs × M revisions each, with DISTINCT bodies per PUT so RavenDB actually records each as a new revision (`write_docs.yml` dedups identical bodies into 1 revision).
+  **Required:** `target`, `db_name`, `count`, `revs_per_doc`.
+  **Optional:** `id_prefix` (default `seed`).
 
 ### ⚙️ tasks - ongoing-task ops
 
@@ -205,6 +208,15 @@ Each tool's file header has the full inputs + run examples - click the link to r
 - [`restore_backup.yml`](toolbox/backup/restore_backup.yml) - restore a backup folder as a new DB; waits for completion. **`backup_path` is the FOLDER containing the `.ravendb-snapshot` file, not the file itself.**
   **Required:** `target`, `backup_path`, `new_db_name`.
   **Optional:** `timeout` (default 600), `poll_interval` (default 3).
+
+### 🔁 replication - pull-replication setup
+
+- [`define_hub.yml`](toolbox/replication/define_hub.yml) - hub-side: define the Hub task + mint per-sink certs + register Hub Access entries with per-sink filters.
+  **Required:** `hub_leader`, `db_name`, `hub_task_name`, `sink_cluster_ids` (JSON list), `sink_allowed_paths` (dict: `<sink_id>` → list of allowed `HubToSink` prefixes).
+  **Optional:** `replication_mode` (default `"HubToSink, SinkToHub"`), `sink_to_hub_paths` (dict per sink id → list; default `["*"]`), `replication_certs_dir` (default `<repo_root>/replication-certs/`).
+- [`attach_sinks.yml`](toolbox/replication/attach_sinks.yml) - sink-side: for each sink cluster, create the connection string + sink-pull task using the per-sink PFX `define_hub.yml` wrote.
+  **Required:** `hub_topology_urls` (JSON list of every hub node's URL), `db_name`, `hub_task_name`, `sink_cluster_ids`, `sink_allowed_paths` (must match `define_hub.yml`'s spec).
+  **Optional:** `replication_mode`, `sink_to_hub_paths`, `connection_string_name` (default `hub-connection`), `replication_certs_dir`, `sink_leader_template` (default `{id}a.{{ ravendb_domain }}`).
 
 ### 📨 subscriptions
 
@@ -229,17 +241,30 @@ Each tool's file header has the full inputs + run examples - click the link to r
   **Required:** `target`, `db_name`.
 - [`diagnostic_replication.yml`](toolbox/diagnostic/diagnostic_replication.yml) - dump incoming + outgoing replication connections for a DB.
   **Required:** `target`, `db_name`.
-- [`diagnostic_capture_cv.yml`](toolbox/diagnostic/diagnostic_capture_cv.yml) - fetch `DatabaseChangeVector` from every node of a DB; one file per node.
-  **Required:** `db_name`.
-  **Optional:** `nodes` (default auto-discover), `output_dir`.
-- [`diagnostic_capture_doc_cv.yml`](toolbox/diagnostic/diagnostic_capture_doc_cv.yml) - for a list of doc ids, fetch `@change-vector` from every node holding the doc.
-  **Required:** `db_name`, `ids` (JSON list).
-  **Optional:** `nodes`, `output_dir`.
+- [`diagnostic_capture_cv.yml`](toolbox/diagnostic/diagnostic_capture_cv.yml) - fetch `DatabaseChangeVector` from every probed node; one file per node.
+  **Required:** `db_name`, `nodes` (JSON list).
+  **Optional:** `output_dir` (default `<repo_root>/captures/cv-<db>-<ts>/`).
+- [`diagnostic_capture_doc_cv.yml`](toolbox/diagnostic/diagnostic_capture_doc_cv.yml) - for a list of doc ids, fetch `@change-vector` from every probed node.
+  **Required:** `db_name`, `ids` (JSON list), `nodes` (JSON list).
+  **Optional:** `output_dir`.
 - [`diagnostic_scan_fltr.yml`](toolbox/diagnostic/diagnostic_scan_fltr.yml) - recursively grep captured CVs for literal `FLTR:`; PASS/FAIL exit.
   **Required:** `capture_dir`.
   **Optional:** `strict` (default true).
 - [`diagnostic_partition_list.yml`](toolbox/diagnostic/diagnostic_partition_list.yml) - enumerate active chaos iptables rules across every node + IP→name legend.
   **Optional:** `targets`.
+- [`diagnostic_doc_count_parity.yml`](toolbox/diagnostic/diagnostic_doc_count_parity.yml) - assert every probed node reports the same `CountOfDocuments`.
+  **Required:** `db_name`, `nodes`.
+- [`diagnostic_doc_id_set_parity.yml`](toolbox/diagnostic/diagnostic_doc_id_set_parity.yml) - for a sampled probe set, assert each id is either present-on-all or absent-on-all (no splits).
+  **Required:** `db_name`, `nodes`, and either `ids` (JSON list) OR (`id_prefix` + `count`).
+- [`diagnostic_revision_count_parity.yml`](toolbox/diagnostic/diagnostic_revision_count_parity.yml) - per-doc revision count parity across nodes; catches duplicates / missing revs.
+  **Required:** `db_name`, `nodes`, and either `ids` OR (`id_prefix` + `count`).
+  **Optional:** `expected_count` (also asserts every node reports exactly this count), `page_size` (default 1024).
+- [`diagnostic_schema_version.yml`](toolbox/diagnostic/diagnostic_schema_version.yml) - read `/build/version` per node; dump, optionally assert parity or expected version.
+  **Required:** `nodes`.
+  **Optional:** `require_parity` (default false), `expected_version` (substring match).
+- [`diagnostic_size_envelope.yml`](toolbox/diagnostic/diagnostic_size_envelope.yml) - whole-DB `SizeOnDisk` envelope check. First call captures baseline; subsequent calls (same `baseline_file`) compare and assert each node's growth ≤ `max_growth_pct`.
+  **Required:** `db_name`, `nodes`, `baseline_file` (absolute path).
+  **Optional:** `max_growth_pct` (default 300 — sized to catch leaks, not normal writer-side bookkeeping).
 
 ### ⏱ wait - synchronization gates
 
@@ -252,9 +277,30 @@ Each tool's file header has the full inputs + run examples - click the link to r
 - [`wait_for_member.yml`](toolbox/wait/wait_for_member.yml) - block until target node is back as a full Member.
   **Required:** `cluster_leader`, `db_name`, `target`.
   **Optional:** `timeout_secs` (default 300).
-- [`wait_for_quiescence.yml`](toolbox/wait/wait_for_quiescence.yml) - poll until every node's `DatabaseChangeVector` matches (replication caught up).
-  **Required:** `db_name`.
-  **Optional:** `nodes` (default auto-discover), `timeout` (default 180), `poll_interval` (default 2).
+- [`wait_for_quiescence.yml`](toolbox/wait/wait_for_quiescence.yml) - poll until every probed node's `DatabaseChangeVector` matches (cross-node replication caught up).
+  **Required:** `db_name`, `nodes` (JSON list).
+  **Optional:** `timeout` (default 180), `poll_interval` (default 2).
+- [`wait_for_docs_drain.yml`](toolbox/wait/wait_for_docs_drain.yml) - poll until every probed node's `DatabaseChangeVector` stops changing across two consecutive polls (per-node "writes have flushed" check; distinct from quiescence).
+  **Required:** `db_name`, `nodes`.
+  **Optional:** `timeout` (default 180), `poll_interval` (default 3).
+- [`wait_for_conflicts_resolved.yml`](toolbox/wait/wait_for_conflicts_resolved.yml) - poll `/replication/conflicts` until every probed node reports zero.
+  **Required:** `db_name`, `nodes`.
+  **Optional:** `timeout` (default 60), `poll_interval` (default 2).
+- [`wait_for_leader.yml`](toolbox/wait/wait_for_leader.yml) - poll `/cluster/topology` until a Leader exists; optionally pin to a specific tag.
+  **Required:** `target` (any reachable node).
+  **Optional:** `timeout_secs` (default 60), `expected_leader` (single-letter tag).
+- [`wait_for_marker_propagation.yml`](toolbox/wait/wait_for_marker_propagation.yml) - PUT a uniquely-IDed marker doc on `source`, then poll every target until it appears (end-to-end "replication is flowing" check).
+  **Required:** `db_name`, `source`, `targets` (JSON list).
+  **Optional:** `timeout_secs` (default 60).
+
+### 🏃 workloads - background-workload process management
+
+- [`wait_for_workload_started.yml`](toolbox/workloads/wait_for_workload_started.yml) - block until a workload's pidfile appears on the controller (confirms a fire-and-forget background launch actually started).
+  **Required:** `pidfile`.
+  **Optional:** `timeout` (default 30).
+- [`stop_workload.yml`](toolbox/workloads/stop_workload.yml) - TERM (grace window) then KILL via pidfile; idempotent if the workload already exited.
+  **Required:** `pidfile`.
+  **Optional:** `grace_secs` (default 2).
 
 ---
 
@@ -274,11 +320,14 @@ Globals in `inventory/group_vars/all.yml`:
 
 One-off overrides: `-e key=value` on the command line.
 
+**`quiet` (default `true`)**: looping tasks across the toolbox (`write_docs`, `delete_docs`, `diagnostic_doc_id_set_parity`, `diagnostic_revision_count_parity`, the `_wait_for_*_attempt` files, etc.) carry `no_log: "{{ quiet | default(true) | bool }}"` on the per-item loop. Run output stays readable — you see PLAY banners, validate, and the final `Done`/PASS/FAIL summary, but not per-item PUT/GET spam. Pass `-e quiet=false` to a single tool when you need to see every item for debugging. Failures still print full detail because `result_format=yaml` dumps the failed task regardless of `no_log` on siblings.
+
 ---
 
 ## More
 
 - **[CHEATSHEET.md](CHEATSHEET.md)** - copy-paste runner for every playbook + tool, including optional-var variants.
 - **[NOTES.md](NOTES.md)** - environment caveats (WSL wedge, hardware), per-tool quirks (timeseries date shell-out, delete-range inclusive bounds, backup folder path, etc.), and design decisions (why mode-aware over `_ssh` variants, why CV equality not etag stability, why no `workload_mixed.yml`).
-- **`scenarios/hub-sink/`** - pre-wired hub-sink chaos scenarios that compose the toolbox tools.
+- **`scenarios/EMR/`** - EMR test plan scenarios (RV-1, RV-2, RP-*, RPV-* etc. — full catalog in [EMR_TESTING_PLAN/](EMR_TESTING_PLAN/)). Each scenario composes toolbox tools end-to-end.
+- **`scripts/build_ravendb_pr.sh`** - build a RavenDB `.deb` (Studio included) from any ravendb/ravendb PR. Output lands in `builds/raven-pr<N>.deb`; hand it to `install_ravendb.yml -e custom_build=...`.
 - **`.github/CODEOWNERS`** - repo ownership.

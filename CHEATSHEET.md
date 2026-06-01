@@ -3,6 +3,11 @@
 Copy-paste commands to exercise every playbook in the repo, including each optional-var variant.
 Run from the repo root (`ansible-ravendb-chaos/`).
 
+**Noise control:** loopy tools (`write_docs`, `delete_docs`, `diagnostic_doc_id_set_parity`,
+`diagnostic_revision_count_parity`, `_wait_for_*_attempt`, etc.) default to `quiet=true` and hide
+per-item PUT/GET lines. Add `-e quiet=false` to any command below to see the full per-item firehose
+when debugging a single tool. Final `Done` / PASS / FAIL summaries are always visible regardless.
+
 ---
 
 ## 1. Core infrastructure (`playbooks/`)
@@ -30,7 +35,7 @@ ansible-playbook playbooks/provision_nodes.yml -K -e docker_network_name=otherne
 ansible-playbook playbooks/install_ravendb.yml -K
 
 # Pin to a specific RavenDB version.
-ansible-playbook playbooks/install_ravendb.yml -K -e rdb_version=6.2.6
+ansible-playbook playbooks/install_ravendb.yml -K -e rdb_version=6.2.15
 
 # Install a CUSTOM build from a URL (requires --skip-tags download).
 ansible-playbook playbooks/install_ravendb.yml -K -e custom_build=https://internal.example.com/raven-feature-branch.deb --skip-tags download
@@ -80,7 +85,7 @@ ansible-playbook playbooks/add_node.yml -K -e node_name=1e -e join_to=1a -e cont
 ### `teardown_containers.yml`
 
 ```bash
-# Remove every container on the docker network, drop the network, strip /etc/hosts.
+# Removes containers + docker network + lab_backups volume + captures/ + leftover W-1 + /etc/hosts block.
 ansible-playbook playbooks/teardown_containers.yml -K
 ```
 
@@ -312,25 +317,27 @@ ansible-playbook toolbox/diagnostic/diagnostic_partition_list.yml -e '{"targets"
 ### `diagnostic_capture_cv.yml`
 
 ```bash
-# Auto-discover all lab nodes; write one .cv file per node to captures/cv-Tenants-<timestamp>/.
-ansible-playbook toolbox/diagnostic/diagnostic_capture_cv.yml -e db_name=Tenants
+# Scope to cluster 1 (nodes is REQUIRED -- multi-cluster lab needs explicit scoping).
+ansible-playbook toolbox/diagnostic/diagnostic_capture_cv.yml \
+    -e db_name=Tenants -e '{"nodes":["1a","1b","1c"]}'
 
-# Scoped to a cluster + named output dir.
-ansible-playbook toolbox/diagnostic/diagnostic_capture_cv.yml -e db_name=Tenants \
-    -e '{"nodes":["1a","1b","1c"]}' -e output_dir=captures/m1-baseline
+# Custom output dir.
+ansible-playbook toolbox/diagnostic/diagnostic_capture_cv.yml \
+    -e db_name=Tenants -e '{"nodes":["1a","1b","1c"]}' -e output_dir=captures/m1-baseline
 ```
 
 ### `diagnostic_capture_doc_cv.yml`
 
 ```bash
-# Capture per-doc CVs across all 9 nodes for 3 ids (27 files).
-ansible-playbook toolbox/diagnostic/diagnostic_capture_doc_cv.yml -e db_name=Tenants \
-    -e '{"ids":["micro/doc/0","micro/doc/25","micro/doc/49"]}'
+# Capture per-doc CVs for 3 ids on cluster 1 (3 ids x 3 nodes = 9 files).
+ansible-playbook toolbox/diagnostic/diagnostic_capture_doc_cv.yml \
+    -e db_name=Tenants \
+    -e '{"ids":["micro/doc/0","micro/doc/25","micro/doc/49"],"nodes":["1a","1b","1c"]}'
 
-# Scoped + custom output dir.
-ansible-playbook toolbox/diagnostic/diagnostic_capture_doc_cv.yml -e db_name=Tenants \
-    -e '{"ids":["users/a-1"],"nodes":["1a","1b","1c"]}' \
-    -e output_dir=captures/m1-docs
+# Custom output dir.
+ansible-playbook toolbox/diagnostic/diagnostic_capture_doc_cv.yml \
+    -e db_name=Tenants -e output_dir=captures/m1-docs \
+    -e '{"ids":["users/a-1"],"nodes":["1a","1b","1c"]}'
 ```
 
 ### `diagnostic_scan_fltr.yml`
@@ -346,12 +353,152 @@ ansible-playbook toolbox/diagnostic/diagnostic_scan_fltr.yml -e capture_dir=capt
 ### `wait_for_quiescence.yml`
 
 ```bash
-# Default: auto-discover all nodes; drops the ones returning 404/500/503 from the convergence set.
-ansible-playbook toolbox/wait/wait_for_quiescence.yml -e db_name=Tenants
+# Scope to cluster 1.  nodes is REQUIRED (otherwise a hub-sink lab would try to converge
+# the hub's CVs against the sink's, which never settles).  Drops nodes returning
+# 404/500/503 from the convergence set on the first poll.
+ansible-playbook toolbox/wait/wait_for_quiescence.yml \
+    -e db_name=Tenants -e '{"nodes":["1a","1b","1c"]}'
 
-# Scoped to one cluster + tighter budget.
-ansible-playbook toolbox/wait/wait_for_quiescence.yml -e db_name=Tenants \
-    -e '{"nodes":["1a","1b","1c"]}' -e timeout=60 -e poll_interval=2
+# Tighter budget.
+ansible-playbook toolbox/wait/wait_for_quiescence.yml \
+    -e db_name=Tenants -e '{"nodes":["1a","1b","1c"]}' \
+    -e timeout=60 -e poll_interval=2
+```
+
+### `wait_for_docs_drain.yml`
+
+```bash
+# Per-node "writes have flushed" check -- CV unchanged across two consecutive polls.
+ansible-playbook toolbox/wait/wait_for_docs_drain.yml \
+    -e db_name=Tenants -e '{"nodes":["1a","1b","1c"]}'
+
+# Faster smoke (default poll_interval=3 ⇒ wall ≥ 6s; with poll_interval=1 ⇒ wall ≥ 2s).
+ansible-playbook toolbox/wait/wait_for_docs_drain.yml \
+    -e db_name=Tenants -e '{"nodes":["1a","1b","1c"]}' \
+    -e timeout=20 -e poll_interval=1
+```
+
+### `wait_for_conflicts_resolved.yml`
+
+```bash
+# Poll /replication/conflicts until every node reports zero. Default 60s budget.
+ansible-playbook toolbox/wait/wait_for_conflicts_resolved.yml \
+    -e db_name=Tenants -e '{"nodes":["1a","1b","1c"]}'
+
+# Longer budget.
+ansible-playbook toolbox/wait/wait_for_conflicts_resolved.yml \
+    -e db_name=Tenants -e '{"nodes":["1a","1b","1c"]}' -e timeout=90
+```
+
+### `wait_for_leader.yml`
+
+```bash
+# Any leader will do -- block until /cluster/topology reports one. 60s default budget.
+ansible-playbook toolbox/wait/wait_for_leader.yml -e target=1b
+
+# Pin to a specific node tag (e.g. after a deliberate mentor flip).
+ansible-playbook toolbox/wait/wait_for_leader.yml -e target=1b -e expected_leader=C
+```
+
+### `wait_for_marker_propagation.yml`
+
+```bash
+# Write a marker on 1a, poll 1b and 1c until it appears. 60s default budget.
+ansible-playbook toolbox/wait/wait_for_marker_propagation.yml \
+    -e db_name=Tenants -e source=1a -e '{"targets":["1b","1c"]}'
+
+# Longer budget for slow replication scenarios.
+ansible-playbook toolbox/wait/wait_for_marker_propagation.yml \
+    -e db_name=Tenants -e source=1a -e '{"targets":["1b","1c"]}' -e timeout_secs=180
+```
+
+### `wait_for_workload_started.yml`
+
+```bash
+# Block until a background workload's pidfile shows up (use after a fire-and-forget launch).
+ansible-playbook toolbox/workloads/wait_for_workload_started.yml \
+    -e pidfile=/tmp/w1-1a-db1.pid
+```
+
+### `stop_workload.yml`
+
+```bash
+# TERM (grace window), then KILL.  No-op if the workload already exited.
+ansible-playbook toolbox/workloads/stop_workload.yml \
+    -e pidfile=/tmp/w1-1a-db1.pid
+
+# Custom grace window before KILL.
+ansible-playbook toolbox/workloads/stop_workload.yml \
+    -e pidfile=/tmp/w1-1a-db1.pid -e grace_secs=5
+```
+
+### `diagnostic_doc_count_parity.yml`
+
+```bash
+# Assert every node in cluster 1 reports the same CountOfDocuments.
+ansible-playbook toolbox/diagnostic/diagnostic_doc_count_parity.yml \
+    -e db_name=Tenants -e '{"nodes":["1a","1b","1c"]}'
+```
+
+### `diagnostic_doc_id_set_parity.yml`
+
+```bash
+# Probe a deterministic id range (smoke/i1/0..49); each id must be present-on-all or absent-on-all.
+ansible-playbook toolbox/diagnostic/diagnostic_doc_id_set_parity.yml \
+    -e db_name=Tenants -e id_prefix=smoke/i1 -e count=50 \
+    -e '{"nodes":["1a","1b","1c"]}'
+
+# Or explicit id list.
+ansible-playbook toolbox/diagnostic/diagnostic_doc_id_set_parity.yml \
+    -e db_name=Tenants \
+    -e '{"ids":["users/1","users/42"],"nodes":["1a","1b","1c"]}'
+```
+
+### `diagnostic_revision_count_parity.yml`
+
+```bash
+# Per-id revision count parity across nodes.
+ansible-playbook toolbox/diagnostic/diagnostic_revision_count_parity.yml \
+    -e db_name=Tenants -e id_prefix=smoke/i1 -e count=20 \
+    -e '{"nodes":["1a","1b","1c"]}'
+
+# Strict mode: also assert every id has exactly N revisions everywhere.
+ansible-playbook toolbox/diagnostic/diagnostic_revision_count_parity.yml \
+    -e db_name=Tenants -e id_prefix=smoke/i1 -e count=20 -e expected_count=5 \
+    -e '{"nodes":["1a","1b","1c"]}'
+```
+
+### `diagnostic_schema_version.yml`
+
+```bash
+# Dump per-node FullVersion (no asserts).
+ansible-playbook toolbox/diagnostic/diagnostic_schema_version.yml \
+    -e '{"nodes":["1a","1b","1c"]}'
+
+# Endpoint check after a rolling upgrade -- assert parity + expected major.minor.
+ansible-playbook toolbox/diagnostic/diagnostic_schema_version.yml \
+    -e require_parity=true -e expected_version=7.2 \
+    -e '{"nodes":["1a","1b","1c"]}'
+```
+
+### `diagnostic_size_envelope.yml`
+
+```bash
+# First call -- captures baseline (file doesn't exist yet).
+ansible-playbook toolbox/diagnostic/diagnostic_size_envelope.yml \
+    -e db_name=Tenants -e '{"nodes":["1a","1b","1c"]}' \
+    -e baseline_file=$PWD/captures/size-baseline-Tenants.json
+
+# Later -- checks current SizeOnDisk against the captured baseline (file now exists).
+ansible-playbook toolbox/diagnostic/diagnostic_size_envelope.yml \
+    -e db_name=Tenants -e '{"nodes":["1a","1b","1c"]}' \
+    -e baseline_file=$PWD/captures/size-baseline-Tenants.json
+
+# Tighter envelope (default is 300%).
+ansible-playbook toolbox/diagnostic/diagnostic_size_envelope.yml \
+    -e db_name=Tenants -e '{"nodes":["1a","1b","1c"]}' \
+    -e baseline_file=$PWD/captures/size-baseline-Tenants.json \
+    -e max_growth_pct=25
 ```
 
 ### `write_attachments.yml`
@@ -406,6 +553,23 @@ ansible-playbook toolbox/writes/restore_revision.yml -K -e target=1a -e db_name=
     -e doc_id=files/1 -e revision_cv='A:3-uQvp4csQpESZNSbifH8hxQ'
 ```
 
+### `write_docs_revisions.yml`
+
+```bash
+# Seed 100 docs with 5 distinct revisions each (500 PUTs total) -- needed because write_docs.yml
+# dedups identical bodies into a single revision.  Requires revisions config already enabled.
+ansible-playbook toolbox/writes/write_docs_revisions.yml \
+    -e target=1a -e db_name=db1 -e count=100 -e revs_per_doc=5
+
+# 50k-revision example
+ansible-playbook toolbox/writes/write_docs_revisions.yml \
+    -e target=1a -e db_name=db1 -e count=10000 -e revs_per_doc=5
+
+# Custom prefix
+ansible-playbook toolbox/writes/write_docs_revisions.yml \
+    -e target=1a -e db_name=db1 -e count=20 -e revs_per_doc=3 -e id_prefix=probe/r1
+```
+
 ### `set_mentor_node.yml`
 
 ```bash
@@ -458,27 +622,33 @@ ansible-playbook toolbox/subscriptions/open_subscription.yml
 
 ---
 
-## 3. Scenarios (`scenarios/hub-sink/`)
+## 3. Replication wiring (`toolbox/replication/`)
 
-### `tasks/define_hub.yml`
+### `define_hub.yml`
 
 ```bash
-# Hub-side setup: define pull-replication task + mint per-sink certs + register hub access entries.
-ansible-playbook scenarios/hub-sink/tasks/define_hub.yml -K -e clusters_count=2
+# T3-style: one sink with a single prefix filter.
+ansible-playbook toolbox/replication/define_hub.yml -K \
+    -e hub_leader=1a -e db_name=Tenants -e hub_task_name=bidirectional-tenants \
+    -e '{"sink_cluster_ids":[2], "sink_allowed_paths":{"2":["tenants/cluster2/*"]}}'
+
+# T4-style: two sinks with disjoint filters.
+ansible-playbook toolbox/replication/define_hub.yml -K \
+    -e hub_leader=1a -e db_name=Tenants -e hub_task_name=hub-T4 \
+    -e '{"sink_cluster_ids":[2,3],
+         "sink_allowed_paths":{"2":["users/sink1/*","orders/sink1/*"],
+                               "3":["users/sink2/*","orders/sink2/*"]}}'
 ```
 
-### `tasks/attach_sinks.yml`
+### `attach_sinks.yml`
 
 ```bash
-# Sink-side setup: create the connection string + sink-pull task on every sink.
-ansible-playbook scenarios/hub-sink/tasks/attach_sinks.yml -K -e clusters_count=2
-```
-
-### `chaos_failover.yml`
-
-```bash
-# Full hub-sink chaos failover (needs hub+sink cluster already wired). Interactive (pauses for Enter).
-ansible-playbook scenarios/hub-sink/chaos_failover.yml -K
+# Pairs with the T3-style define_hub above (hub_topology_urls must list every hub node).
+ansible-playbook toolbox/replication/attach_sinks.yml -K \
+    -e db_name=Tenants -e hub_task_name=bidirectional-tenants \
+    -e '{"hub_topology_urls":["https://1a.hubsink.test:443","https://1b.hubsink.test:443","https://1c.hubsink.test:443"],
+         "sink_cluster_ids":[2],
+         "sink_allowed_paths":{"2":["tenants/cluster2/*"]}}'
 ```
 
 ---
@@ -493,27 +663,55 @@ ansible-playbook playbooks/install_ravendb.yml -K
 ansible-playbook playbooks/form_clusters.yml -K
 ansible-playbook toolbox/db/create_database.yml -K -e cluster_leader=1a -e db_name=Tenants
 ansible-playbook toolbox/db/create_database.yml -K -e cluster_leader=2a -e db_name=Tenants
-ansible-playbook scenarios/hub-sink/tasks/define_hub.yml -K -e clusters_count=2
-ansible-playbook scenarios/hub-sink/tasks/attach_sinks.yml -K -e clusters_count=2
+ansible-playbook toolbox/replication/define_hub.yml -K \
+    -e hub_leader=1a -e db_name=Tenants -e hub_task_name=bidirectional-tenants \
+    -e '{"sink_cluster_ids":[2], "sink_allowed_paths":{"2":["tenants/cluster2/*"]}}'
+ansible-playbook toolbox/replication/attach_sinks.yml -K \
+    -e db_name=Tenants -e hub_task_name=bidirectional-tenants \
+    -e '{"hub_topology_urls":["https://1a.hubsink.test:443","https://1b.hubsink.test:443","https://1c.hubsink.test:443"],
+         "sink_cluster_ids":[2],
+         "sink_allowed_paths":{"2":["tenants/cluster2/*"]}}'
 ```
 
-HEAL:
-```
-ansible-playbook toolbox/network/heal_node.yml -e target=1a
-ansible-playbook toolbox/network/heal_node.yml -e target=1b
-ansible-playbook toolbox/network/heal_node.yml -e target=1c
-ansible-playbook toolbox/db/delete_database.yml -K -e cluster_leader=1a -e db_name=Tenants
-ansible-playbook toolbox/db/delete_database.yml -K -e cluster_leader=2a -e db_name=Tenants
-ansible-playbook toolbox/db/create_database.yml -K -e cluster_leader=1a -e db_name=Tenants
-ansible-playbook toolbox/db/create_database.yml -K -e cluster_leader=2a -e db_name=Tenants
-ansible-playbook scenarios/hub-sink/tasks/define_hub.yml -K -e clusters_count=2
-ansible-playbook scenarios/hub-sink/tasks/attach_sinks.yml -K -e clusters_count=2
-ansible-playbook scenarios/hub-sink/chaos_failover.yml -K
+RESET (heal everything + drop+recreate DBs + rewire replication; one-liner via `scripts/reset_hub_sink.sh`):
+
+```bash
+./scripts/reset_hub_sink.sh
 ```
 
 ---
 
-## 5. SSH-mode (VMs / bare metal / other computers)
+## 5. EMR scenarios (`scenarios/EMR/`)
+
+### RV-1 -- mid-rolling-upgrade leader restart + asymmetric partition
+
+End-to-end wrapper (teardown → provision @ v_old → run scenario):
+
+```bash
+# build the v_new .deb (once per PR)
+scripts/build_ravendb_pr.sh 22875
+# → builds/raven-pr22875.deb
+
+# run the full RV-1 test
+scenarios/EMR/RV1/run.sh 6.2.15 builds/raven-pr22875.deb
+```
+
+Or run the scenario directly against an already-provisioned cluster at v_old:
+
+```bash
+ansible-playbook scenarios/EMR/RV1/rv1.yml \
+    -e v_old=6.2.15 \
+    -e v_new_build=$PWD/builds/raven-pr22875.deb
+
+# full 50k-revision spec
+ansible-playbook scenarios/EMR/RV1/rv1.yml \
+    -e v_old=6.2.15 -e v_new_build=$PWD/builds/raven-pr22875.deb \
+    -e pool_size=10000
+```
+
+---
+
+## 6. SSH-mode (VMs / bare metal / other computers)
 
 Same harness, different inventory. Every command becomes `ansible-playbook -i inventory/ssh_hosts.yml ...` and node names map to entries in that file. No other differences - the toolbox + scenarios behave the same.
 
