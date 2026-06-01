@@ -1,0 +1,64 @@
+##################################################################################################
+# toolbox/writes/write_docs_revisions.yml
+#
+# PUTs `count` docs `revs_per_doc` times each, with a DISTINCT body on every PUT so RavenDB
+# actually records each one as a new revision (write_docs.yml uses a fixed body which RavenDB
+# dedups into a single revision -- not what you want when seeding mixed-form revision history
+# or when a scenario needs N revisions per doc).
+#
+#
+# INPUTS:
+#   target         REQUIRED.  Container/host to write to.
+#   db_name        REQUIRED.  Database name (revisions config must already be enabled).
+#   count          REQUIRED.  Number of distinct doc ids.
+#   revs_per_doc   REQUIRED.  Number of distinct revisions to PUT per doc.
+#   id_prefix      OPTIONAL.  Default "seed".  Doc ids become <id_prefix>/0..count-1.
+#
+# RUN EXAMPLES:
+#   # 10k docs x 5 revs = 50k revisions
+#   ansible-playbook toolbox/writes/write_docs_revisions.yml \
+#       -e target=1a -e db_name=db1 -e count=10000 -e revs_per_doc=5
+#
+#   # custom prefix
+#   ansible-playbook toolbox/writes/write_docs_revisions.yml \
+#       -e target=1a -e db_name=db1 -e count=100 -e revs_per_doc=3 -e id_prefix=probe/r1
+##################################################################################################
+
+- name: Write N docs x M distinct revisions each
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - target is defined
+          - db_name is defined
+          - count is defined and (count | int) > 0
+          - revs_per_doc is defined and (revs_per_doc | int) > 0
+        fail_msg: "Required: -e target=<node> -e db_name=<db> -e count=<N> -e revs_per_doc=<M>"
+
+    - name: PUT {{ count }} docs x {{ revs_per_doc }} distinct revisions on {{ target }}/{{ db_name }}
+      ansible.builtin.shell: |
+        set -eu
+        URL="https://{{ target }}.{{ ravendb_domain }}:443/databases/{{ db_name }}"
+        PEM="{{ cert_dir }}/client.pem"
+        CA="{{ cert_ca_crt }}"
+        OK=0; ERR=0
+        for v in $(seq 1 {{ revs_per_doc | int }}); do
+          for n in $(seq 0 {{ (count | int) - 1 }}); do
+            id="{{ id_prefix | default('seed') }}/$n"
+            body="{\"v\":$v,\"src\":\"write_docs_revisions\",\"@metadata\":{\"@collection\":\"MicroDocs\"}}"
+            code=$(curl -sk -o /dev/null -w '%{http_code}' --cert "$PEM" --cacert "$CA" \
+              -X PUT "$URL/docs?id=$id" \
+              -H "Content-Type: application/json" -d "$body")
+            if [ "$code" = "200" ] || [ "$code" = "201" ]; then OK=$((OK+1)); else ERR=$((ERR+1)); fi
+          done
+        done
+        echo "WROTE  ok=$OK  errors=$ERR  expected=$(( {{ count | int }} * {{ revs_per_doc | int }} ))"
+      register: out
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: "{{ out.stdout }}"

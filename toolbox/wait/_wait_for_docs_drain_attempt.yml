@@ -1,0 +1,67 @@
+# Single drain-poll iteration.  Included from wait_for_docs_drain.yml.
+# State carried in:  drain_set, prev_cvs, eff_poll, db_name, ravendb_domain, cert_dir, cert_ca_crt.
+# Flow: probe -> compare to prev_cvs -> if every node's CV stayed equal: end_play.  Otherwise update prev_cvs + sleep.
+
+- name: Probe drain_set
+  ansible.builtin.uri:
+    url: "https://{{ item }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/stats"
+    client_cert: "{{ cert_dir }}/client.pem"
+    ca_path: "{{ cert_ca_crt }}"
+    status_code: [200, 404, 500, 503]
+  register: probe
+  loop: "{{ drain_set }}"
+  loop_control:
+    label: "{{ item }}"
+  no_log: "{{ quiet | default(true) | bool }}"
+
+- name: Snapshot current CVs into a dict (node -> CV)
+  no_log: "{{ quiet | default(true) | bool }}"
+  ansible.builtin.set_fact:
+    curr_cvs: >-
+      {{
+        dict(probe.results
+              | selectattr('status', '==', 200)
+              | map(attribute='item')
+              | zip(probe.results
+                      | selectattr('status', '==', 200)
+                      | map(attribute='json.DatabaseChangeVector')
+                      | map('default', '')))
+      }}
+
+- name: Compute "did every node hold its CV since last poll?"
+  no_log: "{{ quiet | default(true) | bool }}"
+  ansible.builtin.set_fact:
+    drained: >-
+      {{
+        (prev_cvs | length) > 0
+        and (curr_cvs | length) == (drain_set | length)
+        and (curr_cvs.keys() | list | sort) == (prev_cvs.keys() | list | sort)
+        and (drain_set
+              | map('extract', curr_cvs)
+              | list)
+            == (drain_set
+                 | map('extract', prev_cvs)
+                 | list)
+      }}
+
+- name: Announce drain
+  ansible.builtin.debug:
+    msg: >-
+      DRAINED  db={{ db_name }}  nodes={{ drain_set }}
+      attempt={{ attempt_idx + 1 }}/{{ max_attempts }}
+      CV held stable across {{ eff_poll }}s window
+  when: drained | bool
+
+- name: End the play on drain
+  ansible.builtin.meta: end_play
+  when: drained | bool
+
+- name: Roll snapshot forward for the next comparison
+  no_log: "{{ quiet | default(true) | bool }}"
+  ansible.builtin.set_fact:
+    prev_cvs: "{{ curr_cvs }}"
+
+- name: Sleep before next attempt
+  no_log: "{{ quiet | default(true) | bool }}"
+  ansible.builtin.pause:
+    seconds: "{{ eff_poll }}"

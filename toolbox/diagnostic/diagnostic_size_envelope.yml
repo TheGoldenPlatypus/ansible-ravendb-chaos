@@ -1,0 +1,135 @@
+##################################################################################################
+# toolbox/diagnostic/diagnostic_size_envelope.yml
+#
+# Whole-DB storage envelope check.  Reads `SizeOnDisk.SizeInBytes` from /stats on each node and
+# compares to a baseline; fails if any node grew by more than `max_growth_pct`.
+#
+# Two modes (auto-detected by whether baseline_file exists):
+#   1. CAPTURE -- baseline_file doesn't exist yet.  Records current sizes to the file, exits ok.
+#   2. CHECK   -- baseline_file exists.  Reads it, fetches current sizes, asserts the per-node
+#                 growth ratio is within max_growth_pct.
+#
+# INPUTS:
+#   db_name           REQUIRED.  Database name.
+#   nodes             REQUIRED.  JSON list of nodes to probe.
+#   baseline_file     REQUIRED.  Absolute path to the baseline JSON file.
+#   max_growth_pct    OPTIONAL.  Default 300.  Per-node growth ceiling vs baseline.
+#                                I-16's purpose is catching runaway leaks (revision table
+#                                not cleaned up, tombstones piling up forever, etc.) which
+#                                produce multi-x growth.  The write-target node in a chaos
+#                                run will normally hit 1.5x-2x just from journal pages,
+#                                tombstones, and scratch files even on a healthy cluster;
+#                                replication-target nodes often stay near baseline because
+#                                RavenDB pre-allocates Voron pages.  So 50% would be a tight
+#                                threshold that catches normal writer-side bookkeeping.
+#                                Raise this if your scenario writes more aggressively;
+#                                lower it for short scenarios.
+#
+# RUN EXAMPLE:
+#   # capture baseline after seeding
+#   ansible-playbook toolbox/diagnostic/diagnostic_size_envelope.yml \
+#       -e db_name=db1 -e '{"nodes":["1a","1b","1c"]}' \
+#       -e baseline_file=$PWD/captures/size-baseline-rv1.json
+#
+#   # later, check current sizes against baseline (auto -- same command)
+##################################################################################################
+
+- name: Storage envelope -- capture-or-check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - db_name is defined
+          - nodes is defined
+          - nodes is iterable
+          - (nodes | length) > 0
+          - baseline_file is defined
+        fail_msg: "Required: -e db_name=<db> -e baseline_file=<path> -e '{\"nodes\":[...]}'"
+
+    - name: GET /stats on each node
+      ansible.builtin.uri:
+        url: "https://{{ item }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/stats"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+      register: stats
+      loop: "{{ nodes }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Build current size map (node -> SizeInBytes)
+      ansible.builtin.set_fact:
+        current_sizes: >-
+          {{
+            dict(stats.results
+                  | map(attribute='item')
+                  | zip(stats.results
+                          | map(attribute='json.SizeOnDisk.SizeInBytes')))
+          }}
+
+    - name: Check whether baseline_file exists
+      ansible.builtin.stat:
+        path: "{{ baseline_file }}"
+      register: baseline_stat
+
+    # ---------- CAPTURE mode ------------------------------------------------------------------
+
+    - name: Ensure baseline directory exists
+      ansible.builtin.file:
+        path: "{{ baseline_file | dirname }}"
+        state: directory
+        mode: '0755'
+      when: not baseline_stat.stat.exists
+
+    - name: Write baseline
+      ansible.builtin.copy:
+        dest: "{{ baseline_file }}"
+        content: "{{ current_sizes | to_nice_json }}\n"
+        mode: '0644'
+      when: not baseline_stat.stat.exists
+
+    - name: Announce capture
+      ansible.builtin.debug:
+        msg: "BASELINE CAPTURED  {{ baseline_file }}  sizes={{ current_sizes }}"
+      when: not baseline_stat.stat.exists
+
+    # ---------- CHECK mode --------------------------------------------------------------------
+
+    - name: Load baseline sizes
+      ansible.builtin.set_fact:
+        baseline_sizes: "{{ lookup('file', baseline_file) | from_json }}"
+      when: baseline_stat.stat.exists
+
+    - name: Compute per-node growth (accumulator)
+      ansible.builtin.set_fact:
+        growth: >-
+          {{
+            (growth | default({})) | combine({
+              item: {
+                'baseline': baseline_sizes[item] | int,
+                'current':  current_sizes[item]  | int,
+                'pct': (((current_sizes[item] | int) - (baseline_sizes[item] | int)) * 100.0
+                        / (baseline_sizes[item] | int)) | round(1)
+              }
+            })
+          }}
+      loop: "{{ nodes }}"
+      loop_control:
+        label: "{{ item }}"
+      when: baseline_stat.stat.exists
+
+    - name: Show growth per node
+      ansible.builtin.debug:
+        msg: "{{ growth }}"
+      when: baseline_stat.stat.exists
+
+    - name: Assert every node is within budget
+      ansible.builtin.assert:
+        that:
+          - (growth.values() | map(attribute='pct') | max) <= (max_growth_pct | default(300) | float)
+        fail_msg: "FAIL  storage envelope blown (>{{ max_growth_pct | default(300) }}%): {{ growth }}"
+        success_msg: "PASS  storage envelope within {{ max_growth_pct | default(300) }}%: {{ growth }}"
+      when: baseline_stat.stat.exists

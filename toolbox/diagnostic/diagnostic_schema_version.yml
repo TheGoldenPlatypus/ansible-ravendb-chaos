@@ -1,0 +1,96 @@
+##################################################################################################
+# toolbox/diagnostic/diagnostic_schema_version.yml
+#
+# Reads /build/version from every probed node and prints the binary version per node.
+# Two modes:
+#
+#   default          -- just dump per-node FullVersion.  Useful at mid-roll checkpoints
+#                       where versions are EXPECTED to be mixed.
+#   require_parity   -- assert FullVersion is identical across nodes.  Use at endpoint
+#                       checkpoints where a rolling upgrade is supposed to have finished.
+#
+# Note on "schema": RavenDB's storage schema number (e.g. 72001) isn't exposed as a clean
+# public REST field; the binary FullVersion is the practical proxy -- a node running the
+# new binary has walked the schema chain before serving requests.  If you need the raw
+# schema number for forensics, check the node's log.
+#
+# INPUTS:
+#   nodes            REQUIRED.  JSON list of node names to query.
+#   require_parity   OPTIONAL.  Default false.  If true, assert FullVersion matches everywhere.
+#   expected_version OPTIONAL.  If set, assert every node's FullVersion contains this string
+#                               (e.g. "6.2" to assert all nodes finished a v_62 -> v_new roll).
+#
+# RUN EXAMPLES:
+#   # mid-roll, mixed binaries expected -- just dump
+#   ansible-playbook toolbox/diagnostic/diagnostic_schema_version.yml \
+#       -e '{"nodes":["1a","1b","1c"]}'
+#
+#   # endpoint check after upgrade
+#   ansible-playbook toolbox/diagnostic/diagnostic_schema_version.yml \
+#       -e require_parity=true -e expected_version=6.2 \
+#       -e '{"nodes":["1a","1b","1c"]}'
+##################################################################################################
+
+- name: Read /build/version per node
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - nodes is defined
+          - nodes is iterable
+          - (nodes | length) > 0
+        fail_msg: "Required: -e '{\"nodes\":[\"1a\",\"1b\",\"1c\"]}'"
+
+    - name: GET /build/version on each node
+      ansible.builtin.uri:
+        url: "https://{{ item }}.{{ ravendb_domain }}:443/build/version"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        status_code: [200, 404, 500, 503]
+      register: ver
+      loop: "{{ nodes }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Build per-node version map
+      ansible.builtin.set_fact:
+        version_map: >-
+          {{
+            dict(ver.results
+                  | selectattr('status', '==', 200)
+                  | map(attribute='item')
+                  | zip(ver.results
+                          | selectattr('status', '==', 200)
+                          | map(attribute='json.FullVersion')
+                          | map('default', '?')))
+          }}
+        unreachable_nodes: "{{ ver.results | rejectattr('status', '==', 200) | map(attribute='item') | list }}"
+
+    - name: Show per-node FullVersion
+      ansible.builtin.debug:
+        msg: "{{ version_map }}"
+
+    - name: Note unreachable nodes
+      ansible.builtin.debug:
+        msg: "UNREACHABLE: {{ unreachable_nodes }}"
+      when: unreachable_nodes | length > 0
+
+    - name: Assert version parity across nodes (optional)
+      ansible.builtin.assert:
+        that:
+          - (version_map.values() | unique | list | length) == 1
+        fail_msg: "FAIL  binary version mismatch: {{ version_map }}"
+        success_msg: "PASS  every node on {{ version_map.values() | first }}"
+      when: (require_parity | default(false) | bool)
+
+    - name: Assert expected_version on every node (optional)
+      ansible.builtin.assert:
+        that:
+          - version_map.values() | reject('search', expected_version) | list | length == 0
+        fail_msg: "FAIL  nodes not on expected version '{{ expected_version }}': {{ version_map }}"
+        success_msg: "PASS  every node matches expected_version='{{ expected_version }}'"
+      when: expected_version is defined

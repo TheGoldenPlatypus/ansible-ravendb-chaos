@@ -1,0 +1,46 @@
+##################################################################################################
+# toolbox/workloads/stop_workload.yml
+#
+# Stop a background workload via its pidfile -- SIGTERM, brief grace window, SIGKILL,
+# then remove the pidfile.  Idempotent: a no-op if the pidfile is already gone (workload
+# exited naturally on its own duration).
+#
+# INPUTS:
+#   pidfile     REQUIRED.  Absolute path to the workload's pidfile.
+#   grace_secs  OPTIONAL.  Default 2.  Seconds between TERM and KILL.
+#
+# RUN EXAMPLE:
+#   ansible-playbook toolbox/workloads/stop_workload.yml \
+#       -e pidfile=/tmp/w1-1a-db1.pid
+##################################################################################################
+
+- name: Stop a background workload via its pidfile
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - pidfile is defined
+        fail_msg: "Required: -e pidfile=<absolute path>"
+
+    - name: TERM (then KILL after grace) the pid in {{ pidfile }}
+      ansible.builtin.shell: |
+        if [ -f "{{ pidfile }}" ]; then
+          pid=$(cat "{{ pidfile }}")
+          kill -TERM $pid 2>/dev/null || true
+          sleep {{ grace_secs | default(2) | int }}
+          kill -KILL $pid 2>/dev/null || true
+          rm -f "{{ pidfile }}"
+          echo "WORKLOAD STOPPED  pid=$pid  pidfile={{ pidfile }}"
+        else
+          echo "WORKLOAD ALREADY EXITED  no pidfile at {{ pidfile }}"
+        fi
+      changed_when: true
+      register: out
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: "{{ out.stdout }}"

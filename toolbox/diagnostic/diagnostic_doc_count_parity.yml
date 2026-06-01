@@ -1,0 +1,79 @@
+##################################################################################################
+# toolbox/diagnostic/diagnostic_doc_count_parity.yml
+#
+# Asserts every probed node reports the same CountOfDocuments for a database.  Nodes that
+# return 404/500/503 (DB not present on that node) are dropped before the comparison so a
+# half-deployed DB doesn't false-fail the assert.
+#
+# INPUTS:
+#   db_name  REQUIRED.  Database name.
+#   nodes    REQUIRED.  JSON list of node names.  Multi-cluster labs have multiple clusters
+#                       answering on the same docker network -- pass the list of nodes you
+#                       actually want to compare (e.g. one cluster only).
+#
+# RUN EXAMPLES:
+#   ansible-playbook toolbox/diagnostic/diagnostic_doc_count_parity.yml \
+#       -e db_name=Tenants -e '{"nodes":["1a","1b","1c"]}'
+##################################################################################################
+
+- name: Assert CountOfDocuments parity across nodes
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - db_name is defined
+          - nodes is defined
+          - nodes is iterable
+          - (nodes | length) > 0
+        fail_msg: "Required: -e db_name=<db> -e '{\"nodes\":[\"1a\",\"1b\",\"1c\"]}'"
+
+    - name: GET /stats on each node
+      ansible.builtin.uri:
+        url: "https://{{ item }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/stats"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        status_code: [200, 404, 500, 503]
+      register: stats
+      loop: "{{ nodes }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Compute the convergence set (nodes that actually have the DB)
+      ansible.builtin.set_fact:
+        convergence_set: "{{ stats.results | selectattr('status', '==', 200) | map(attribute='item') | list }}"
+        skipped_nodes: "{{ stats.results | rejectattr('status', '==', 200) | map(attribute='item') | list }}"
+        per_node_counts: >-
+          {{
+            dict(stats.results
+                  | selectattr('status', '==', 200)
+                  | map(attribute='item')
+                  | zip(stats.results
+                          | selectattr('status', '==', 200)
+                          | map(attribute='json.CountOfDocuments')))
+          }}
+
+    - name: Note any skipped nodes
+      ansible.builtin.debug:
+        msg: "SKIPPED (DB not present / unreachable): {{ skipped_nodes }}"
+      when: skipped_nodes | length > 0
+
+    - name: Fail if no node has the DB
+      ansible.builtin.assert:
+        that:
+          - convergence_set | length > 0
+        fail_msg: "No probed node has database '{{ db_name }}' -- nothing to compare"
+
+    - name: Show per-node counts
+      ansible.builtin.debug:
+        msg: "{{ per_node_counts }}"
+
+    - name: Assert parity
+      ansible.builtin.assert:
+        that:
+          - (per_node_counts.values() | unique | list | length) == 1
+        fail_msg: "FAIL  doc counts differ across nodes: {{ per_node_counts }}"
+        success_msg: "PASS  doc count parity: {{ per_node_counts.values() | first }} on {{ convergence_set }}"
