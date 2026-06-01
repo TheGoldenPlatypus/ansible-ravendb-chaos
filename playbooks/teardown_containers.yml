@@ -26,6 +26,27 @@
         name: "{{ docker_network_name }}"
         state: absent
 
+    - name: Remove the shared backups volume (lab_backups)
+      community.docker.docker_volume:
+        name: "{{ backups_volume_name | default('lab_backups') }}"
+        state: absent
+
+    - name: Wipe captures/ at repo root
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/../captures"
+        state: absent
+
+    - name: Kill any leftover W-1 background workloads + their pidfiles
+      # Background workloads are launched via nohup and survive a Ctrl-C of the scenario.
+      # Teardown is the "reset everything" command, so we sweep them here too.
+      # The [w]orkload regex trick prevents pkill from matching its own command line
+      # (which literally contains the pattern string) and SIGTERM'ing the shell running it.
+      ansible.builtin.shell: |
+        pkill -f '[w]orkload_w1.sh' 2>/dev/null || true
+        rm -f /tmp/w1-*.pid 2>/dev/null || true
+        echo done
+      changed_when: false
+
 
 - name: Strip the hubsink hosts block from the controller's /etc/hosts
   hosts: localhost

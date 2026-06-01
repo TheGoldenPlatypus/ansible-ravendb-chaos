@@ -8,14 +8,12 @@
 # INPUTS:
 #   db_name      REQUIRED.  Database name.
 #   ids          REQUIRED.  JSON list of doc ids (e.g. '["users/1","users/2"]').
-#   nodes        OPTIONAL.  JSON list of node names to probe.  Default = auto-discovered lab nodes.
+#   nodes        REQUIRED.  JSON list of node names to probe.
 #   output_dir   OPTIONAL.  Default = captures/doccv-<db>-<timestamp>/.
 #
-# RUN EXAMPLES:
-#   ansible-playbook toolbox/diagnostic/diagnostic_capture_doc_cv.yml -e db_name=Tenants \
-#       -e '{"ids":["users/1","users/42"]}'
-#   ansible-playbook toolbox/diagnostic/diagnostic_capture_doc_cv.yml -e db_name=Hub_DB \
-#       -e '{"ids":["users/a-1"],"nodes":["3a","3b","3c"]}'
+# RUN EXAMPLE:
+#   ansible-playbook toolbox/diagnostic/diagnostic_capture_doc_cv.yml \
+#       -e db_name=Tenants -e '{"ids":["users/1","users/42"],"nodes":["1a","1b","1c"]}'
 ##################################################################################################
 
 - name: Capture per-node @change-vector for a list of doc ids
@@ -30,29 +28,10 @@
           - db_name is defined
           - ids is defined
           - ids | length > 0
-        fail_msg: "Required: -e db_name=<db> -e '{\"ids\":[...]}'"
-
-    - name: Resolve target_mode
-      ansible.builtin.set_fact:
-        effective_mode: "{{ target_mode | default('docker') }}"
-
-    - name: Auto-discover docker nodes
-      block:
-        - community.docker.docker_network_info:
-            name: "{{ docker_network_name }}"
-          register: net
-        - ansible.builtin.set_fact:
-            discovered_nodes: "{{ net.network.Containers.values() | map(attribute='Name') | list }}"
-      when: effective_mode == 'docker'
-
-    - name: Auto-discover ssh nodes
-      ansible.builtin.set_fact:
-        discovered_nodes: "{{ groups['ravendb_nodes'] | default([]) | list }}"
-      when: effective_mode == 'ssh'
-
-    - name: Resolve effective node list
-      ansible.builtin.set_fact:
-        effective_nodes: "{{ nodes | default(discovered_nodes) }}"
+          - nodes is defined
+          - nodes is iterable
+          - (nodes | length) > 0
+        fail_msg: "Required: -e db_name=<db> -e '{\"ids\":[...],\"nodes\":[\"1a\",\"1b\",\"1c\"]}'"
 
     - name: Resolve output_dir
       ansible.builtin.set_fact:
@@ -60,7 +39,7 @@
 
     - name: Build (node, id) cross product
       ansible.builtin.set_fact:
-        pairs: "{{ effective_nodes | product(ids) | map('list') | list }}"
+        pairs: "{{ nodes | product(ids) | map('list') | list }}"
 
     - name: Ensure output_dir exists
       ansible.builtin.file:
@@ -78,6 +57,7 @@
       loop: "{{ pairs }}"
       loop_control:
         label: "{{ item.0 }}::{{ item.1 }}"
+      no_log: "{{ quiet | default(true) | bool }}"
 
     - name: Write per-(node, id) CV file
       ansible.builtin.copy:
@@ -88,9 +68,10 @@
       loop_control:
         loop_var: r
         label: "{{ r.item.0 }}::{{ r.item.1 }}"
+      no_log: "{{ quiet | default(true) | bool }}"
 
     - name: Summary
       ansible.builtin.debug:
         msg: >-
           Wrote {{ pairs | length }} file(s) to {{ effective_output_dir }}/
-          ({{ effective_nodes | length }} nodes x {{ ids | length }} ids, db={{ db_name }})
+          ({{ nodes | length }} nodes x {{ ids | length }} ids, db={{ db_name }})

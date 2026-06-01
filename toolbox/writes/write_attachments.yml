@@ -51,6 +51,7 @@
       loop_control:
         loop_var: n
         label: "{{ doc_id_prefix | default('micro/doc') }}/{{ n }}::{{ attachment_name | default('data') }}/{{ n }}"
+      no_log: "{{ quiet | default(true) | bool }}"
 
     - name: Done
       ansible.builtin.debug:

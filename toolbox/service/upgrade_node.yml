@@ -44,8 +44,7 @@
         that:
           - target is defined
           - (rdb_version is defined) or (custom_build is defined)
-          - not ((rdb_version is defined) and (custom_build is defined))
-        fail_msg: "Required: -e target=<node> and exactly one of -e rdb_version=... or -e custom_build=..."
+        fail_msg: "Required: -e target=<node> and one of -e rdb_version=... or -e custom_build=... (custom_build wins when both are set)"
 
     - name: (docker) Add target to ravendb_nodes group
       ansible.builtin.add_host:

@@ -12,8 +12,10 @@
   loop: "{{ convergence_set }}"
   loop_control:
     label: "{{ item }}"
+  no_log: "{{ quiet | default(true) | bool }}"
 
 - name: Compute "all CVs equal?" for this attempt
+  no_log: "{{ quiet | default(true) | bool }}"
   ansible.builtin.set_fact:
     last_cvs: "{{ probe.results | selectattr('status', '==', 200) | map(attribute='json.DatabaseChangeVector') | list }}"
     quiescent: >-
@@ -26,7 +28,7 @@
             | map('default', '')
             | map('regex_findall', '[A-Za-z0-9]+:\d+-[A-Za-z0-9+/=_\-]+')
             | map('sort')
-            | map('list')
+            | map('join', ',')
             | unique
             | length) == 1)
       }}
@@ -44,5 +46,6 @@
   when: quiescent | bool
 
 - name: Sleep before next attempt
+  no_log: "{{ quiet | default(true) | bool }}"
   ansible.builtin.pause:
     seconds: "{{ eff_poll }}"

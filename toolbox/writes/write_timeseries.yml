@@ -76,6 +76,7 @@
         loop_var: n
         label: "{{ eff_ts_name }}[{{ n }}]"
       when: not delete_mode
+      no_log: "{{ quiet | default(true) | bool }}"
 
     - name: DELETE-RANGE on {{ doc_id }}/{{ eff_ts_name }}
       ansible.builtin.uri:

@@ -38,7 +38,7 @@
 #   ansible-playbook playbooks/install_ravendb.yml
 #
 #   # install a specific RavenDB version
-#   ansible-playbook playbooks/install_ravendb.yml -e rdb_version=6.2.6
+#   ansible-playbook playbooks/install_ravendb.yml -e rdb_version=6.2.15
 #
 #   # install a CUSTOM build from a URL (e.g. internal CI artifact)
 #   ansible-playbook playbooks/install_ravendb.yml \
@@ -230,12 +230,6 @@
         group: root
         mode: "0600"
 
-    # Wait until the freshly-installed RavenDB has actually finished booting and is responding
-    # on https://localhost:443.  Without this, the next curl can hit a not-yet-listening port
-    # (on fast x86 it boots in seconds; on small SSH targets it can take minutes), causing the
-    # cert-registration PUT to hang.  We accept 200/401 because at this point the server is up
-    # but no admin cert is registered yet -- 401 from /build/version means "alive but rejecting
-    # unauthenticated callers", which is exactly what we want.
     - name: Wait until RavenDB is listening on https://localhost:443
       ansible.builtin.uri:
         url: "https://localhost:443/build/version"

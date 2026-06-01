@@ -15,13 +15,15 @@
 #
 # INPUTS:
 #   db_name          REQUIRED.  Database name.
-#   nodes            OPTIONAL.  JSON list of node names.  Default = auto-discovered lab nodes.
+#   nodes            REQUIRED.  JSON list of node names.  Pass exactly the cluster you want
+#                               to converge -- a multi-cluster lab would otherwise try to
+#                               match CVs across independent clusters and never settle.
 #   timeout          OPTIONAL.  Max wall-clock seconds to wait.  Default 180.
 #   poll_interval    OPTIONAL.  Seconds between polls.  Default 2.
 #
-# RUN EXAMPLES:
-#   ansible-playbook toolbox/wait/wait_for_quiescence.yml -e db_name=Tenants
-#   ansible-playbook toolbox/wait/wait_for_quiescence.yml -e db_name=Hub_DB -e timeout=300 -e '{"nodes":["1a","1b","1c"]}'
+# RUN EXAMPLE:
+#   ansible-playbook toolbox/wait/wait_for_quiescence.yml \
+#       -e db_name=Tenants -e '{"nodes":["1a","1b","1c"]}'
 ##################################################################################################
 
 - name: Wait until every node's DatabaseChangeVector matches
@@ -34,29 +36,13 @@
       ansible.builtin.assert:
         that:
           - db_name is defined
-        fail_msg: "Required: -e db_name=<db>"
+          - nodes is defined
+          - nodes is iterable
+          - (nodes | length) > 0
+        fail_msg: "Required: -e db_name=<db> -e '{\"nodes\":[\"1a\",\"1b\",\"1c\"]}'"
 
-    - name: Resolve target_mode
+    - name: Resolve params + initial state
       ansible.builtin.set_fact:
-        effective_mode: "{{ target_mode | default('docker') }}"
-
-    - name: Auto-discover docker nodes
-      block:
-        - community.docker.docker_network_info:
-            name: "{{ docker_network_name }}"
-          register: net
-        - ansible.builtin.set_fact:
-            discovered_nodes: "{{ net.network.Containers.values() | map(attribute='Name') | list }}"
-      when: effective_mode == 'docker'
-
-    - name: Auto-discover ssh nodes
-      ansible.builtin.set_fact:
-        discovered_nodes: "{{ groups['ravendb_nodes'] | default([]) | list }}"
-      when: effective_mode == 'ssh'
-
-    - name: Resolve effective node list + params + initial state
-      ansible.builtin.set_fact:
-        effective_nodes: "{{ nodes | default(discovered_nodes) }}"
         eff_timeout: "{{ (timeout | default(180)) | int }}"
         eff_poll: "{{ (poll_interval | default(2)) | int }}"
         quiescent: false
@@ -73,7 +59,7 @@
         ca_path: "{{ cert_ca_crt }}"
         status_code: [200, 404, 500, 503]
       register: classify
-      loop: "{{ effective_nodes }}"
+      loop: "{{ nodes }}"
       loop_control:
         label: "{{ item }}"
 
@@ -99,6 +85,7 @@
       loop_control:
         loop_var: attempt_idx
         label: "attempt {{ attempt_idx + 1 }}/{{ max_attempts }}"
+      no_log: "{{ quiet | default(true) | bool }}"
 
     - name: Timeout verdict (only reached if convergence never fired meta:end_play)
       ansible.builtin.fail:

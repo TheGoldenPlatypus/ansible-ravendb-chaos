@@ -49,6 +49,7 @@
       loop_control:
         loop_var: n
         label: "{{ id_prefix | default('micro/doc') }}/{{ n }}"
+      no_log: "{{ quiet | default(true) | bool }}"
 
     - name: Done
       ansible.builtin.debug:

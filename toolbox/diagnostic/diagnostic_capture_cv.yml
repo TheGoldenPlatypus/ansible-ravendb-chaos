@@ -1,19 +1,18 @@
 ##################################################################################################
 # toolbox/diagnostic/diagnostic_capture_cv.yml
 #
-# Read-only.  Fetches the DatabaseChangeVector from every node of a DB and writes one file per
+# Read-only.  Fetches the DatabaseChangeVector from every probed node and writes one file per
 # node to output_dir.  Files are named <node>.cv with the CV string as their only content,
 # easy to diff or feed to diagnostic_scan_fltr.yml.
 #
 # INPUTS:
 #   db_name      REQUIRED.  Database name.
-#   nodes        OPTIONAL.  JSON list of node names to probe.  Default = auto-discovered lab nodes.
+#   nodes        REQUIRED.  JSON list of node names to probe.
 #   output_dir   OPTIONAL.  Where to write files.  Default = captures/cv-<db>-<timestamp>/.
 #
 # RUN EXAMPLES:
-#   ansible-playbook toolbox/diagnostic/diagnostic_capture_cv.yml -e db_name=Tenants
-#   ansible-playbook toolbox/diagnostic/diagnostic_capture_cv.yml -e db_name=Hub_DB -e '{"nodes":["1a","1b","1c"]}'
-#   ansible-playbook -i inventory/ssh_hosts.yml toolbox/diagnostic/diagnostic_capture_cv.yml -e db_name=Tenants
+#   ansible-playbook toolbox/diagnostic/diagnostic_capture_cv.yml \
+#       -e db_name=Tenants -e '{"nodes":["1a","1b","1c"]}'
 ##################################################################################################
 
 - name: Capture per-node DatabaseChangeVector
@@ -26,29 +25,10 @@
       ansible.builtin.assert:
         that:
           - db_name is defined
-        fail_msg: "Required: -e db_name=<db>"
-
-    - name: Resolve target_mode
-      ansible.builtin.set_fact:
-        effective_mode: "{{ target_mode | default('docker') }}"
-
-    - name: Auto-discover docker nodes
-      block:
-        - community.docker.docker_network_info:
-            name: "{{ docker_network_name }}"
-          register: net
-        - ansible.builtin.set_fact:
-            discovered_nodes: "{{ net.network.Containers.values() | map(attribute='Name') | list }}"
-      when: effective_mode == 'docker'
-
-    - name: Auto-discover ssh nodes
-      ansible.builtin.set_fact:
-        discovered_nodes: "{{ groups['ravendb_nodes'] | default([]) | list }}"
-      when: effective_mode == 'ssh'
-
-    - name: Resolve effective node list
-      ansible.builtin.set_fact:
-        effective_nodes: "{{ nodes | default(discovered_nodes) }}"
+          - nodes is defined
+          - nodes is iterable
+          - (nodes | length) > 0
+        fail_msg: "Required: -e db_name=<db> -e '{\"nodes\":[\"1a\",\"1b\",\"1c\"]}'"
 
     - name: Resolve output_dir
       ansible.builtin.set_fact:
@@ -67,9 +47,10 @@
         ca_path: "{{ cert_ca_crt }}"
         status_code: [200, 404, 500, 503]
       register: stats
-      loop: "{{ effective_nodes }}"
+      loop: "{{ nodes }}"
       loop_control:
         label: "{{ item }}"
+      no_log: "{{ quiet | default(true) | bool }}"
 
     - name: Write per-node CV file
       ansible.builtin.copy:
@@ -80,9 +61,10 @@
       loop_control:
         loop_var: r
         label: "{{ r.item }}"
+      no_log: "{{ quiet | default(true) | bool }}"
 
     - name: Summary
       ansible.builtin.debug:
         msg: >-
-          Wrote {{ effective_nodes | length }} CV file(s) to {{ effective_output_dir }}/
-          ({{ effective_nodes | length }} nodes inspected, db={{ db_name }})
+          Wrote {{ nodes | length }} CV file(s) to {{ effective_output_dir }}/
+          ({{ nodes | length }} nodes inspected, db={{ db_name }})

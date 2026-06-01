@@ -35,9 +35,21 @@
           - revision_cv is defined
         fail_msg: "Required: -e target=<node> -e db_name=<db> -e doc_id=<id> -e revision_cv=<cv>"
 
+
+    - name: Encode revision_cv for the URL (spaces -> %20, not +)
+      ansible.builtin.set_fact:
+        revision_cv_enc: "{{ revision_cv | replace('+', '%2B') | replace(' ', '%20') | replace(',', '%2C') | replace(':', '%3A') }}"
+
+    - name: DEBUG -- show exactly what URL Ansible will hit
+      ansible.builtin.debug:
+        msg:
+          - "raw revision_cv:   {{ revision_cv }}"
+          - "encoded:           {{ revision_cv_enc }}"
+          - "full URL:          https://{{ target }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/revisions?changeVector={{ revision_cv_enc }}"
+
     - name: GET the revision content
       ansible.builtin.uri:
-        url: "https://{{ target }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/revisions?changeVector={{ revision_cv | urlencode }}"
+        url: "https://{{ target }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/revisions?changeVector={{ revision_cv_enc }}"
         method: GET
         client_cert: "{{ cert_dir }}/client.pem"
         ca_path: "{{ cert_ca_crt }}"
