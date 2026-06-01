@@ -4,7 +4,7 @@
 # 3-node cluster (1a/1b/1c) starts all on v_old:
 #   0.   Kill any leftover background workload from a previous interrupted run, then validate
 #        inputs.
-#   0.5. Create db1 + enable revisions (revisions must be on before seeding).
+#   0.5. Create db1 + enable revisions.
 #   1.   Seed the doc pool with distinct revisions, then wait for the cluster to settle.
 #   2.   Upgrade 1b and 1c to v_new -- cluster is now mid-roll (1a v_old leader, 1b/1c v_new).
 #   3.   Post-roll baseline.  Cluster is quiet -- check everything matches before any chaos.
@@ -109,7 +109,7 @@
     db_name: db1
     id_prefix: seed
     count: "{{ pool_size | default(10000) | int }}"
-    revs_per_doc: "{{ revs_per_doc | default(5) | int }}"
+    revs_per_doc: "{{ seed_revs_per_doc | default(5) | int }}"
 
 - ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_quiescence.yml
   vars:
@@ -214,7 +214,7 @@
     nodes: ["1a", "1b", "1c"]
     id_prefix: seed
     count: "{{ parity_probe_count | default(50) | int }}"
-    expected_count: "{{ revs_per_doc | default(5) | int }}"
+    expected_count: "{{ seed_revs_per_doc | default(5) | int }}"
 
 # I-16 baseline capture (post-seed, pre-chaos).  File path is repo-root-relative.
 - ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_size_envelope.yml

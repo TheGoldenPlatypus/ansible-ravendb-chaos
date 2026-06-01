@@ -13,7 +13,7 @@ revisions_keep: 100
 # For a fast development shakedown, override on the CLI:  -e pool_size=100
 id_prefix: seed
 pool_size: 10000
-revs_per_doc: 5
+seed_revs_per_doc: 5
 
 # Probe sets for parity asserts (sampled subsets of the seeded pool)
 parity_probe_count: 50
