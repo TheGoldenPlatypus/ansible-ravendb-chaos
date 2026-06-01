@@ -1,0 +1,490 @@
+##################################################################################################
+# scenarios/EMR/RV1/rv1.yml -- mid-rolling-upgrade leader restart + asymmetric partition.
+#
+# 3-node cluster (1a/1b/1c) starts all on v_old:
+#   0.   Kill any leftover background workload from a previous interrupted run, then validate
+#        inputs.
+#   0.5. Create db1 + enable revisions (revisions must be on before seeding).
+#   1.   Seed the doc pool with distinct revisions, then wait for the cluster to settle.
+#   2.   Upgrade 1b and 1c to v_new -- cluster is now mid-roll (1a v_old leader, 1b/1c v_new).
+#   3.   Post-roll baseline.  Cluster is quiet -- check everything matches before any chaos.
+#   4.   Start W-1 in the background -- continuous CRUD on the seeded pool through 5 + 6.
+#   5.   Restart 1a -- forces 1b/1c to elect a new leader despite a v_old follower.
+#        1a rejoins as v_old follower.  Light checks only (writes are still flowing).
+#   6.   Partition 1a from 1b/1c, write to both sides, heal.  Conflicts must auto-resolve
+#        within ~60s.  Light checks only (writes are still flowing).
+#   7.   Upgrade 1a to v_new, stop W-1, wait for everything to settle, full final checks.
+#
+#"light checks" in 5 and 6: check the things that are safe to check during writes: 
+# replication is flowing (a marker doc reaches every node), conflicts get resolved, 
+# binaries are on the right version.  
+#
+# Deep version (invariants, risks, validators) -> EMR_TESTING_PLAN/.
+#
+# PREREQ -- bring up a clean 3-node cluster at v_old.  The scenario takes over from there.
+#
+#   1. ansible-playbook playbooks/teardown_containers.yml -K
+#   2. ansible-playbook playbooks/provision_nodes.yml -K -e clusters_count=1 -e nodes_per_cluster=3
+#   3. ansible-playbook playbooks/install_ravendb.yml -K -e rdb_version=6.2.15
+#      or:
+#      ansible-playbook playbooks/install_ravendb.yml -K -e custom_build=/tmp/raven-62.deb --skip-tags download
+#   4. ansible-playbook playbooks/form_clusters.yml -K -e clusters_count=1 -e nodes_per_cluster=3
+#
+# RUN:
+#   ansible-playbook scenarios/EMR/RV1/rv1.yml \
+#       -e v_old=6.2.15 \
+#       -e v_new_build=$PWD/builds/raven-prNNN.deb
+##################################################################################################
+
+
+# =====================================================================================
+# SECTION 0 -- kill any orphan W-1 from a previously interrupted run
+# =====================================================================================
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars:
+    pidfile: "/tmp/w1-1a-db1.pid"
+
+- name: RV-1 SECTION 0 -- validate inputs + sanity baseline
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - vars.yml
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - v_old is defined
+          - v_new_build is defined
+        fail_msg: "Required: -e v_old=<6.2.x version> -e v_new_build=<path to PR .deb>"
+
+    - name: Show plan
+      ansible.builtin.debug:
+        msg: "RV-1  v_old={{ v_old }}  v_new_build={{ v_new_build }}"
+
+
+# =====================================================================================
+# SECTION 0.5 -- create db1 + enable revisions
+# =====================================================================================
+
+- name: RV-1 SECTION 0.5 -- create db1 + enable revisions
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.debug:
+        msg: "==== SECTION 0.5 -- create db1 + enable revisions ===="
+
+- ansible.builtin.import_playbook: ../../../toolbox/db/create_database.yml
+  vars:
+    cluster_leader: 1a
+    db_name: db1
+    replication_factor: 3
+
+- ansible.builtin.import_playbook: ../../../toolbox/db/configure_revisions.yml
+  vars:
+    target: 1a
+    db_name: db1
+    minimum_revisions: 100
+
+
+# =====================================================================================
+# SECTION 1 -- seed the pool with distinct revisions.
+# =====================================================================================
+
+- name: RV-1 SECTION 1 -- seed pool with distinct revisions + quiesce
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.debug:
+        msg: "==== SECTION 1 -- seed pool with distinct revisions + quiesce ===="
+
+- ansible.builtin.import_playbook: ../../../toolbox/writes/write_docs_revisions.yml
+  vars:
+    target: 1a
+    db_name: db1
+    id_prefix: seed
+    count: "{{ pool_size | default(10000) | int }}"
+    revs_per_doc: "{{ revs_per_doc | default(5) | int }}"
+
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_quiescence.yml
+  vars:
+    db_name: db1
+    nodes: ["1a", "1b", "1c"]
+    timeout: "{{ quiesce_budget_secs | default(1200) | int }}"
+
+
+# =====================================================================================
+# SECTION 2 -- enter the mid-roll snapshot.  Upgrade 1b and 1c to v_new through the
+# full schema chain.  1a stays on v_old as leader.
+# =====================================================================================
+
+- name: RV-1 SECTION 2 -- upgrade 1b to v_new (custom .deb, skip the role's download step)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.debug:
+        msg: "Upgrading 1b -- tail -f /tmp/rv1-upgrade-1b.log in another terminal to watch."
+
+    - ansible.builtin.shell: |
+        ansible-playbook toolbox/service/upgrade_node.yml \
+          -e target=1b -e custom_build={{ v_new_build }} --skip-tags download \
+          > /tmp/rv1-upgrade-1b.log 2>&1
+      args:
+        chdir: "{{ playbook_dir }}/../../.."
+      async: 1800
+      poll: 30
+
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_member.yml
+  vars:
+    cluster_leader: 1a
+    db_name: db1
+    target: 1b
+    timeout_secs: "{{ member_budget_secs | default(300) | int }}"
+
+- name: RV-1 SECTION 2 -- upgrade 1c to v_new (custom .deb, skip the role's download step)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.debug:
+        msg: "Upgrading 1c -- tail -f /tmp/rv1-upgrade-1c.log in another terminal to watch."
+
+    - ansible.builtin.shell: |
+        ansible-playbook toolbox/service/upgrade_node.yml \
+          -e target=1c -e custom_build={{ v_new_build }} --skip-tags download \
+          > /tmp/rv1-upgrade-1c.log 2>&1
+      args:
+        chdir: "{{ playbook_dir }}/../../.."
+      async: 1800
+      poll: 30
+
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_member.yml
+  vars:
+    cluster_leader: 1a
+    db_name: db1
+    target: 1c
+    timeout_secs: "{{ member_budget_secs | default(300) | int }}"
+
+
+# =====================================================================================
+# SECTION 3 -- post-roll baseline.  Cluster is now mid-roll (1a=v_old, 1b/1c=v_new).
+# Wait for cross-node convergence, then check parity holds on the seeded pool BEFORE
+# we apply any chaos.
+# =====================================================================================
+
+- name: RV-1 SECTION 3 -- post-roll baseline (parity asserts + I-16 capture)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.debug:
+        msg: "==== SECTION 3 -- post-roll baseline (parity asserts + I-16 capture) ===="
+
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_quiescence.yml
+  vars:
+    db_name: db1
+    nodes: ["1a", "1b", "1c"]
+    timeout: "{{ quiesce_budget_secs | default(1200) | int }}"
+
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_schema_version.yml
+  vars:
+    nodes: ["1a", "1b", "1c"]   # mid-roll: mixed expected, NO parity assertion here
+
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_doc_count_parity.yml  # I-1
+  vars:
+    db_name: db1
+    nodes: ["1a", "1b", "1c"]
+
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_doc_id_set_parity.yml # I-2 (doc-set)
+  vars:
+    db_name: db1
+    nodes: ["1a", "1b", "1c"]
+    id_prefix: seed
+    count: "{{ parity_probe_count | default(50) | int }}"
+
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_revision_count_parity.yml # I-5/I-6
+  vars:
+    db_name: db1
+    nodes: ["1a", "1b", "1c"]
+    id_prefix: seed
+    count: "{{ parity_probe_count | default(50) | int }}"
+    expected_count: "{{ revs_per_doc | default(5) | int }}"
+
+# I-16 baseline capture (post-seed, pre-chaos).  File path is repo-root-relative.
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_size_envelope.yml
+  vars:
+    db_name: db1
+    nodes: ["1a", "1b", "1c"]
+    baseline_file: "{{ playbook_dir }}/../../../captures/size-baseline-rv1.json"
+
+
+# =====================================================================================
+# SECTION 4 -- start W-1 background workload.  Runs through phases 1 + 2; gets killed
+# in section 7 before the final endpoint asserts.
+# =====================================================================================
+
+- name: RV-1 SECTION 4 -- start W-1 background via the workload tool
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - vars.yml
+
+  tasks:
+    - name: Launch scenarios/EMR/workloads/w1/workload_w1.yml in the background
+      ansible.builtin.shell: |
+        nohup ansible-playbook scenarios/EMR/workloads/w1/workload_w1.yml \
+          -e target=1a -e db_name={{ db_name }} \
+          -e id_prefix={{ id_prefix }} -e pool_size={{ pool_size }} \
+          -e duration_secs={{ workload_duration_secs }} \
+          </dev/null >/tmp/w1-rv1.log 2>&1 &
+        echo "ansible-playbook background PID: $!"
+      args:
+        chdir: "{{ playbook_dir }}/../../.."
+      environment:
+        ANSIBLE_BECOME_PASS: "{{ ansible_become_pass | default('') }}"
+      register: w1_launch
+
+    - name: Show launch result
+      ansible.builtin.debug:
+        msg: >-
+          W-1 launch invoked.  Driver: {{ w1_launch.stdout }}.
+          Worker pidfile: /tmp/w1-1a-{{ db_name }}.pid.  Log: /tmp/w1-rv1.log.
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars:
+    pidfile: "/tmp/w1-1a-{{ db_name | default('db1') }}.pid"
+    timeout: 30
+
+
+# =====================================================================================
+# SECTION 5 -- PHASE 1: restart 1a (the v_old leader).  Forces 1b/1c to elect a new leader.
+# After 1a comes back as a v_old follower, run the phase-1 checkpoint.
+# =====================================================================================
+
+- name: RV-1 SECTION 5 -- phase 1 (restart 1a leader + phase-1 checkpoint)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.debug:
+        msg: "==== SECTION 5 -- phase 1 (restart 1a leader + phase-1 checkpoint) ===="
+
+- ansible.builtin.import_playbook: ../../../toolbox/service/restart_ravendb.yml
+  vars:
+    target: 1a
+    timeout_secs: 180
+
+# wait for a new leader to be elected (1a is restarting; 1b or 1c will win)
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_leader.yml
+  vars:
+    target: 1b
+    timeout_secs: 60
+
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_member.yml
+  vars:
+    cluster_leader: 1b
+    db_name: db1
+    target: 1a
+    timeout_secs: "{{ rehab_budget_secs | default(60) | int }}"   # I-12
+
+# I-11 marker propagation -- confirms replication is FLOWING despite W-1 + the restart
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_marker_propagation.yml
+  vars:
+    db_name: db1
+    source: 1a
+    targets: ["1b", "1c"]
+    timeout_secs: 60
+
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_schema_version.yml
+  vars:
+    nodes: ["1a", "1b", "1c"]   # still mixed (1a v_old, 1b/1c v_new) -- dump only
+
+
+# =====================================================================================
+# SECTION 6 -- PHASE 2: isolate 1a from 1b/1c, burst conflict writes on both sides, heal,
+# wait for cluster + conflict-resolution convergence, then phase-2 checkpoint.
+# =====================================================================================
+
+- name: RV-1 SECTION 6 -- phase 2 (isolate 1a + conflict burst + heal + phase-2 checkpoint)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.debug:
+        msg: "==== SECTION 6 -- phase 2 (isolate 1a + conflict burst + heal + phase-2 checkpoint) ===="
+
+- ansible.builtin.import_playbook: ../../../toolbox/network/cut_link.yml
+  vars: { node_a: 1a, node_b: 1b }
+
+- ansible.builtin.import_playbook: ../../../toolbox/network/cut_link.yml
+  vars: { node_a: 1a, node_b: 1c }
+
+- name: RV-1 SECTION 6 -- announce partition + settle
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Show partition state
+      ansible.builtin.debug:
+        msg: "PARTITIONED  1a isolated from [1b, 1c].  W-1 is still hammering 1a; majority is 1b/1c."
+
+    - name: Settle the partition (10s, lets replication detect the cut)
+      ansible.builtin.pause:
+        seconds: 10
+
+# Concurrent writes to overlapping ids on BOTH sides of the partition.  The CV histories
+# diverge during the cut (1a sees only its own writes; 1b/1c see only the majority's), so
+# at heal the receiver detects incompatible CVs and registers a conflict on each id.
+- ansible.builtin.import_playbook: ../../../toolbox/writes/write_docs.yml
+  vars:
+    target: 1a
+    db_name: db1
+    id_prefix: conflict
+    count: "{{ conflict_burst_size | default(20) | int }}"
+
+- ansible.builtin.import_playbook: ../../../toolbox/writes/write_docs.yml
+  vars:
+    target: 1b
+    db_name: db1
+    id_prefix: conflict
+    count: "{{ conflict_burst_size | default(20) | int }}"
+
+- name: RV-1 SECTION 6 -- hold the partition open
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Hold partition for the rest of the 3-min window
+      ansible.builtin.pause:
+        seconds: 170
+
+# Heal: drop the chaos rules on 1a's side (also clears the symmetric rules on 1b/1c via heal_node)
+- ansible.builtin.import_playbook: ../../../toolbox/network/heal_node.yml
+  vars:
+    target: 1a
+
+# Wait for 1a to fully rejoin
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_member.yml
+  vars:
+    cluster_leader: 1b
+    db_name: db1
+    target: 1a
+    timeout_secs: "{{ member_budget_secs | default(300) | int }}"
+
+# I-14 -- conflicts must resolve within budget
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_conflicts_resolved.yml
+  vars:
+    db_name: db1
+    nodes: ["1a", "1b", "1c"]
+    timeout: "{{ conflicts_budget_secs | default(60) | int }}"
+
+# =====================================================================================
+# SECTION 7 -- PHASE 3 finish: upgrade 1a to v_new, stop W-1, full endpoint convergence.
+# =====================================================================================
+
+- name: RV-1 SECTION 7 -- phase 3 finish (upgrade 1a to v_new, stop W-1, endpoint asserts)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.debug:
+        msg: "Upgrading 1a -- tail -f /tmp/rv1-upgrade-1a.log in another terminal to watch."
+
+    - ansible.builtin.shell: |
+        ansible-playbook toolbox/service/upgrade_node.yml \
+          -e target=1a -e custom_build={{ v_new_build }} --skip-tags download \
+          > /tmp/rv1-upgrade-1a.log 2>&1
+      args:
+        chdir: "{{ playbook_dir }}/../../.."
+      async: 1800
+      poll: 30
+
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_member.yml
+  vars:
+    cluster_leader: 1b
+    db_name: db1
+    target: 1a
+    timeout_secs: "{{ member_budget_secs | default(300) | int }}"
+
+# SECTION 7 -- stop W-1 + final convergence + endpoint asserts
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars:
+    pidfile: "/tmp/w1-1a-{{ db_name | default('db1') }}.pid"
+
+# Final drain + quiescence
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_docs_drain.yml
+  vars:
+    db_name: db1
+    nodes: ["1a", "1b", "1c"]
+    timeout: "{{ drain_budget_secs | default(180) | int }}"
+
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_quiescence.yml
+  vars:
+    db_name: db1
+    nodes: ["1a", "1b", "1c"]
+    timeout: "{{ quiesce_budget_secs | default(1200) | int }}"
+
+# I-11 marker propagation at endpoint -- confirms replication is FLOWING after final upgrade
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_marker_propagation.yml
+  vars:
+    db_name: db1
+    source: 1a
+    targets: ["1b", "1c"]
+    timeout_secs: 60
+
+# Endpoint asserts -- everything must be on v_new and converged
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_schema_version.yml
+  vars:
+    nodes: ["1a", "1b", "1c"]
+    require_parity: true
+
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_doc_count_parity.yml
+  vars:
+    db_name: db1
+    nodes: ["1a", "1b", "1c"]
+
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_doc_id_set_parity.yml # I-2 doc-set
+  vars:
+    db_name: db1
+    nodes: ["1a", "1b", "1c"]
+    id_prefix: seed
+    count: "{{ parity_probe_count | default(50) | int }}"
+
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_revision_count_parity.yml # I-5/I-6
+  vars:
+    db_name: db1
+    nodes: ["1a", "1b", "1c"]
+    id_prefix: seed
+    count: "{{ parity_probe_count | default(50) | int }}"
+
+# I-2 on the conflict/* docs from S6 -- the docs that actually went through conflict resolution
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_doc_id_set_parity.yml
+  vars:
+    db_name: db1
+    nodes: ["1a", "1b", "1c"]
+    id_prefix: conflict
+    count: "{{ conflict_burst_size | default(20) | int }}"
+
+# I-16 final envelope check -- compares current SizeOnDisk to the baseline captured in SECTION 3.
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_size_envelope.yml
+  vars:
+    db_name: db1
+    nodes: ["1a", "1b", "1c"]
+    baseline_file: "{{ playbook_dir }}/../../../captures/size-baseline-rv1.json"
+
+- name: RV-1 -- DONE
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.debug:
+        msg: "RV-1 PASS  cluster=[1a,1b,1c]  db=db1  all invariants held across mid-roll leader restart + partition + heal"

@@ -1,0 +1,36 @@
+# scenarios/rv-1/vars.yml -- shared config for RV-1
+
+# Database + cluster shape
+db_name: db1
+cluster_nodes: ["1a", "1b", "1c"]
+cluster_leader: 1a              # before the chaos -- the v_old node
+new_leader_candidate: 1b        # any v_new node -- used as the query host after phase 1's election
+
+# Revisions config
+revisions_keep: 100
+
+# Seed pool -- Karmel's spec: 10000 docs x 5 revs = 50000 revisions.
+# For a fast development shakedown, override on the CLI:  -e pool_size=100
+id_prefix: seed
+pool_size: 10000
+revs_per_doc: 5
+
+# Probe sets for parity asserts (sampled subsets of the seeded pool)
+parity_probe_count: 50
+
+# W-1 background workload -- runs through phases 1+2.  Karmel's plan: ~10 minutes.
+workload_duration_secs: 600
+
+# Phase 2 conflict surface -- a small set of ids hit on both partition sides
+conflict_pool_size: 10
+conflict_burst_size: 20         # writes per side during the 3-min partition
+
+# Budgets (in seconds)
+rehab_budget_secs: 60           # I-12 -- no node in Rehab > 60s
+conflicts_budget_secs: 60       # I-14 -- conflict resolution converges within 60s
+member_budget_secs: 300         # full rehab cycle after heal
+# Final drain + quiesce -- at Karmel's 10000-doc volume + ~10min W-1 churn, the cluster has
+# thousands of in-flight ops to settle once W-1 stops.  These budgets need to be generous;
+# pre-chaos quiesce in S1/S3 reuses quiesce_budget_secs (3 nodes, no concurrent writes, fast).
+drain_budget_secs: 180
+quiesce_budget_secs: 1200
