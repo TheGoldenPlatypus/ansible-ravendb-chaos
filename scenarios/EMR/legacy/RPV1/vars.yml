@@ -1,0 +1,45 @@
+# scenarios/EMR/RPV1/vars.yml -- shared config for RPV-1
+
+# Database + cluster shape
+db_name: db1
+source_cluster_id: 1
+source_cluster_nodes: ["1a", "1b", "1c"]
+source_cluster_leader: 1a
+sink_cluster_id: 2
+sink_cluster_nodes: ["2a", "2b", "2c"]
+sink_cluster_leader: 2a
+
+# Seed pool -- Karmel's RPV-1 spec.  Buckets total ~10k docs x 5 revs = 50k revisions.
+# Override on the CLI for a fast dev shakedown:  -e bucket_users_sink1=100 (etc.)
+seed_revs_per_doc: 5
+bucket_users_sink1: 3000     # users/sink1/{i}  -- collection Users -- routes to sink-1
+bucket_users_hub:   3000     # users/hub/{i}    -- collection Users -- hub only (filter MISS)
+bucket_orders_hub:  3000     # orders/hub/{i}   -- collection Orders -- hub only
+bucket_internal:    1000     # Internal/{i}     -- collection Internal -- hub only
+
+# Per-collection revisions config (Karmel's spec; see EMR_TESTING_PLAN/context.md)
+collections_config:
+  Users:    { keep: 10, max_age_secs: 1800 }      # 30 min  -- tight
+  Orders:   { keep: 50, max_age_secs: 7200 }      # 2 hours -- moderate
+  Internal: { keep: 25, max_age_secs: 21600 }     # 6 hours -- loose
+default_keep: 25
+default_max_age_secs: 21600
+
+# Sink filter spec (post-upgrade smoke)
+sink_filter_prefix: "users/sink1/*"
+
+# Sampled probe sets for parity asserts
+parity_probe_count: 50
+
+# Post-upgrade burst (1k each bucket)
+burst_per_bucket: 1000
+
+# W-1 + W-2 workloads -- Karmel's plan: ~8 min through the upgrade window
+workload_duration_secs: 480
+
+# Budgets (in seconds)
+rehab_budget_secs: 60           # I-12
+member_budget_secs: 300
+drain_budget_secs: 180
+quiesce_budget_secs: 1200
+filter_compliance_budget_secs: 120

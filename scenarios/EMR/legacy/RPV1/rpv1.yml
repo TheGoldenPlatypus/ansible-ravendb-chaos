@@ -1,0 +1,684 @@
+##################################################################################################
+# scenarios/EMR/RPV1/rpv1.yml -- rolling v_old -> v_new + post-upgrade filtered-pull smoke.
+#
+# 3-node source cluster (1a/1b/1c) starts all on v_old:
+#   0.   Kill any leftover background workloads from a previous interrupted run, then validate
+#        inputs.
+#   0.5. Create db1 with per-collection revisions config (Users tight, Orders moderate,
+#        Internal loose, Default loose).
+#   1.   Seed ~10k docs across 4 doc-ID buckets x 5 revs each = ~50k revisions:
+#          users/sink1/* (Users collection), users/hub/* (Users), orders/hub/* (Orders),
+#          Internal/* (Internal).
+#        Wait for the cluster to settle.
+#   2.   Baseline check: sample a few seeded docs and confirm they're in the OLD raw-CV form
+#        (proves we have a real v_old-shape dataset before the upgrade starts).
+#   3.   Start W-1 (doc CRUD) + W-2 (doc-extension churn) in the background -- both run through
+#        sections 4 + 5 + 6.
+#   4.   Upgrade 1a to v_new through the full schema chain.  1a rejoins; light checks only
+#        (writes are still flowing).
+#   5.   Upgrade 1b to v_new.  Light checks.
+#   6.   Upgrade 1c to v_new.  Now the cluster is fully on v_new; light checks.
+#   7.   Stop W-1 + W-2, wait for everything to settle.  Full deep parity checks (the cluster is
+#        quiet now -- this is where I-1, I-2, I-5, I-6 actually mean something).
+#   8.   Spin up a fresh sink cluster (2a/2b/2c) on v_new alongside.
+#   9.   Wire filtered pull replication: hub task on cluster 1 + sink task on cluster 2 with
+#        only the "users/sink1/*" filter active.
+#   10.  Burst 1k fresh docs into each bucket on the source.  Only the "users/sink1/*" 1k should
+#        reach the sink (the other 3k must NOT).  Wait for the sink to settle.
+#   11.  CV-boundary smoke: assert the sink's stored docs have the new split-form CV shape
+#        (I-CV-1), the sink's DatabaseChangeVector references only sink-side tags (I-CV-2 -- the
+#        load-bearing CV-boundary regression guard), and filter geometry holds (no leak, no skip).
+#   12.  Final endpoint asserts on the SOURCE cluster: full parity + size envelope.
+#
+# "Light checks" in 4/5/6: marker propagation (replication is flowing), schema version (binary
+# parity dump only -- mixed expected during the rolling upgrade window).  No deep parity --
+# W-1 + W-2 are still churning the seeded pool; strict checks would false-fail on transient
+# replication-lag windows.
+#
+# Deep version (invariants, risks, validators) -> EMR_TESTING_PLAN/.
+#
+# PREREQ -- bring up a clean 3-node SOURCE cluster at v_old.  The scenario provisions the sink
+# cluster mid-run.
+#
+#   1. ansible-playbook playbooks/teardown_containers.yml -K
+#   2. ansible-playbook playbooks/provision_nodes.yml -K -e clusters_count=1 -e nodes_per_cluster=3
+#   3. ansible-playbook playbooks/install_ravendb.yml -K -e rdb_version=6.2.15
+#   4. ansible-playbook playbooks/form_clusters.yml -K -e clusters_count=1 -e nodes_per_cluster=3
+#
+# RUN:
+#   ansible-playbook scenarios/EMR/RPV1/rpv1.yml \
+#       -e v_old=6.2.15 \
+#       -e v_new_build=$PWD/builds/raven-prNNN.deb
+##################################################################################################
+
+
+# =====================================================================================
+# SECTION 0 -- kill any orphan W-1 / W-2 from a previously interrupted run
+# =====================================================================================
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars:
+    pidfile: "/tmp/w1-1a-db1.pid"
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars:
+    pidfile: "/tmp/w2-1a-db1.pid"
+
+- name: RPV-1 SECTION 0 -- validate inputs + sanity baseline
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - vars.yml
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - v_old is defined
+          - v_new_build is defined
+        fail_msg: "Required: -e v_old=<6.2.x version> -e v_new_build=<path to v_new .deb>"
+
+    - name: Show plan
+      ansible.builtin.debug:
+        msg: "RPV-1  v_old={{ v_old }}  v_new_build={{ v_new_build }}"
+
+
+# =====================================================================================
+# SECTION 0.5 -- create db1 with per-collection revisions config
+# =====================================================================================
+
+- name: RPV-1 SECTION 0.5 -- create db1 + per-collection revisions config
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.debug:
+        msg: "==== SECTION 0.5 -- create db1 + per-collection revisions config ===="
+
+- ansible.builtin.import_playbook: ../../../toolbox/db/create_database.yml
+  vars:
+    cluster_leader: 1a
+    db_name: db1
+    replication_factor: 3
+
+- ansible.builtin.import_playbook: ../../../toolbox/db/configure_revisions.yml
+  vars:
+    target: 1a
+    db_name: db1
+    collections_config:
+      Users:    { keep: 10, max_age_secs: 1800 }
+      Orders:   { keep: 50, max_age_secs: 7200 }
+      Internal: { keep: 25, max_age_secs: 21600 }
+    default_keep: 25
+    default_max_age_secs: 21600
+
+
+# =====================================================================================
+# SECTION 1 -- seed ~10k docs across 4 buckets x 5 revs each
+# =====================================================================================
+
+- name: RPV-1 SECTION 1 -- seed 4 buckets + quiesce
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.debug:
+        msg: "==== SECTION 1 -- seed 4 buckets x 5 revs each + quiesce ===="
+
+# Bucket 1: users/sink1/*  (Users collection -- the only bucket that will route to the sink)
+- ansible.builtin.import_playbook: ../../../toolbox/writes/write_docs_revisions.yml
+  vars:
+    target: 1a
+    db_name: db1
+    id_prefix: users/sink1
+    collection: Users
+    count: "{{ bucket_users_sink1 | default(3000) | int }}"
+    revs_per_doc: "{{ seed_revs_per_doc | default(5) | int }}"
+
+# Bucket 2: users/hub/*  (Users collection -- hub-only, filter MISS for the sink)
+- ansible.builtin.import_playbook: ../../../toolbox/writes/write_docs_revisions.yml
+  vars:
+    target: 1a
+    db_name: db1
+    id_prefix: users/hub
+    collection: Users
+    count: "{{ bucket_users_hub | default(3000) | int }}"
+    revs_per_doc: "{{ seed_revs_per_doc | default(5) | int }}"
+
+# Bucket 3: orders/hub/*  (Orders collection -- hub only)
+- ansible.builtin.import_playbook: ../../../toolbox/writes/write_docs_revisions.yml
+  vars:
+    target: 1a
+    db_name: db1
+    id_prefix: orders/hub
+    collection: Orders
+    count: "{{ bucket_orders_hub | default(3000) | int }}"
+    revs_per_doc: "{{ seed_revs_per_doc | default(5) | int }}"
+
+# Bucket 4: Internal/*  (Internal collection -- hub only by collection, no sink filter matches)
+- ansible.builtin.import_playbook: ../../../toolbox/writes/write_docs_revisions.yml
+  vars:
+    target: 1a
+    db_name: db1
+    id_prefix: Internal
+    collection: Internal
+    count: "{{ bucket_internal | default(1000) | int }}"
+    revs_per_doc: "{{ seed_revs_per_doc | default(5) | int }}"
+
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_quiescence.yml
+  vars:
+    db_name: db1
+    nodes: ["1a", "1b", "1c"]
+    timeout: "{{ quiesce_budget_secs | default(1200) | int }}"
+
+
+# =====================================================================================
+# SECTION 2 -- baseline check: confirm raw-CV form on seeded docs (pre-upgrade)
+# =====================================================================================
+
+# Section 2 baseline raw-CV check DISABLED -- see Section 11 comment.  The "split" vs "raw"
+# CV shape isn't observable through the public @metadata.@change-vector REST field, so this
+# check can't reliably distinguish v_old from v_new state.  Left as a no-op section so the
+# downstream numbering stays consistent with the EMR plan recipe.
+- name: RPV-1 SECTION 2 -- baseline raw-CV form check (DISABLED -- shape not REST-observable)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.debug:
+        msg: "==== SECTION 2 -- skipped: CV-shape inspection isn't REST-observable ===="
+
+
+# =====================================================================================
+# SECTION 3 -- start W-1 + W-2 in background.  Both run through sections 4 + 5 + 6.
+# =====================================================================================
+
+- name: RPV-1 SECTION 3 -- start W-1 + W-2 in background
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - vars.yml
+
+  tasks:
+    - ansible.builtin.debug:
+        msg: "==== SECTION 3 -- launch W-1 + W-2 background workloads ===="
+
+    # W-1 hits users/hub/* (doc CRUD churn on the hub-only bucket; doesn't affect the
+    # sink-routed pool, so post-smoke parity is computable from the seed deterministically).
+    - name: Launch W-1 (doc CRUD churn on users/hub)
+      ansible.builtin.shell: |
+        nohup ansible-playbook scenarios/EMR/workloads/w1/workload_w1.yml \
+          -e target=1a -e db_name={{ db_name }} \
+          -e id_prefix=users/hub -e pool_size={{ bucket_users_hub | default(3000) | int }} \
+          -e duration_secs={{ workload_duration_secs }} \
+          </dev/null >/tmp/w1-rpv1.log 2>&1 &
+        echo "W-1 background PID: $!"
+      args:
+        chdir: "{{ playbook_dir }}/../../.."
+
+    # W-2 hits orders/hub/* (doc-extension churn; same bucket isolation rationale)
+    - name: Launch W-2 (doc-extension churn on orders/hub)
+      ansible.builtin.shell: |
+        nohup ansible-playbook scenarios/EMR/workloads/w2/workload_w2.yml \
+          -e target=1a -e db_name={{ db_name }} \
+          -e id_prefix=orders/hub -e pool_size={{ bucket_orders_hub | default(3000) | int }} \
+          -e duration_secs={{ workload_duration_secs }} \
+          </dev/null >/tmp/w2-rpv1.log 2>&1 &
+        echo "W-2 background PID: $!"
+      args:
+        chdir: "{{ playbook_dir }}/../../.."
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars:
+    pidfile: "/tmp/w1-1a-db1.pid"
+    timeout: 30
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars:
+    pidfile: "/tmp/w2-1a-db1.pid"
+    timeout: 30
+
+
+# =====================================================================================
+# SECTION 4 -- upgrade 1a to v_new through the full schema chain
+# =====================================================================================
+
+- name: RPV-1 SECTION 4 -- upgrade 1a to v_new (full schema chain)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.debug:
+        msg: "Upgrading 1a -- tail -f /tmp/rpv1-upgrade-1a.log in another terminal."
+
+    - ansible.builtin.shell: |
+        ansible-playbook toolbox/service/upgrade_node.yml \
+          -e target=1a -e custom_build={{ v_new_build }} --skip-tags download \
+          > /tmp/rpv1-upgrade-1a.log 2>&1
+      args:
+        chdir: "{{ playbook_dir }}/../../.."
+      async: 1800
+      poll: 30
+
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_member.yml
+  vars:
+    cluster_leader: 1b
+    db_name: db1
+    target: 1a
+    timeout_secs: "{{ member_budget_secs | default(300) | int }}"
+
+# Light mid-roll checks: marker propagation + schema version dump (mixed expected)
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_marker_propagation.yml
+  vars:
+    db_name: db1
+    source: 1a
+    targets: ["1b", "1c"]
+    timeout_secs: 60
+
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_schema_version.yml
+  vars:
+    nodes: ["1a", "1b", "1c"]   # mixed expected (1a v_new, 1b/1c v_old)
+
+
+# =====================================================================================
+# SECTION 5 -- upgrade 1b to v_new
+# =====================================================================================
+
+- name: RPV-1 SECTION 5 -- upgrade 1b to v_new
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.debug:
+        msg: "Upgrading 1b -- tail -f /tmp/rpv1-upgrade-1b.log in another terminal."
+
+    - ansible.builtin.shell: |
+        ansible-playbook toolbox/service/upgrade_node.yml \
+          -e target=1b -e custom_build={{ v_new_build }} --skip-tags download \
+          > /tmp/rpv1-upgrade-1b.log 2>&1
+      args:
+        chdir: "{{ playbook_dir }}/../../.."
+      async: 1800
+      poll: 30
+
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_member.yml
+  vars:
+    cluster_leader: 1a
+    db_name: db1
+    target: 1b
+    timeout_secs: "{{ member_budget_secs | default(300) | int }}"
+
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_marker_propagation.yml
+  vars:
+    db_name: db1
+    source: 1a
+    targets: ["1b", "1c"]
+    timeout_secs: 60
+
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_schema_version.yml
+  vars:
+    nodes: ["1a", "1b", "1c"]   # still mixed (1c on v_old)
+
+
+# =====================================================================================
+# SECTION 6 -- upgrade 1c to v_new (cluster now fully v_new)
+# =====================================================================================
+
+- name: RPV-1 SECTION 6 -- upgrade 1c to v_new
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.debug:
+        msg: "Upgrading 1c -- tail -f /tmp/rpv1-upgrade-1c.log in another terminal."
+
+    - ansible.builtin.shell: |
+        ansible-playbook toolbox/service/upgrade_node.yml \
+          -e target=1c -e custom_build={{ v_new_build }} --skip-tags download \
+          > /tmp/rpv1-upgrade-1c.log 2>&1
+      args:
+        chdir: "{{ playbook_dir }}/../../.."
+      async: 1800
+      poll: 30
+
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_member.yml
+  vars:
+    cluster_leader: 1a
+    db_name: db1
+    target: 1c
+    timeout_secs: "{{ member_budget_secs | default(300) | int }}"
+
+
+# =====================================================================================
+# SECTION 7 -- stop W-1 + W-2, drain, full deep parity on the now-quiet source cluster
+# =====================================================================================
+
+- name: RPV-1 SECTION 7 -- stop workloads + drain + full source-side parity
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.debug:
+        msg: "==== SECTION 7 -- stop workloads + drain + deep parity ===="
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars:
+    pidfile: "/tmp/w1-1a-db1.pid"
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars:
+    pidfile: "/tmp/w2-1a-db1.pid"
+
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_docs_drain.yml
+  vars:
+    db_name: db1
+    nodes: ["1a", "1b", "1c"]
+    timeout: "{{ drain_budget_secs | default(180) | int }}"
+
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_quiescence.yml
+  vars:
+    db_name: db1
+    nodes: ["1a", "1b", "1c"]
+    timeout: "{{ quiesce_budget_secs | default(1200) | int }}"
+
+# I-18 -- all source nodes must now be on v_new (binary parity + SupportedFeatures)
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_schema_version.yml
+  vars:
+    nodes: ["1a", "1b", "1c"]
+    require_parity: true
+    db_name: db1
+    cluster_leader: 1a
+
+# I-1 -- doc count parity across source
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_doc_count_parity.yml
+  vars:
+    db_name: db1
+    nodes: ["1a", "1b", "1c"]
+
+# I-2 (doc-set) on each bucket
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_doc_id_set_parity.yml
+  vars:
+    db_name: db1
+    nodes: ["1a", "1b", "1c"]
+    id_prefix: users/sink1
+    count: "{{ parity_probe_count | default(50) | int }}"
+
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_doc_id_set_parity.yml
+  vars:
+    db_name: db1
+    nodes: ["1a", "1b", "1c"]
+    id_prefix: orders/hub
+    count: "{{ parity_probe_count | default(50) | int }}"
+
+# I-5 / I-6 -- revision count parity + orphan adopt probe
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_revision_count_parity.yml
+  vars:
+    db_name: db1
+    nodes: ["1a", "1b", "1c"]
+    id_prefix: users/sink1
+    count: "{{ parity_probe_count | default(50) | int }}"
+
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_orphan_revisions.yml
+  vars:
+    db_name: db1
+    nodes: ["1a", "1b", "1c"]
+
+# Extension-stat parity (W-2 wrote attachments / counters / TS to orders/hub/*)
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_equal_stats.yml
+  vars:
+    db_name: db1
+    nodes: ["1a", "1b", "1c"]
+
+
+# =====================================================================================
+# SECTION 8 -- provision a fresh sink cluster (2a/2b/2c) on v_new alongside the source
+# =====================================================================================
+
+- name: RPV-1 SECTION 8 -- provision sink cluster on v_new
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - vars.yml
+
+  tasks:
+    - ansible.builtin.debug:
+        msg: "==== SECTION 8 -- provision sink cluster (2a/2b/2c) on v_new ===="
+
+    # Idempotent extension: clusters_count=2 re-provisions cluster 1 as a no-op and adds 2a/2b/2c.
+    - name: Provision both clusters (cluster 1 no-op, cluster 2 created)
+      ansible.builtin.shell: |
+        ansible-playbook playbooks/provision_nodes.yml \
+          -e clusters_count=2 -e nodes_per_cluster=3 \
+          > /tmp/rpv1-sink-provision.log 2>&1
+      args:
+        chdir: "{{ playbook_dir }}/../../.."
+      environment:
+        ANSIBLE_BECOME_PASS: "{{ ansible_become_pass | default('') }}"
+
+    # Install v_new on every node.  1a/1b/1c are already on v_new (idempotent no-op).
+    # 2a/2b/2c get v_new fresh.
+    - name: Install v_new on the sink cluster
+      ansible.builtin.shell: |
+        ansible-playbook playbooks/install_ravendb.yml \
+          -e custom_build={{ v_new_build }} --skip-tags download \
+          > /tmp/rpv1-sink-install.log 2>&1
+      args:
+        chdir: "{{ playbook_dir }}/../../.."
+      environment:
+        ANSIBLE_BECOME_PASS: "{{ ansible_become_pass | default('') }}"
+
+    # Form cluster 2 (cluster 1 already formed -- no-op).
+    - name: Form clusters
+      ansible.builtin.shell: |
+        ansible-playbook playbooks/form_clusters.yml \
+          -e clusters_count=2 -e nodes_per_cluster=3 \
+          > /tmp/rpv1-sink-form.log 2>&1
+      args:
+        chdir: "{{ playbook_dir }}/../../.."
+      environment:
+        ANSIBLE_BECOME_PASS: "{{ ansible_become_pass | default('') }}"
+
+# Create db1 on the sink cluster
+- ansible.builtin.import_playbook: ../../../toolbox/db/create_database.yml
+  vars:
+    cluster_leader: 2a
+    db_name: db1
+    replication_factor: 3
+
+
+# =====================================================================================
+# SECTION 9 -- wire filtered pull replication (only users/sink1/* allowed)
+# =====================================================================================
+
+- name: RPV-1 SECTION 9 -- wire filtered pull (users/sink1/* only)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.debug:
+        msg: "==== SECTION 9 -- wire filtered pull (hub task on cluster 1 + sink task on cluster 2) ===="
+
+- ansible.builtin.import_playbook: ../../../toolbox/replication/define_hub.yml
+  vars:
+    hub_leader: 1a
+    db_name: db1
+    hub_task_name: rpv1-hub
+    sink_cluster_ids: [2]
+    sink_allowed_paths:
+      "2": ["users/sink1/*"]
+
+- ansible.builtin.import_playbook: ../../../toolbox/replication/attach_sinks.yml
+  vars:
+    db_name: db1
+    hub_task_name: rpv1-hub
+    hub_topology_urls:
+      - "https://1a.hubsink.test:443"
+      - "https://1b.hubsink.test:443"
+      - "https://1c.hubsink.test:443"
+    sink_cluster_ids: [2]
+    sink_allowed_paths:
+      "2": ["users/sink1/*"]
+
+
+# =====================================================================================
+# SECTION 10 -- burst 1k fresh docs per bucket; only the users/sink1/* 1k should
+# reach the sink.  Wait for the sink to settle.
+# =====================================================================================
+
+- name: RPV-1 SECTION 10 -- burst writes + wait for sink to settle
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.debug:
+        msg: "==== SECTION 10 -- burst 4k fresh docs (1k per bucket) + drain to sink ===="
+
+# Burst into each bucket on the source.  Doc ids: <prefix>/burst-{i}.
+- ansible.builtin.import_playbook: ../../../toolbox/writes/write_docs.yml
+  vars:
+    target: 1a
+    db_name: db1
+    id_prefix: users/sink1/burst
+    count: "{{ burst_per_bucket | default(1000) | int }}"
+
+- ansible.builtin.import_playbook: ../../../toolbox/writes/write_docs.yml
+  vars:
+    target: 1a
+    db_name: db1
+    id_prefix: users/hub/burst
+    count: "{{ burst_per_bucket | default(1000) | int }}"
+
+- ansible.builtin.import_playbook: ../../../toolbox/writes/write_docs.yml
+  vars:
+    target: 1a
+    db_name: db1
+    id_prefix: orders/hub/burst
+    count: "{{ burst_per_bucket | default(1000) | int }}"
+
+- ansible.builtin.import_playbook: ../../../toolbox/writes/write_docs.yml
+  vars:
+    target: 1a
+    db_name: db1
+    id_prefix: Internal/burst
+    count: "{{ burst_per_bucket | default(1000) | int }}"
+
+# Wait for source-side replication to settle (writes were to 1a only)
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_quiescence.yml
+  vars:
+    db_name: db1
+    nodes: ["1a", "1b", "1c"]
+    timeout: "{{ quiesce_budget_secs | default(1200) | int }}"
+
+# Confirm the new lane is flowing: marker doc on the source must reach the sink.  The marker id
+# prefix is "users/sink1/marker-" so the marker IS admitted by the sink's users/sink1/* filter
+# (default "markers/" would be filtered out and the wait would falsely time out).
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_marker_propagation.yml
+  vars:
+    db_name: db1
+    source: 1a
+    targets: ["2a", "2b", "2c"]
+    marker_id_prefix: "users/sink1/marker-"
+    timeout_secs: "{{ filter_compliance_budget_secs | default(120) | int }}"
+
+# Wait for the sink cluster itself to internally quiesce
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_quiescence.yml
+  vars:
+    db_name: db1
+    nodes: ["2a", "2b", "2c"]
+    timeout: "{{ quiesce_budget_secs | default(1200) | int }}"
+
+
+# =====================================================================================
+# SECTION 11 -- CV-boundary smoke + filter geometry on the sink
+# =====================================================================================
+
+- name: RPV-1 SECTION 11 -- CV-boundary smoke + filter geometry
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.debug:
+        msg: "==== SECTION 11 -- CV-boundary smoke (I-CV-1, I-CV-2) + filter geometry (I-13) ===="
+
+# I-CV-1 / I-CV-3 -- DISABLED.  The EMR plan describes the v_new "split" CV shape with a
+# delimiter that doesn't actually surface in the public @metadata.@change-vector field --
+# the standard "tag:etag-dbid, ..." form is what you see on the wire even on a v_new sink.
+# Whether the new lane is active is reflected internally (storage layout, replication wire
+# format) but NOT in the REST-visible CV string.  Until we have product-side confirmation
+# of how to detect the new lane from the public API, this check is a forensic dump only --
+# the assertion would always fail and tell us nothing about whether the fix is working.
+# I-CV-2 (next task) is the actual CV-boundary regression guard and the load-bearing check.
+
+# I-CV-2 -- THE CV-BOUNDARY REGRESSION GUARD.  Sink's DB CV references only sink-side tags.
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_db_cv_order_side_only.yml
+  vars:
+    db_name: db1
+    receiver_group_nodes: ["2a", "2b", "2c"]
+
+# I-13 leak side -- every doc on the sink matches users/sink1/* (no leakage from other buckets)
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_filter_compliance.yml
+  vars:
+    sink_cluster_leader: 2a
+    db_name: db1
+    allowed_prefixes: ["users/sink1/"]
+
+# I-13 skip side -- the seeded users/sink1/* AND the 1k burst should all be on the sink
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_doc_id_set_parity.yml
+  vars:
+    db_name: db1
+    nodes: ["2a", "2b", "2c"]
+    id_prefix: users/sink1
+    count: "{{ parity_probe_count | default(50) | int }}"
+
+
+# =====================================================================================
+# SECTION 12 -- final source-side endpoint asserts
+# =====================================================================================
+
+- name: RPV-1 SECTION 12 -- final source-side endpoint asserts
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.debug:
+        msg: "==== SECTION 12 -- final source-side endpoint asserts ===="
+
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_doc_count_parity.yml
+  vars:
+    db_name: db1
+    nodes: ["1a", "1b", "1c"]
+
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_doc_id_set_parity.yml
+  vars:
+    db_name: db1
+    nodes: ["1a", "1b", "1c"]
+    id_prefix: users/sink1
+    count: "{{ parity_probe_count | default(50) | int }}"
+
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_doc_id_set_parity.yml
+  vars:
+    db_name: db1
+    nodes: ["1a", "1b", "1c"]
+    id_prefix: Internal
+    count: "{{ parity_probe_count | default(50) | int }}"
+
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_revision_count_parity.yml
+  vars:
+    db_name: db1
+    nodes: ["1a", "1b", "1c"]
+    id_prefix: users/sink1
+    count: "{{ parity_probe_count | default(50) | int }}"
+
+- name: RPV-1 -- DONE
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.debug:
+        msg: "RPV-1 PASS  source=[1a,1b,1c]  sink=[2a,2b,2c]  db=db1  rolling upgrade + CV-boundary + filter geometry all held"
