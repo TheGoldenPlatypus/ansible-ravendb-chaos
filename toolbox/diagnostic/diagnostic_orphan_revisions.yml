@@ -1,0 +1,93 @@
+##################################################################################################
+# toolbox/diagnostic/diagnostic_orphan_revisions.yml
+#
+# Asks every node "do you have any revisions whose parent document is missing?" -- the answer
+# must be zero everywhere.
+#
+# A revision row is supposed to belong to a real document.  An "orphan" is a leftover revision
+# whose document got deleted but the revision row didn't get cleaned up.  Orphans = bug in
+# replication or cleanup logic.
+#
+# How it works.  RavenDB exposes a built-in "adopt orphaned revisions" operation -- it scans,
+# attaches any orphan to a synthetic parent, and reports a count of how many it adopted.  We
+# trigger it on every node, wait for it to finish, and assert AdoptedCount == 0 everywhere.
+# Anything non-zero = there were orphans = FAIL.
+#
+# INPUTS:
+#   db_name        REQUIRED.  Database name.
+#   nodes          REQUIRED.  JSON list.  Adopt runs once per node.
+#   budget_secs    OPTIONAL.  Default 60.  Per-node budget for the adopt operation to complete.
+#
+# RUN EXAMPLE:
+#   ansible-playbook toolbox/diagnostic/diagnostic_orphan_revisions.yml \
+#       -e db_name=db1 -e '{"nodes":["1a","1b","1c"]}'
+##################################################################################################
+
+- name: Assert no orphan revisions on every node
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - db_name is defined
+          - nodes is defined
+          - nodes is iterable
+          - (nodes | length) > 0
+        fail_msg: "Required: -e db_name=<db> -e '{\"nodes\":[\"1a\",\"1b\",\"1c\"]}'"
+
+    - name: Resolve budget
+      ansible.builtin.set_fact:
+        eff_budget: "{{ (budget_secs | default(60)) | int }}"
+
+    - name: Trigger adopt operation on each node
+      ansible.builtin.uri:
+        url: "https://{{ item }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/admin/revisions/orphaned/adopt"
+        method: POST
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        body_format: json
+        body: {}
+        status_code: [200, 201]
+      register: adopt_triggers
+      loop: "{{ nodes }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Wait for each adopt operation to complete
+      ansible.builtin.uri:
+        url: "https://{{ item.item }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/operations/state?id={{ item.json.OperationId | int }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        status_code: [200]
+      register: adopt_states
+      retries: "{{ ((eff_budget | int) / 2) | int }}"
+      delay: 2
+      until: adopt_states.json.Status in ['Completed', 'Faulted', 'Canceled']
+      loop: "{{ adopt_triggers.results }}"
+      loop_control:
+        label: "{{ item.item }}  op={{ item.json.OperationId }}"
+
+    - name: Build per-node AdoptedCount map
+      ansible.builtin.set_fact:
+        adopted_counts: >-
+          {{
+            dict(adopt_states.results
+                  | map(attribute='item.item')
+                  | zip(adopt_states.results
+                          | map(attribute='json.Result.AdoptedCount')
+                          | map('default', -1)))
+          }}
+
+    - name: Show per-node AdoptedCount
+      ansible.builtin.debug:
+        msg: "{{ adopted_counts }}"
+
+    - name: Assert every node reports zero adoptions (I-6)
+      ansible.builtin.assert:
+        that:
+          - (adopted_counts.values() | map('int') | unique | list) == [0]
+        fail_msg: "FAIL  orphan revisions present (adopted): {{ adopted_counts }}"
+        success_msg: "PASS  no orphan revisions on any node: {{ adopted_counts }}"

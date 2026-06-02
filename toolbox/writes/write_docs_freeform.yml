@@ -50,7 +50,6 @@
       loop_control:
         loop_var: n
         label: "freeform doc #{{ n }} on {{ target }}"
-      no_log: "{{ quiet | default(true) | bool }}"
 
     - name: Done
       ansible.builtin.debug:

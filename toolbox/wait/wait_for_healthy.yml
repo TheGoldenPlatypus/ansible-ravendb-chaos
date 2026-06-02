@@ -32,8 +32,28 @@
   connection: local
   gather_facts: true
 
-  roles:
-    - role: ravendb.ravendb.ravendb_python_client_prerequisites
+  vars:
+    ravendb_venv_path: "{{ ansible_env.HOME }}/.ravendb_ansible"
+
+  tasks:
+    - name: Probe existing venv for ravendb module
+      ansible.builtin.command:
+        cmd: "{{ ravendb_venv_path }}/bin/python -c 'import ravendb'"
+      register: venv_probe
+      failed_when: false
+      changed_when: false
+
+    - name: Reuse existing venv -- skip the prereqs role
+      ansible.builtin.set_fact:
+        ansible_python_interpreter: "{{ ravendb_venv_path }}/bin/python"
+      when:
+        - venv_probe.rc == 0
+        - not (force_prereqs | default(false) | bool)
+
+    - name: Install ravendb python client prerequisites (one-time / forced)
+      ansible.builtin.include_role:
+        name: ravendb.ravendb.ravendb_python_client_prerequisites
+      when: (venv_probe.rc != 0) or (force_prereqs | default(false) | bool)
 
 
 - name: Wait for cluster health gates to pass

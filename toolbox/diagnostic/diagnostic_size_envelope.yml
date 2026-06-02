@@ -14,16 +14,15 @@
 #   nodes             REQUIRED.  JSON list of nodes to probe.
 #   baseline_file     REQUIRED.  Absolute path to the baseline JSON file.
 #   max_growth_pct    OPTIONAL.  Default 300.  Per-node growth ceiling vs baseline.
-#                                I-16's purpose is catching runaway leaks (revision table
-#                                not cleaned up, tombstones piling up forever, etc.) which
-#                                produce multi-x growth.  The write-target node in a chaos
-#                                run will normally hit 1.5x-2x just from journal pages,
-#                                tombstones, and scratch files even on a healthy cluster;
-#                                replication-target nodes often stay near baseline because
-#                                RavenDB pre-allocates Voron pages.  So 50% would be a tight
-#                                threshold that catches normal writer-side bookkeeping.
-#                                Raise this if your scenario writes more aggressively;
-#                                lower it for short scenarios.
+#                                Sized to catch runaway leaks (revision table not cleaned up,
+#                                tombstones piling up forever, etc.) which produce multi-x
+#                                growth.  The write-target node in a chaos run will normally
+#                                hit 1.5x-2x just from journal pages, tombstones, and scratch
+#                                files even on a healthy cluster; replication-target nodes
+#                                often stay near baseline because RavenDB pre-allocates Voron
+#                                pages.  So 50% would be a tight threshold that catches normal
+#                                writer-side bookkeeping.  Raise this if your scenario writes
+#                                more aggressively; lower it for short scenarios.
 #
 # RUN EXAMPLE:
 #   # capture baseline after seeding
@@ -75,7 +74,6 @@
         path: "{{ baseline_file }}"
       register: baseline_stat
 
-    # ---------- CAPTURE mode ------------------------------------------------------------------
 
     - name: Ensure baseline directory exists
       ansible.builtin.file:
@@ -96,7 +94,6 @@
         msg: "BASELINE CAPTURED  {{ baseline_file }}  sizes={{ current_sizes }}"
       when: not baseline_stat.stat.exists
 
-    # ---------- CHECK mode --------------------------------------------------------------------
 
     - name: Load baseline sizes
       ansible.builtin.set_fact:

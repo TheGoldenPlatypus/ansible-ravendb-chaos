@@ -16,9 +16,14 @@
 #
 # INPUTS:
 #   nodes            REQUIRED.  JSON list of node names to query.
-#   require_parity   OPTIONAL.  Default false.  If true, assert FullVersion matches everywhere.
-#   expected_version OPTIONAL.  If set, assert every node's FullVersion contains this string
-#                               (e.g. "6.2" to assert all nodes finished a v_62 -> v_new roll).
+#   require_parity        OPTIONAL.  Default false.  If true, assert FullVersion matches everywhere.
+#   expected_version      OPTIONAL.  If set, assert every node's FullVersion contains this string
+#                                    (e.g. "6.2" to assert all nodes finished a v_62 -> v_new roll).
+#   db_name               OPTIONAL.  If set, also fetch DatabaseRecord.SupportedFeatures and assert
+#                                    parity across nodes.  SupportedFeatures is cluster-wide,
+#                                    so a mismatch indicates a serious cluster-state inconsistency.
+#   cluster_leader        OPTIONAL.  Default = first node in `nodes`.  Used for the DatabaseRecord
+#                                    fetch when db_name is set.
 #
 # RUN EXAMPLES:
 #   # mid-roll, mixed binaries expected -- just dump
@@ -94,3 +99,18 @@
         fail_msg: "FAIL  nodes not on expected version '{{ expected_version }}': {{ version_map }}"
         success_msg: "PASS  every node matches expected_version='{{ expected_version }}'"
       when: expected_version is defined
+
+    # SupportedFeatures parity via DatabaseRecord
+    - name: GET DatabaseRecord (SupportedFeatures check)
+      ansible.builtin.uri:
+        url: "https://{{ (cluster_leader | default(nodes | first)) }}.{{ ravendb_domain }}:443/admin/databases?name={{ db_name }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        status_code: [200]
+      register: db_record
+      when: db_name is defined
+
+    - name: Show SupportedFeatures
+      ansible.builtin.debug:
+        msg: "SupportedFeatures (cluster-wide, via {{ cluster_leader | default(nodes | first) }}): {{ db_record.json.SupportedFeatures | default({}) }}"
+      when: db_name is defined

@@ -57,7 +57,6 @@
       loop: "{{ pairs }}"
       loop_control:
         label: "{{ item.0 }}::{{ item.1 }}"
-      no_log: "{{ quiet | default(true) | bool }}"
 
     - name: Write per-(node, id) CV file
       ansible.builtin.copy:
@@ -68,7 +67,6 @@
       loop_control:
         loop_var: r
         label: "{{ r.item.0 }}::{{ r.item.1 }}"
-      no_log: "{{ quiet | default(true) | bool }}"
 
     - name: Summary
       ansible.builtin.debug:

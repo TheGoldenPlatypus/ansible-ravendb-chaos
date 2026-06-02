@@ -1,0 +1,222 @@
+##################################################################################################
+# toolbox/diagnostic/diagnostic_cv_boundary_by_dbid.yml
+#
+# Directional CV-boundary check.  Given a SENDER cluster and a RECEIVER cluster (or any two
+# disjoint node groups in a replication topology), asserts that the ORDER side of the receiver's
+# DatabaseChangeVector contains no sender-cluster dbid.  Karmel calls this I-13 (b) -- the
+# load-bearing CV-boundary regression guard.
+#
+# IMPORTANT: I-13 (b) is a v_new-lane invariant.  The new lane writes CVs in the canonical
+# "order|version" shape (literal '|' delimiter).  The check ONLY applies to the order side
+# (left of '|').  The version side legitimately tracks every dbid the receiver has merged from
+# every source -- including sender dbids -- and is NOT in scope of I-13 (b).
+#
+# Pre-fix / v_old / legacy raw-CV receivers have no '|' separator -- their CV is the merged
+# "everything we've seen" form.  On legacy CVs, sender dbids DO appear in the receiver's CV as
+# a side effect of normal external replication, and that is NOT a regression.  This tool
+# correctly handles that case: when no '|' is present, the check is N/A and reported as such
+# (no fail).
+#
+# Works for any directional replication pair:
+#   * filtered pull (hub -> sink)               source_nodes=hub, receiver_nodes=sink
+#   * reverse direction of bidirectional pull   source_nodes=sink, receiver_nodes=hub
+#   * external replication (A -> B)             source_nodes=A,   receiver_nodes=B
+#
+# How it works:
+#   1.  Build the source-cluster dbid set: for every source node, fetch /stats and pick up
+#       DatabaseId (the per-node 22-char dbid that appears in CV entries).
+#   2.  Build the receiver-cluster dbid set the same way (used to whitelist legitimate self-tag
+#       entries in the order side).
+#   3.  Visit every receiver node and read /stats.DatabaseChangeVector.
+#   4.  For each receiver CV:
+#         * If it contains '|' (v_new lane): take only the left/order side and parse entries
+#           of the form "<tag>:<etag>-<dbid>".  Any dbid in the source set = I-13 (b) breach.
+#         * If no '|' (legacy / v_old / pre-fix): report N/A and skip; the invariant does not
+#           apply to that CV form.
+#   5.  Pass if every receiver was either N/A or had no source dbids on its order side.
+#
+# INPUTS:
+#   db_name          REQUIRED.  Database name.
+#   source_nodes     REQUIRED.  JSON list of sender-cluster node names (e.g. ["1a","1b","1c"]).
+#                               Their dbids must NOT appear on the receiver's order side.
+#   receiver_nodes   REQUIRED.  JSON list of receiver-cluster node names to probe.
+#   strict_v_new     OPTIONAL.  Default false.  If true, FAIL when any receiver's CV is in
+#                               legacy form (no '|') -- useful at the endpoint of an upgrade
+#                               scenario to confirm every receiver flipped to the new lane.
+#
+# RUN EXAMPLES:
+#   # Filtered pull -- sink-1 must not order-side-reference Hub dbids.
+#   ansible-playbook toolbox/diagnostic/diagnostic_cv_boundary_by_dbid.yml \
+#       -e db_name=db1 \
+#       -e '{"source_nodes":["1a","1b","1c"],"receiver_nodes":["2a","2b","2c"]}'
+#
+#   # Endpoint of an upgrade scenario -- demand new-lane CVs.
+#   ansible-playbook toolbox/diagnostic/diagnostic_cv_boundary_by_dbid.yml \
+#       -e db_name=db1 -e strict_v_new=true \
+#       -e '{"source_nodes":["1a","1b","1c"],"receiver_nodes":["2a","2b","2c"]}'
+##################################################################################################
+
+- name: Assert receiver CV order-side references no source-cluster dbid
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - db_name is defined
+          - source_nodes is defined
+          - source_nodes is iterable
+          - (source_nodes | length) > 0
+          - receiver_nodes is defined
+          - receiver_nodes is iterable
+          - (receiver_nodes | length) > 0
+        fail_msg: >-
+          Required: -e db_name=<db> -e '{"source_nodes":[...],"receiver_nodes":[...]}'
+
+    # ---------- Discover source dbids ----------
+    - name: GET /stats on each source node
+      ansible.builtin.uri:
+        url: "https://{{ item }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/stats"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        status_code: [200]
+      register: source_stats
+      loop: "{{ source_nodes }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Build source dbid set
+      ansible.builtin.set_fact:
+        source_dbids: >-
+          {{
+            source_stats.results
+              | map(attribute='json.DatabaseId')
+              | select('string')
+              | reject('equalto', '')
+              | unique
+              | list
+          }}
+
+    # ---------- Discover receiver dbids (whitelist) ----------
+    - name: GET /stats on each receiver node
+      ansible.builtin.uri:
+        url: "https://{{ item }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/stats"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        status_code: [200]
+      register: receiver_stats
+      loop: "{{ receiver_nodes }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Build receiver dbid set
+      ansible.builtin.set_fact:
+        receiver_dbids: >-
+          {{
+            receiver_stats.results
+              | map(attribute='json.DatabaseId')
+              | select('string')
+              | reject('equalto', '')
+              | unique
+              | list
+          }}
+
+    - name: Show discovered dbids
+      ansible.builtin.debug:
+        msg:
+          - "source   ({{ source_nodes }}) dbids: {{ source_dbids }}"
+          - "receiver ({{ receiver_nodes }}) dbids: {{ receiver_dbids }}"
+
+    - name: Sanity-check -- dbid sets are disjoint and complete
+      ansible.builtin.assert:
+        that:
+          - (source_dbids | length) > 0
+          - (receiver_dbids | length) > 0
+          - ((source_dbids | intersect(receiver_dbids)) | length) == 0
+        fail_msg: >-
+          Could not establish disjoint dbid sets.
+          source_dbids={{ source_dbids }}  receiver_dbids={{ receiver_dbids }}.
+          (RavenDB /stats may not expose DatabaseId on this version; check the API response shape.)
+
+    # ---------- Parse each receiver node's CV: take order-side only, classify dbids ----------
+    # An entry has shape "<tag>:<etag>-<dbid>".  We split the whole CV on '|'; the order side
+    # is everything before the first '|'.  If '|' isn't present at all, that receiver's CV is
+    # legacy raw form and I-13 (b) doesn't apply -- mark N/A.
+    - name: Classify each receiver's CV (order-side only)
+      ansible.builtin.set_fact:
+        receiver_cv_verdicts: >-
+          {{
+            (receiver_cv_verdicts | default([])) + [{
+              'node': item.item,
+              'cv': item.json.DatabaseChangeVector | default(''),
+              'is_new_lane': ('|' in (item.json.DatabaseChangeVector | default(''))),
+              'order_side': (item.json.DatabaseChangeVector | default('')).split('|')[0],
+              'source_leaks': ((item.json.DatabaseChangeVector | default('')).split('|')[0]
+                                | regex_findall('[A-Za-z0-9]+:\d+-([A-Za-z0-9+/=_\-]+)')
+                                | select('in', source_dbids)
+                                | list)
+                                if ('|' in (item.json.DatabaseChangeVector | default('')))
+                                else [],
+              'unknown_dbids': ((item.json.DatabaseChangeVector | default('')).split('|')[0]
+                                  | regex_findall('[A-Za-z0-9]+:\d+-([A-Za-z0-9+/=_\-]+)')
+                                  | reject('in', source_dbids + receiver_dbids)
+                                  | unique
+                                  | list)
+                                  if ('|' in (item.json.DatabaseChangeVector | default('')))
+                                  else []
+            }]
+          }}
+      loop: "{{ receiver_stats.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Show per-receiver-node verdict
+      ansible.builtin.debug:
+        msg: >-
+          {{ v.node }}:
+          {{ ('new-lane  order_side="' ~ v.order_side ~ '"  source_leaks=' ~ (v.source_leaks | length) ~ '  unknown_dbids=' ~ (v.unknown_dbids | length))
+             if v.is_new_lane
+             else 'LEGACY raw CV (no "|" delimiter) -- I-13 (b) N/A; received cv=' ~ v.cv }}
+          {{ ('  source-leak-sample=' ~ (v.source_leaks | unique | list)) if (v.source_leaks | length) > 0 else '' }}
+          {{ ('  unknown-sample=' ~ v.unknown_dbids) if (v.unknown_dbids | length) > 0 else '' }}
+      loop: "{{ receiver_cv_verdicts }}"
+      loop_control:
+        loop_var: v
+        label: "{{ v.node }}"
+
+    - name: Fail if strict_v_new and any receiver is in legacy form
+      ansible.builtin.assert:
+        that:
+          - (receiver_cv_verdicts | rejectattr('is_new_lane') | list | length) == 0
+        fail_msg: >-
+          FAIL  strict_v_new=true but the following receiver(s) are still on the legacy
+          CV form (no '|' delimiter): {{ receiver_cv_verdicts | rejectattr('is_new_lane') | map(attribute='node') | list }}
+        success_msg: >-
+          PASS  every receiver CV is in v_new-lane "order|version" form.
+      when: strict_v_new | default(false) | bool
+
+    - name: Assert CV-boundary holds on the order side (no source dbid in any new-lane receiver's order side)
+      # N/A receivers (legacy CV form) have source_leaks=[] by construction, so they don't trip this.
+      ansible.builtin.assert:
+        that:
+          - (receiver_cv_verdicts | map(attribute='source_leaks') | map('length') | sum) == 0
+        fail_msg: >-
+          FAIL  CV-boundary (I-13 b) breach by dbid.  Source dbids leaked into the order side
+          of receiver CV(s):
+          {{ receiver_cv_verdicts | selectattr('source_leaks', '!=', []) | list }}
+        success_msg: >-
+          PASS  CV-boundary holds.  No source-cluster dbid appears on the order side of any
+          v_new-lane receiver CV.
+          {{ '(N/A receivers, legacy form: ' ~ (receiver_cv_verdicts | rejectattr('is_new_lane') | map(attribute='node') | list) ~ ')'
+             if (receiver_cv_verdicts | rejectattr('is_new_lane') | list | length) > 0 else '' }}
+
+    - name: Warn (not fail) on unknown dbids on receiver order side
+      # Unknown dbids != source dbids; could indicate a third cluster peer (RPV-1's other sink).
+      # Surface them but don't fail -- this tool only enforces "no SOURCE dbid in RECEIVER ORDER SIDE".
+      ansible.builtin.debug:
+        msg: >-
+          WARN  unknown dbids found on receiver order side (not in source-cluster set, not in receiver-cluster set):
+          {{ receiver_cv_verdicts | selectattr('unknown_dbids', '!=', []) | list }}
+      when: (receiver_cv_verdicts | map(attribute='unknown_dbids') | map('length') | sum) > 0

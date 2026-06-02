@@ -1,0 +1,147 @@
+##################################################################################################
+# toolbox/diagnostic/diagnostic_lane_inert.yml
+#
+# When we upgrade a database in-place from the old RavenDB version (v_old) to the new one
+# (v_new), the new version ships a new "storage lane" -- a different on-disk shape for
+# revisions.  The upgrade does NOT migrate existing rows; it leaves them in the old shape
+# and only writes new rows in the old shape too (so legacy data stays readable).
+#
+# The new lane is supposed to stay DORMANT until we explicitly opt into migration.  This
+# check verifies that promise: it looks at the change-vector of stored revisions and makes
+# sure NONE of them are in the new-lane shape.  If we see even one revision in the new
+# shape on an upgraded database, the new lane has been activated unintentionally -- a real
+# regression.
+#
+# How we detect it: the new lane writes change-vectors with a literal "|" character
+# (canonical form is "order|version").  The old lane writes change-vectors WITHOUT "|".
+# So we sample some revisions, look at their @change-vector strings, and:
+#   * any "|" found    -> new lane wrote that row -> FAIL
+#   * no "|" anywhere  -> new lane stayed inert   -> PASS
+#
+# Side note: the DatabaseRecord also has a "SupportedFeatures" flag ("HashedRevisionPk")
+# that indicates the new lane is enabled.  We dump it for visibility but don't fail on it --
+# the storage-side "|" check is the load-bearing signal per Karmel's plan.
+#
+#
+# INPUTS:
+#   db_name             REQUIRED.  Database name.
+#   nodes               REQUIRED.  JSON list of node names to probe (post-upgrade v_new peers).
+#   id_prefixes         REQUIRED.  JSON list of doc id prefixes to sample from.
+#   sample_per_prefix   OPTIONAL.  How many doc ids to probe per prefix.  Default 25.
+#
+# RUN EXAMPLE:
+#   ansible-playbook toolbox/diagnostic/diagnostic_lane_inert.yml \
+#       -e db_name=db1 \
+#       -e '{"nodes":["2a","2b","2c"]}' \
+#       -e '{"id_prefixes":["users/sink1","orders/sink1"]}'
+##################################################################################################
+
+- name: Assert v_new lane stays inert on an upgraded database
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - db_name is defined
+          - nodes is defined
+          - nodes is iterable
+          - (nodes | length) > 0
+          - id_prefixes is defined
+          - id_prefixes is iterable
+          - (id_prefixes | length) > 0
+        fail_msg: >-
+          Required: -e db_name=<db> -e '{"nodes":[...]}' -e '{"id_prefixes":[...]}'
+
+    - name: Resolve probe set
+      ansible.builtin.set_fact:
+        eff_sample: "{{ (sample_per_prefix | default(25)) | int }}"
+
+    # Tolerate either "users/sink1" (no trailing slash, our convention) or "users/sink1/"
+    # (filter-style with trailing slash) -- strip the slash so the joined id form is always
+    # "<prefix>/<n>".
+    - name: Build probe id list (prefix x sample range)
+      ansible.builtin.set_fact:
+        probe_ids: >-
+          {{
+            (id_prefixes | map('regex_replace', '/$', '') | list)
+              | product(range(eff_sample | int) | list)
+              | map('join', '/')
+              | list
+          }}
+
+    - name: Show probe plan
+      ansible.builtin.debug:
+        msg:
+          - "nodes: {{ nodes }}"
+          - "prefixes: {{ id_prefixes }}"
+          - "probe ids per node: {{ probe_ids | length }}"
+
+    - name: GET /revisions for each (node, id)
+      ansible.builtin.uri:
+        url: "https://{{ item.0 }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/revisions?id={{ item.1 | urlencode }}&pageSize=100"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        status_code: [200, 404, 500, 503]
+      register: probe
+      loop: "{{ nodes | product(probe_ids) | list }}"
+      loop_control:
+        label: "{{ item.0 }} <- {{ item.1 }}"
+
+    - name: Collect every @change-vector seen + flag any containing "|"
+      # Per-result accumulator: pull every CV from each (node, id) probe and keep those that
+      # contain the new-lane delimiter "|".  Each leak entry is a "node / doc_id / cv" string
+      # (stringly-typed to dodge a Jinja list-comprehension quirk in older ansible/jinja).
+      # Skip non-200 responses (404 / 500 / 503 from the probe's status_code allowlist).
+      ansible.builtin.set_fact:
+        new_lane_leaks: "{{ (new_lane_leaks | default([])) + new_leaks_this_item }}"
+      vars:
+        cvs_with_pipe: "{{ item.json.Results | default([]) | map(attribute='@metadata') | map(attribute='@change-vector') | select('search', '\\|') | list }}"
+        new_leaks_this_item: "{{ cvs_with_pipe | map('regex_replace', '^(.*)$', item.item.0 ~ ' / ' ~ item.item.1 ~ ' / \\1') | list }}"
+      loop: "{{ probe.results }}"
+      loop_control:
+        label: "{{ item.item.0 }} <- {{ item.item.1 }}"
+      when: item.status == 200
+
+    - name: Count total CVs sampled (visibility)
+      # Skip non-200 responses; 200 results always carry json.Results (possibly empty list).
+      ansible.builtin.set_fact:
+        total_cvs_sampled: >-
+          {{
+            probe.results
+              | selectattr('status', 'equalto', 200)
+              | map(attribute='json.Results')
+              | map('length')
+              | sum
+          }}
+
+    # Forensic-only: dump SupportedFeatures so an operator can see HashedRevisionPk if the
+    # storage check fails.  NOT asserted on (Karmel pins '|', not the token).
+    - name: GET DatabaseRecord on the first node (forensic dump)
+      ansible.builtin.uri:
+        url: "https://{{ nodes[0] }}.{{ ravendb_domain }}:443/admin/databases?name={{ db_name }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        status_code: [200]
+      register: db_record
+
+    - name: Show verdict
+      ansible.builtin.debug:
+        msg:
+          - "total revision CVs sampled across all nodes: {{ total_cvs_sampled }}"
+          - "leaks (new-lane '|' format detected): {{ new_lane_leaks | length }}"
+          - "leak sample (first 5): {{ new_lane_leaks[:5] }}"
+          - "forensic: DatabaseRecord.SupportedFeatures = {{ db_record.json.SupportedFeatures | default([]) }}"
+
+    - name: Assert no new-lane CVs in storage
+      ansible.builtin.assert:
+        that:
+          - (new_lane_leaks | length) == 0
+        fail_msg: >-
+          FAIL  lane-inert breach: {{ new_lane_leaks | length }} revision CV(s) contain the '|'
+          delimiter, meaning the new lane wrote rows on this upgraded database.
+          Sample leaks: {{ new_lane_leaks[:5] }}
+        success_msg: >-
+          PASS  no '|' delimiter in {{ total_cvs_sampled }} sampled revision CVs across {{ nodes }} -- new lane stayed inert.

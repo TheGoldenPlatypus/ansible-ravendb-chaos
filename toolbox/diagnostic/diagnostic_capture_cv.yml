@@ -50,7 +50,6 @@
       loop: "{{ nodes }}"
       loop_control:
         label: "{{ item }}"
-      no_log: "{{ quiet | default(true) | bool }}"
 
     - name: Write per-node CV file
       ansible.builtin.copy:
@@ -61,7 +60,6 @@
       loop_control:
         loop_var: r
         label: "{{ r.item }}"
-      no_log: "{{ quiet | default(true) | bool }}"
 
     - name: Summary
       ansible.builtin.debug:

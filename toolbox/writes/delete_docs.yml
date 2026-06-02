@@ -67,7 +67,6 @@
       loop_control:
         loop_var: doc_id
         label: "{{ doc_id }}"
-      no_log: "{{ quiet | default(true) | bool }}"
 
     - name: Done
       ansible.builtin.debug:

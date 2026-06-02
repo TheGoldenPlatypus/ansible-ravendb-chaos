@@ -21,9 +21,6 @@
 #   connection_string_name  OPTIONAL.  Default "hub-connection".
 #   replication_certs_dir   OPTIONAL.  Where define_hub.yml wrote per-sink PFX files.  Default
 #                                      <repo_root>/replication-certs/.
-#   sink_leader_template    OPTIONAL.  Default "{id}a.{{ ravendb_domain }}".  How to compute
-#                                      a sink leader's hostname from its cluster id.  Override
-#                                      when sink leaders don't follow the <id>a convention.
 #
 # RUN EXAMPLE:
 #   ansible-playbook toolbox/replication/attach_sinks.yml -K \
@@ -38,8 +35,28 @@
   connection: local
   gather_facts: true
 
-  roles:
-    - role: ravendb.ravendb.ravendb_python_client_prerequisites
+  vars:
+    ravendb_venv_path: "{{ ansible_env.HOME }}/.ravendb_ansible"
+
+  tasks:
+    - name: Probe existing venv for ravendb module
+      ansible.builtin.command:
+        cmd: "{{ ravendb_venv_path }}/bin/python -c 'import ravendb'"
+      register: venv_probe
+      failed_when: false
+      changed_when: false
+
+    - name: Reuse existing venv -- skip the prereqs role
+      ansible.builtin.set_fact:
+        ansible_python_interpreter: "{{ ravendb_venv_path }}/bin/python"
+      when:
+        - venv_probe.rc == 0
+        - not (force_prereqs | default(false) | bool)
+
+    - name: Install ravendb python client prerequisites (one-time / forced)
+      ansible.builtin.include_role:
+        name: ravendb.ravendb.ravendb_python_client_prerequisites
+      when: (venv_probe.rc != 0) or (force_prereqs | default(false) | bool)
 
 
 - name: Attach every sink to the hub (generic)
@@ -70,16 +87,19 @@
         eff_mode: "{{ replication_mode | default('HubToSink, SinkToHub') }}"
         eff_conn_string_name: "{{ connection_string_name | default('hub-connection') }}"
         eff_certs_dir: "{{ replication_certs_dir | default(playbook_dir.split('/toolbox')[0] ~ '/replication-certs') }}"
-        eff_leader_template: "{{ sink_leader_template | default('{id}a.' ~ ravendb_domain) }}"
 
-    - name: Compute sink leader URLs (cluster id -> https://<leader>:443)
+    - name: Compute sink leader URLs (cluster id -> https://<id>a.<domain>:443)
+      # Build a {cluster_id: leader_url} map using the repo-wide convention <cluster_id>a as
+      # the leader name (1a, 2a, 3a, ...).  No regex backreferences -- just wrap the cluster
+      # id string with prefix and suffix via two anchor-based replaces.  Avoids the YAML ->
+      # Jinja -> Python re escape pyramid that bites \\1 backref forms in folded scalars.
       ansible.builtin.set_fact:
         sink_leader_urls: >-
           {{ dict(sink_cluster_ids
                   | zip(sink_cluster_ids
                           | map('string')
-                          | map('regex_replace', '^(.*)$', 'https://' ~ eff_leader_template ~ ':443')
-                          | map('regex_replace', '\\{id\\}', '\\1')
+                          | map('regex_replace', '^', 'https://')
+                          | map('regex_replace', '$', 'a.' ~ ravendb_domain ~ ':443')
                           | list)) }}
 
     - name: Create the Raven connection string on each sink's leader

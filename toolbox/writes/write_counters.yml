@@ -52,7 +52,6 @@
       loop_control:
         loop_var: n
         label: "+{{ delta | default(1) }} -> {{ counter_name | default('Likes') }} (call {{ n + 1 }})"
-      no_log: "{{ quiet | default(true) | bool }}"
 
     - name: Done
       ansible.builtin.debug:

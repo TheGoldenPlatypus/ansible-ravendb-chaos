@@ -6,10 +6,14 @@
 # complements wait_for_quiescence (steady state) by proving the wire actually moves.
 #
 # INPUTS:
-#   db_name        REQUIRED.  Database name.
-#   source         REQUIRED.  Node to PUT the marker on (e.g. 1a).
-#   targets        REQUIRED.  JSON list of nodes to poll for the marker (e.g. ["1b","1c"]).
-#   timeout_secs   OPTIONAL.  Default 60.  Per-target wait budget.
+#   db_name             REQUIRED.  Database name.
+#   source              REQUIRED.  Node to PUT the marker on (e.g. 1a).
+#   targets             REQUIRED.  JSON list of nodes to poll for the marker (e.g. ["1b","1c"]).
+#   timeout_secs        OPTIONAL.  Default 60.  Per-target wait budget.
+#   marker_id_prefix    OPTIONAL.  Default "markers/".  Override when the source→target leg has
+#                                  a filter that wouldn't admit the default prefix.  E.g. for a
+#                                  sink filtered to "users/sink1/*", pass
+#                                  marker_id_prefix=users/sink1/marker- so the marker is admitted.
 #
 # RUN EXAMPLE:
 #   ansible-playbook toolbox/wait/wait_for_marker_propagation.yml \
@@ -34,7 +38,7 @@
 
     - name: Pick a unique marker id
       ansible.builtin.set_fact:
-        marker_id: "markers/{{ lookup('pipe', 'date +%s%N') }}-{{ 99999 | random }}"
+        marker_id: "{{ marker_id_prefix | default('markers/') }}{{ lookup('pipe', 'date +%s%N') }}-{{ 99999 | random }}"
 
     - name: PUT the marker on {{ source }}
       ansible.builtin.uri:

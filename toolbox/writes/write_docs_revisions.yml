@@ -13,6 +13,8 @@
 #   count          REQUIRED.  Number of distinct doc ids.
 #   revs_per_doc   REQUIRED.  Number of distinct revisions to PUT per doc.
 #   id_prefix      OPTIONAL.  Default "seed".  Doc ids become <id_prefix>/0..count-1.
+#   collection     OPTIONAL.  Default "MicroDocs".  RavenDB collection to PUT into
+#                             (controls which per-collection revisions config applies).
 #
 # RUN EXAMPLES:
 #   # 10k docs x 5 revs = 50k revisions
@@ -49,7 +51,7 @@
         for v in $(seq 1 {{ revs_per_doc | int }}); do
           for n in $(seq 0 {{ (count | int) - 1 }}); do
             id="{{ id_prefix | default('seed') }}/$n"
-            body="{\"v\":$v,\"src\":\"write_docs_revisions\",\"@metadata\":{\"@collection\":\"MicroDocs\"}}"
+            body="{\"v\":$v,\"src\":\"write_docs_revisions\",\"@metadata\":{\"@collection\":\"{{ collection | default('MicroDocs') }}\"}}"
             code=$(curl -sk -o /dev/null -w '%{http_code}' --cert "$PEM" --cacert "$CA" \
               -X PUT "$URL/docs?id=$id" \
               -H "Content-Type: application/json" -d "$body")
@@ -61,4 +63,9 @@
 
     - name: Done
       ansible.builtin.debug:
-        msg: "{{ out.stdout }}"
+        msg: >-
+          Wrote {{ count | int }} docs ({{ id_prefix | default('seed') }}/0..{{ (count | int) - 1 }})
+          with {{ revs_per_doc | int }} revisions each
+          into {{ collection | default('MicroDocs') }} on {{ target }}/{{ db_name }}.
+          {{ (out.stdout | regex_search('ok=(\d+)', '\1') | first) }}/{{ (count | int) * (revs_per_doc | int) }} writes succeeded
+          ({{ (out.stdout | regex_search('errors=(\d+)', '\1') | first) }} errors).

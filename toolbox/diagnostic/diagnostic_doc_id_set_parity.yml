@@ -56,7 +56,6 @@
       loop: "{{ nodes | product(probe_ids) | list }}"
       loop_control:
         label: "{{ item.0 }} <- {{ item.1 }}"
-      no_log: "{{ quiet | default(true) | bool }}"
 
     - name: Build per-id status list (one entry per probed node, accumulator pattern)
       ansible.builtin.set_fact:
@@ -72,7 +71,6 @@
       loop: "{{ probe_ids }}"
       loop_control:
         label: "{{ item }}"
-      no_log: "{{ quiet | default(true) | bool }}"
 
     - name: Find ids with mixed presence (some 200, some not)
       ansible.builtin.set_fact:

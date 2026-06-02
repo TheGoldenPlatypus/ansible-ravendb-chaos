@@ -69,7 +69,6 @@
       loop_control:
         loop_var: n
         label: "{{ prefixes[ n | int % (prefixes | length) ] }}-{{ n | int // (prefixes | length) }}"
-      no_log: "{{ quiet | default(true) | bool }}"
 
     - name: Done
       ansible.builtin.debug:

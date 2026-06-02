@@ -85,7 +85,6 @@
       loop_control:
         loop_var: attempt_idx
         label: "attempt {{ attempt_idx + 1 }}/{{ max_attempts }}"
-      no_log: "{{ quiet | default(true) | bool }}"
 
     - name: Timeout verdict (only reached if drain never fired meta:end_play)
       ansible.builtin.fail:

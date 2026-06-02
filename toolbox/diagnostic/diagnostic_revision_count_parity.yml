@@ -62,7 +62,6 @@
       loop: "{{ nodes | product(probe_ids) | list }}"
       loop_control:
         label: "{{ item.0 }} <- {{ item.1 }}"
-      no_log: "{{ quiet | default(true) | bool }}"
 
     - name: Build per-id count list (accumulator across probe ids)
       ansible.builtin.set_fact:
@@ -80,20 +79,13 @@
       loop: "{{ probe_ids }}"
       loop_control:
         label: "{{ item }}"
-      no_log: "{{ quiet | default(true) | bool }}"
 
     - name: Find ids whose per-node revision counts disagree (value list isn't uniform)
-      # Per-id check: an id is mismatched iff its 3 per-node counts aren't all equal.
-      # (The previous implementation compared each id's value to the FIRST id's value,
-      # which falsely flagged every id whose count differed from id #0 -- e.g. with
-      # seed/0=[25,25,25] and seed/1=[20,20,20], seed/1 was "mismatched" despite all
-      # nodes agreeing on 20.  The accumulator pattern below is the correct check.)
       ansible.builtin.set_fact:
         mismatched_ids: "{{ mismatched_ids | default([]) + ([item.key] if (item.value | unique | list | length) != 1 else []) }}"
       loop: "{{ id_count_map | dict2items }}"
       loop_control:
         label: "{{ item.key }}"
-      no_log: "{{ quiet | default(true) | bool }}"
 
     - name: Find ids whose revision count differs from expected_count (optional)
       ansible.builtin.set_fact:
