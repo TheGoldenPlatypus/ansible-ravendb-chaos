@@ -479,7 +479,7 @@
 # =====================================================================================
 
 - ansible.builtin.import_playbook: ../../../toolbox/control/pause_gate.yml
-  vars: { section_label: "SECTION 6 -- upgrade step 1 ({{ upgrade_step_1 | default(['{{ sink1_id | default(2) }}a','{{ sink1_id | default(2) }}b','{{ sink1_id | default(2) }}c']) }})" }
+  vars: { section_label: "SECTION 6 -- upgrade step 1 ({{ upgrade_step_1 | default([((sink1_id | default(2)) | string) ~ 'a', ((sink1_id | default(2)) | string) ~ 'b', ((sink1_id | default(2)) | string) ~ 'c']) }})" }
 
 - name: RPV-1 SECTION 6 -- upgrade step 1 (3 nodes from upgrade_step_1)
   hosts: localhost
@@ -592,7 +592,7 @@
     # upgrade_step_1 comes from vars.yml; import_playbook eval is outside any play so
     # vars_files isn't in scope -- the default literal covers variant A.  -e upgrade_step_1=[...]
     # on the CLI for variants B/C still overrides.
-    nodes: "{{ upgrade_step_1 | default(['{{ sink1_id | default(2) }}a','{{ sink1_id | default(2) }}b','{{ sink1_id | default(2) }}c']) }}"
+    nodes: "{{ upgrade_step_1 | default([((sink1_id | default(2)) | string) ~ 'a', ((sink1_id | default(2)) | string) ~ 'b', ((sink1_id | default(2)) | string) ~ 'c']) }}"
     id_prefixes: ["users/sink1", "orders/sink1", "users/sink2", "orders/sink2", "users/hub", "orders/hub", "Internal"]
     sample_per_prefix: "{{ lane_inert_sample_per_prefix | default(25) | int }}"
 
@@ -602,7 +602,7 @@
 # =====================================================================================
 
 - ansible.builtin.import_playbook: ../../../toolbox/control/pause_gate.yml
-  vars: { section_label: "SECTION 8 -- upgrade step 2 ({{ upgrade_step_2 | default(['{{ hub_id | default(1) }}a','{{ hub_id | default(1) }}b','{{ hub_id | default(1) }}c']) }})" }
+  vars: { section_label: "SECTION 8 -- upgrade step 2 ({{ upgrade_step_2 | default([((hub_id | default(1)) | string) ~ 'a', ((hub_id | default(1)) | string) ~ 'b', ((hub_id | default(1)) | string) ~ 'c']) }})" }
 
 - name: RPV-1 SECTION 8 -- upgrade step 2 (3 nodes from upgrade_step_2)
   hosts: localhost
@@ -700,7 +700,7 @@
 - ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_lane_inert.yml
   vars:
     db_name: db1
-    nodes: "{{ (upgrade_step_1 | default(['{{ sink1_id | default(2) }}a','{{ sink1_id | default(2) }}b','{{ sink1_id | default(2) }}c'])) + (upgrade_step_2 | default(['{{ hub_id | default(1) }}a','{{ hub_id | default(1) }}b','{{ hub_id | default(1) }}c'])) }}"
+    nodes: "{{ (upgrade_step_1 | default([((sink1_id | default(2)) | string) ~ 'a', ((sink1_id | default(2)) | string) ~ 'b', ((sink1_id | default(2)) | string) ~ 'c'])) + (upgrade_step_2 | default([((hub_id | default(1)) | string) ~ 'a', ((hub_id | default(1)) | string) ~ 'b', ((hub_id | default(1)) | string) ~ 'c'])) }}"
     id_prefixes: ["users/sink1", "orders/sink1", "users/sink2", "orders/sink2", "users/hub", "orders/hub", "Internal"]
     sample_per_prefix: "{{ lane_inert_sample_per_prefix | default(25) | int }}"
 
@@ -710,7 +710,7 @@
 # =====================================================================================
 
 - ansible.builtin.import_playbook: ../../../toolbox/control/pause_gate.yml
-  vars: { section_label: "SECTION 10 -- upgrade step 3 ({{ upgrade_step_3 | default(['{{ sink2_id | default(3) }}a','{{ sink2_id | default(3) }}b','{{ sink2_id | default(3) }}c']) }})" }
+  vars: { section_label: "SECTION 10 -- upgrade step 3 ({{ upgrade_step_3 | default([((sink2_id | default(3)) | string) ~ 'a', ((sink2_id | default(3)) | string) ~ 'b', ((sink2_id | default(3)) | string) ~ 'c']) }})" }
 
 - name: RPV-1 SECTION 10 -- upgrade step 3 (3 nodes from upgrade_step_3)
   hosts: localhost
