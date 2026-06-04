@@ -26,6 +26,12 @@
 
 set -euo pipefail
 
+# Workaround for CPython 3.12.0-3.12.3 marshal bug -- compiling certain ansible
+# collection modules raises "ValueError: unmarshallable object" when Python tries
+# to write a .pyc cache.  Disabling bytecode-writing skips the buggy code path.
+# Fixed upstream in Python 3.12.4; safe to keep set regardless.
+export PYTHONDONTWRITEBYTECODE=1
+
 V_OLD="${1:-}"
 V_NEW_BUILD="${2:-}"
 CLUSTER_ID_START="${3:-1}"
