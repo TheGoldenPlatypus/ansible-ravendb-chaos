@@ -2,7 +2,7 @@
 # scenarios/EMR/RP1/rp1.yml -- CV-boundary regression guard on a clean all-v_new T2 cluster.
 #
 # 1 hub ({{ hub_id | default(1) }}a/{{ hub_id | default(1) }}b/{{ hub_id | default(1) }}c) + 1 sink ({{ sink_id | default(2) }}a/{{ sink_id | default(2) }}b/{{ sink_id | default(2) }}c) with filtered pull `users/sink1/*`; both clusters RF=3,
-# all 6 nodes start AND stay on v_new (no upgrade in this scenario).  Karmel: "All peers must
+# all 6 nodes start AND stay on v_new (no upgrade in this scenario).  spec: "All peers must
 # be v_new for the scenario to be meaningful."
 #
 #   0.  Kill any leftover background processes from a previous interrupted run.  Validate inputs.
@@ -29,7 +29,7 @@
 #         * I-1 + I-5/I-6: consolidated /stats parity across sink replicas (docs, tombstones,
 #           attachments, counters, time-series).
 #         * I-6 "no stuck task": diagnostic_replication dump (informational, operator review).
-#   9.  Karmel step 8: locally update one item per family on SB; verify it replicates to SA/SC
+#   9.  spec step 8: locally update one item per family on SB; verify it replicates to SA/SC
 #       (the sink's internal-replication path).
 #
 # Deep version (invariants, risks, validators) -> EMR_TESTING_PLAN/scenarios.md (RP-1).
@@ -191,7 +191,7 @@
 
 # 3. conflict document -- partition hub <-> sink, write the same id on both sides with
 #    different bodies, heal.  When replication resumes, the two writes collide and the
-#    conflict-detection path is exercised.  Karmel calls this a "spot check"; deeper
+#    conflict-detection path is exercised.  the spec calls this a "spot check"; deeper
 #    conflict coverage (resolution timing, multi-side conflicts under chaos) lives in RP-2
 #    phase (a).
 - ansible.builtin.import_playbook: ../../../toolbox/network/partition_set.yml
@@ -335,7 +335,7 @@
 # 12. legacy counter -- seeded via a pre-built v_old smuggler dump.  v_new only writes the
 #     current counter format, so the only way to get a legacy-format counter into storage
 #     on an all-v_new RP-1 cluster is to create it once on a v_old lab, export, and import
-#     here.  REQUIRED per Karmel's RP-1 spec -- if the fixture file is missing, the
+#     here.  REQUIRED per the RP-1 spec -- if the fixture file is missing, the
 #     scenario fails loud.  See scenarios/EMR/RP1/fixtures/README.md for the one-time
 #     fixture creation procedure.
 - ansible.builtin.import_playbook: ../../../toolbox/backup/smuggler_import.yml
@@ -365,7 +365,7 @@
     - ansible.builtin.debug:
         msg: "==== SECTION 4 -- drain hub-side + sink-side, then baseline filter compliance ===="
 
-# Per-node etag stability on hub (Karmel's "wait by etag" approach -- replaces CV-string
+# Per-node etag stability on hub (the spec's "wait by etag" approach -- replaces CV-string
 # comparison; cleaner under bidirectional pull asymmetries even though RP-1 is one-way).
 - ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_etag_parity.yml
   vars: { db_name: db1, nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"] }
@@ -489,7 +489,7 @@
         seconds: "{{ burst_cooldown_secs | default(45) | int }}"
       when: (burst_cooldown_secs | default(45) | int) > 0
 
-# Per-node etag stability (Karmel-style: wait by etag).
+# Per-node etag stability (spec-aligned: wait by etag).
 - ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_etag_parity.yml
   vars: { db_name: db1, nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"] }
 
@@ -547,11 +547,11 @@
     id_prefix: "users/sink1/active"
     count: "{{ parity_probe_count | default(50) | int }}"
 
-# I-13 (a) item CV shape: walk the per-family inventory on the sink leader.  Karmel's spec
+# I-13 (a) item CV shape: walk the per-family inventory on the sink leader.  the spec
 # names this "item CV split" -- assumes the new lane is active on a v_new receiver, putting
 # CVs in the split "order|version" shape.  But PR-22875 keeps the new lane dormant (see also
 # RPV-1: SupportedFeatures lists ThrowRevisionKeyTooBigFix only, no HashedRevisionPk), so all
-# stored CVs are in the legacy RAW form.  Same Karmel-aligned decision as RPV-1's cv-boundary
+# stored CVs are in the legacy RAW form.  Same spec-aligned decision as RPV-1's cv-boundary
 # check: don't demand lane activation; verify the actual on-disk shape (raw, no '|' delimiter).
 # If the lane ever flips on (PR adds HashedRevisionPk to SupportedFeatures), flip expect=split.
 - ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_stored_item_cv_split.yml
@@ -571,7 +571,7 @@
 
 # I-13 (b) DB CV order-side -- the load-bearing regression guard.  Hub -> Sink direction.
 # Tool reports N/A on legacy raw-CV form (PR-22875 keeps the new lane dormant unless
-# explicitly opted in); strict_v_new NOT set per the spec (Karmel asks for I-13, not
+# explicitly opted in); strict_v_new NOT set per the spec (the spec asks for I-13, not
 # specifically the strict-activation mode).
 - ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_cv_boundary_by_dbid.yml
   vars:
@@ -591,7 +591,7 @@
 
 
 # =====================================================================================
-# SECTION 9 -- Karmel step 8: local update on SB, verify replicates to SA/SC
+# SECTION 9 -- spec step 8: local update on SB, verify replicates to SA/SC
 # =====================================================================================
 
 - ansible.builtin.import_playbook: ../../../toolbox/control/pause_gate.yml
@@ -607,7 +607,7 @@
 
 # Update one item on {{ sink_id | default(2) }}b (not via hub) -- write_docs targets that node directly.  Then a marker
 # propagation confirms replication SB -> SA + SC.  The "both halves of the stored CV" check
-# from Karmel's spec is N/A here since the new lane is dormant; the data-replication check
+# from the spec is N/A here since the new lane is dormant; the data-replication check
 # is the load-bearing observation.
 - ansible.builtin.import_playbook: ../../../toolbox/writes/write_docs.yml
   vars:

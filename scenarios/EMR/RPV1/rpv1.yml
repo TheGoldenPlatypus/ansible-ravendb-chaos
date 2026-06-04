@@ -516,7 +516,7 @@
 # writes, true CV stillness can't converge (writes happen between every poll), so the
 # load-bearing drain proxy is marker propagation: write a marker on hub, wait for it to appear
 # on every sink node.  That confirms replication is current up to a known point -- exactly
-# the "steady, not transient" gate Karmel asks for.
+# the "steady, not transient" gate the spec asks for.
 - ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_marker_propagation.yml
   vars:
     db_name: db1
@@ -802,7 +802,7 @@
 # is the CV-boundary order-side check: no source-cluster dbid leaks into the receiver's
 # order side.  Tool reports N/A on legacy raw-CV form (no '|' delimiter) -- if the cluster
 # hasn't activated the new lane, the check is informational; if it has, the check is
-# enforced.  Karmel didn't specify strict_v_new mode -- the literal I-13 (b) is the order-
+# enforced.  the spec doesn't specify strict_v_new mode -- the literal I-13 (b) is the order-
 # side validation, not "demand the new lane is active."
 # Hub -> Sink-1 direction.
 - ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_cv_boundary_by_dbid.yml
@@ -892,7 +892,7 @@
 
 # ---------- Per-cluster /stats parity (I-1 + I-5 + I-6 in one pass) --------------------
 # Replaces 3 separate doc_count_parity calls.  12 fields per cluster, including doc count,
-# tombstones, attachments, counters, time-series -- all the convergence invariants Karmel
+# tombstones, attachments, counters, time-series -- all the convergence invariants the spec
 # asks for at the final checkpoint.
 - ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_stats_parity.yml
   vars: { db_name: db1, nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"] }

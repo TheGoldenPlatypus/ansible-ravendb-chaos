@@ -3,7 +3,7 @@
 #
 # Directional CV-boundary check.  Given a SENDER cluster and a RECEIVER cluster (or any two
 # disjoint node groups in a replication topology), asserts that the ORDER side of the receiver's
-# DatabaseChangeVector contains no sender-cluster dbid.  Karmel calls this I-13 (b) -- the
+# DatabaseChangeVector contains no sender-cluster dbid.  the spec calls this I-13 (b) -- the
 # load-bearing CV-boundary regression guard.
 #
 # IMPORTANT: I-13 (b) is a v_new-lane invariant.  The new lane writes CVs in the canonical

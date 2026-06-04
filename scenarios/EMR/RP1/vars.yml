@@ -30,14 +30,14 @@ sink_cluster_nodes:
 sink_allowed_prefixes: ["users/sink1/*"]
 
 # ---------- W-0 bulk seed (per the RP-1 spec) -------------------------------
-# 10k users/sink1/* + 10k orders/hub/*  (Karmel's RP-1 Initial State).
+# 10k users/sink1/* + 10k orders/hub/*  (the spec's RP-1 Initial State).
 # Override -e bulk_users_sink1=N etc. for shakedown runs.
 bulk_users_sink1: 10000
 bulk_orders_hub:  10000
 
 # ---------- Per-family inventory --------------------------------------------
 # Per the RP-1 spec: "one item of each replication-item type under users/sink1/family/*".
-# Karmel lists 12 item types.  We implement the 10 reachable via existing toolbox tools:
+# the spec lists 12 item types.  We implement the 10 reachable via existing toolbox tools:
 #   doc, doc-tombstone, revision-doc, revision-tombstone, attachment (meta+stream),
 #   attachment-tombstone, counter, time-series segment, deleted time-series range.
 # Skipped (with notes in rp1.yml):

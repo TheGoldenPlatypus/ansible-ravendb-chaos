@@ -20,7 +20,7 @@
 #
 # Side note: the DatabaseRecord also has a "SupportedFeatures" flag ("HashedRevisionPk")
 # that indicates the new lane is enabled.  We dump it for visibility but don't fail on it --
-# the storage-side "|" check is the load-bearing signal per Karmel's plan.
+# the storage-side "|" check is the load-bearing signal per the spec.
 #
 #
 # INPUTS:
@@ -118,7 +118,7 @@
           }}
 
     # Forensic-only: dump SupportedFeatures so an operator can see HashedRevisionPk if the
-    # storage check fails.  NOT asserted on (Karmel pins '|', not the token).
+    # storage check fails.  NOT asserted on (the spec pins '|', not the token).
     - name: GET DatabaseRecord on the first node (forensic dump)
       ansible.builtin.uri:
         url: "https://{{ nodes[0] }}.{{ ravendb_domain }}:443/admin/databases?name={{ db_name }}"

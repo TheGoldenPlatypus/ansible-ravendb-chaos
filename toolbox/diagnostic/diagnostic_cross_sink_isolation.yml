@@ -89,7 +89,7 @@
           - "leaked ids (present on this sink, shouldn't be): {{ leaked_ids | length }}"
           - "leak sample (first 10): {{ leaked_ids[:10] }}"
 
-    - name: Assert cross-sink isolation (Karmel filter invariant (v))
+    - name: Assert cross-sink isolation (filter invariant (v))
       ansible.builtin.assert:
         that:
           - (leaked_ids | length) == 0

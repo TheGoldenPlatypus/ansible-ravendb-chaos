@@ -40,7 +40,7 @@ set -u
 : "${CA_CRT:?CA_CRT env var is required}"
 
 # DURATION_SECS is OPTIONAL.  Unset or 0 = run indefinitely (until SIGTERM / SIGKILL from
-# `toolbox/workloads/stop_workload.yml`).  Per Karmel's plan, RPV-1/RV-1 workloads run
+# `toolbox/workloads/stop_workload.yml`).  Per the spec, RPV-1/RV-1 workloads run
 # "continuous from T0 through endpoint" -- the scenario is responsible for killing them
 # explicitly via stop_workload.  Setting a positive DURATION_SECS makes the script self-exit
 # after that many seconds (useful for ad-hoc invocations only).

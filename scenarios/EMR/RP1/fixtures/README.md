@@ -6,7 +6,7 @@ scenario references its fixtures by name in Section 3.
 
 ## `legacy-counter.ravendbdump` (REQUIRED)
 
-Per-family inventory item #12 from Karmel's RP-1 spec.  A legacy-format counter cannot
+Per-family inventory item #12 from the RP-1 spec.  A legacy-format counter cannot
 be created on an all-v_new cluster (v_new only writes the current counter format), so
 the only way to seed one for the I-13 (a) check on RP-1's all-v_new topology is to
 create it on a v_old cluster and smuggler-import the dump.

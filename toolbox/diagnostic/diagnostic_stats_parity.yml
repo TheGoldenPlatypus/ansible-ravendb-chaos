@@ -34,7 +34,7 @@
 #   assert_fields        OPTIONAL.  JSON list -- subset of count fields to assert.
 #                                   Default = the 9 cross-node parity-equal fields (excludes
 #                                   CountOfCounterEntries + CountOfTimeSeriesSegments which are
-#                                   per-node intrinsic per Karmel).  Pass an explicit list to
+#                                   per-node intrinsic per upstream guidance).  Pass an explicit list to
 #                                   override.
 #   informational_only   OPTIONAL.  Default false.  When true, prints the table but skips
 #                                   the parity assertion.  Useful mid-roll under live writes.
@@ -97,7 +97,7 @@
           - CountOfTombstones
           - CountOfUniqueAttachments
         # CountOfCounterEntries + CountOfTimeSeriesSegments are intentionally absent --
-        # per-node intrinsic per Karmel (still printed in the table for visibility, just
+        # per-node intrinsic per upstream guidance (still printed in the table for visibility, just
         # not asserted).  See header docstring for the full rationale + TODO.
         eff_assert_fields: "{{ assert_fields | default([
               'CountOfAttachments',
@@ -179,7 +179,7 @@
       loop_control:
         label: "{{ item }}"
 
-    # Per Karmel (2026-06-04): "flag this, but don't fail the run" for the info-only fields
+    # Per upstream guidance (2026-06-04): "flag this, but don't fail the run" for the info-only fields
     # that legitimately diverge per-node (CountOfCounterEntries, CountOfTimeSeriesSegments).
     # Collect them here as `flagged_info_fields`; emit a prominent banner below if non-empty.
     - name: Find drifted info-only fields (NOT asserted -- flagged for operator review)
@@ -225,7 +225,7 @@
         header_line: "{{ '%-32s' | format('field') }}{% for n in convergence_set %}{{ '%16s' | format(n) }}{% endfor %}  status"
         size_line:   "{{ '%-32s' | format('SizeOnDisk (info only)') }}{% for n in convergence_set %}{{ '%16d' | format(per_node_stats[n]['SizeOnDisk']) }}{% endfor %}"
 
-    # Per Karmel: "flag this, but don't fail the run."  Build one line per flagged field,
+    # Per upstream guidance: "flag this, but don't fail the run."  Build one line per flagged field,
     # then emit a prominent banner -- separate task so it stands out from the stats table
     # and is grep-friendly via "INFORMATIONAL DRIFT".
     - name: Build flag lines for drifted info-only fields

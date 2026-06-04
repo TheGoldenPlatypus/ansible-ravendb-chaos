@@ -9,7 +9,7 @@
 #      collection.  Each entry can have `keep` (MinimumRevisionsToKeep, int) and
 #      `max_age_secs` (MinimumRevisionAgeToKeep, seconds; encoded as "hh:mm:ss" for the API).
 #      `default_keep` + `default_max_age_secs` configure the Default config used for any
-#      collection not in the dict.  Karmel's EMR plan uses this mode.
+#      collection not in the dict.  the EMR plan uses this mode.
 #
 # INPUTS:
 #   target                 REQUIRED.  Container/host to talk to.

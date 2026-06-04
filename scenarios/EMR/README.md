@@ -119,7 +119,7 @@ less -R +/'>>>>>  SECTION 8' logs/rpv1-*.log   # jump to a section
 - **W-0 seed**: 10k `users/sink1/*` + 10k `orders/hub/*` + a **per-family inventory** (one item per replication-item type under `users/sink1/family/*`).  The legacy-counter inventory item is **required** and seeded via a smuggler dump fixture — see [RP1/fixtures/README.md](RP1/fixtures/README.md) for the one-time creation procedure.
 - **Burst**: 10k `users/sink1/active/*` writes + 2k delete/restore-from-revision iterations on the seed pool.
 - **Asserts**: I-13 (a) (item CV shape per family), I-13 (b) (DB CV order-side via `cv_boundary_by_dbid`), I-13 (c) (replica preservation), I-7 (filter compliance), I-5/I-6 (drained, no stuck tasks via consolidated stats parity + replication dump).
-- **Karmel step 8**: local update on `<sink_id>b`, verify replicates to `a` + `c`.
+- **spec step 8**: local update on `<sink_id>b`, verify replicates to `a` + `c`.
 
 **Topology defaults:** hub=cluster 1, sink=cluster 2.
 
@@ -143,7 +143,7 @@ W-1 + W-2 run continuously from T0 through endpoint on hub leader.  Sections 6/8
 |---|---|---|
 | `Could not find or access 'builds/raven-prNNN.deb'` | Typo in PR number | `ls builds/raven-pr*.deb` |
 | `Cannot assign requested address` on /stats after a burst | Controller ephemeral-port exhaustion (TIME_WAIT) | The scenarios already insert a `w3_cooldown_secs` / `burst_cooldown_secs` pause; raise it if your kernel's port range is small.  Alternative: `sudo sysctl -w net.ipv4.tcp_tw_reuse=1` |
-| `CountOfCounterEntries / CountOfTimeSeriesSegments MISMATCH` | Per-node-intrinsic metric (per Karmel, 2026-06-04) — NOT a real drift | Already demoted to `drift (info)` in `diagnostic_stats_parity`; flagged in a separate `INFORMATIONAL DRIFT` block but doesn't fail the run |
+| `CountOfCounterEntries / CountOfTimeSeriesSegments MISMATCH` | Per-node-intrinsic metric (per upstream guidance, 2026-06-04) — NOT a real drift | Already demoted to `drift (info)` in `diagnostic_stats_parity`; flagged in a separate `INFORMATIONAL DRIFT` block but doesn't fail the run |
 | `ERROR: jq is required` | `workload_w3.sh` and RP-1 burst step parse `/revisions` JSON via jq | `apt install jq` on the controller |
 | `WORKLOAD DIED  pidfile=… state="NO_PIDFILE"` | A background worker exited before the scenario stopped it | If it exited because `duration_secs` ran out, ensure `duration_secs` isn't set (W-1/W-2 should run indefinitely until killed).  Otherwise inspect the workload's log under `/tmp/w*-*.log`. |
 | Container name collisions on the docker daemon | Parallel run reused a cluster_id range | Each parallel run.sh invocation needs a **disjoint** `cluster_id_start` AND a unique `docker_network_name` |
