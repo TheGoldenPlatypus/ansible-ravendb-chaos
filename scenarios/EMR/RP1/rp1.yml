@@ -123,8 +123,12 @@
     db_name: db1
     hub_task_name: rp1-hub
     sink_cluster_ids: ["{{ sink_id | default(2) | int }}"]
-    sink_allowed_paths:
-      "{{ sink_id | default(2) | int }}": ["users/sink1/*"]
+    # Build the dict via a single Jinja expression -- templated KEYS inside a YAML dict
+    # literal under import_playbook vars: don't reliably resolve (the key stays literal
+    # "{{ sink_id... }}", attach_sinks/define_hub's lookup misses, and AllowedHubToSinkPaths
+    # silently falls back to ["*"] = WIDE-OPEN filter).  Verified live by querying the hub
+    # access entry: docs from disallowed prefixes were replicating to the sink.
+    sink_allowed_paths: "{{ {(sink_id | default(2) | int | string): ['users/sink1/*']} }}"
 
 - ansible.builtin.import_playbook: ../../../toolbox/replication/attach_sinks.yml
   vars:
@@ -135,8 +139,12 @@
       - "https://{{ hub_id | default(1) }}b.hubsink.test:443"
       - "https://{{ hub_id | default(1) }}c.hubsink.test:443"
     sink_cluster_ids: ["{{ sink_id | default(2) | int }}"]
-    sink_allowed_paths:
-      "{{ sink_id | default(2) | int }}": ["users/sink1/*"]
+    # Build the dict via a single Jinja expression -- templated KEYS inside a YAML dict
+    # literal under import_playbook vars: don't reliably resolve (the key stays literal
+    # "{{ sink_id... }}", attach_sinks/define_hub's lookup misses, and AllowedHubToSinkPaths
+    # silently falls back to ["*"] = WIDE-OPEN filter).  Verified live by querying the hub
+    # access entry: docs from disallowed prefixes were replicating to the sink.
+    sink_allowed_paths: "{{ {(sink_id | default(2) | int | string): ['users/sink1/*']} }}"
 
 
 # =====================================================================================
