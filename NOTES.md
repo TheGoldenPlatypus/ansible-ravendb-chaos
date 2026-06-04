@@ -46,18 +46,17 @@ provide a shared `lab_backups` volume.
 
 ## Tool-specific quirks
 
-### `wait_for_quiescence.yml` (`toolbox/wait/`)
+### `wait_for_quiescence.yml`, `wait_for_docs_drain.yml`, `wait_for_conflicts_resolved.yml` (`toolbox/wait/`)
 
-- Ends the play via `meta: end_play` on convergence.
-- **Do NOT `import_playbook` it into a larger play** -- the importer's remaining tasks would be
-  cut off the moment quiescence fires. Safe as a standalone `ansible-playbook` shell-out, which
-  is how scenarios should use it.
-- Drops nodes returning 404/500/503 from the convergence set on the first poll (those don't have
-  the DB). Mid-run transient failures don't abort the run.
-- Carries state across iterations via `set_fact` + an `include_tasks` helper
-  (`_wait_for_quiescence_attempt.yml`). The "X/90 attempts" iterations enumeration before any of
-  them run is an Ansible 2.17 cosmetic wart (`break_when` on loops landed in 2.18); functionally
-  the play ends correctly on the first converged attempt.
+- Single shell task per call (bash + curl + jq).  The polling loop runs inside the script, so
+  the ansible log gets one task line per wait, not one per attempt.  Requires `jq` on the
+  controller (`sudo apt install jq` -- standard on Ubuntu/WSL).
+- Drops nodes returning 404/500/503 from the convergence set on the first poll (those don't
+  have the DB).  Mid-run transient curl failures don't abort -- the iteration is just skipped.
+- On TIMEOUT the script prints `last_cvs` (quiescence/drain) or `last_counts` (conflicts) so
+  the next debugger can see exactly what didn't converge.
+- The previous `_wait_for_*_attempt.yml` include-helpers were removed.  If you see a scenario
+  still referencing them, update the scenario.
 
 ### `write_timeseries.yml` (`toolbox/writes/`)
 
@@ -160,3 +159,132 @@ same structure as the docs.
 These tools branch on `target_mode` internally and shell out to the right underlying primitive
 (`cut_link.yml` vs `cut_link_ssh.yml`). A separate `_ssh` variant would just be a duplicate of
 the mode check.
+
+---
+
+## EMR-scenario gotchas (learned the hard way)
+
+A grab-bag of "we hit this more than once" footguns from authoring RV-1 / RP-1 / RPV-1.
+
+### `vars.yml` is NOT reachable from `import_playbook:` `vars:` blocks
+
+Ansible evaluates `import_playbook` vars at parse time, before any role / playbook-level
+`vars_files:` directive has loaded the scenario's `vars.yml`. Symptom: a var defined in
+`scenarios/EMR/<X>/vars.yml` evaluates to `Undefined` inside the importing playbook's
+`vars:` dict, but works fine inside the imported playbook's tasks.
+
+Fix pattern — duplicate the default inline at every import call site using `| default(...)`:
+
+```yaml
+- import_playbook: ../../../toolbox/waits/wait_for_quiescence.yml
+  vars:
+    targets: "{{ hub_cluster_nodes | default([hub_id|default(1)~'a', hub_id|default(1)~'b', hub_id|default(1)~'c']) }}"
+    budget_secs: "{{ quiesce_budget_secs | default(1200) }}"
+```
+
+The scenario `vars.yml` files document this in a comment header. Same bug class shows up
+for `peer_map`, `upgrade_step_N`, `size_baseline_file`, `phase3_doc_id`.
+
+### `playbook_dir` resolves to the IMPORTED playbook, not the importer
+
+Inside an imported `toolbox/*.yml`, `{{ playbook_dir }}` is the toolbox dir — not the
+scenario dir that called `import_playbook`. When you need a path relative to the scenario
+fixtures, don't use `playbook_dir`. Use either an absolute path passed in via `-e`, or
+`{{ lookup('env', 'PWD') }}/scenarios/EMR/<X>/...` (assumes the run.sh `cd`s to repo root,
+which all our run.sh scripts do).
+
+This burned `partition_set.yml`'s `chdir:` once too — that one is now `playbook_dir/../..`
+(toolbox/network → repo root) instead of `playbook_dir/..`.
+
+### `declare -A` requires `executable: /bin/bash`
+
+Ansible's `shell` / `command` module defaults to `/bin/sh` (dash on Ubuntu), which doesn't
+have associative arrays. Anything using `declare -A` (e.g. `wait_for_etag_parity.yml`'s
+per-node-stability loop) MUST set:
+
+```yaml
+- shell: |
+    declare -A first second
+    ...
+  args:
+    executable: /bin/bash
+```
+
+Same applies to `[[ ... ]]`, `<<<` here-strings, `${var,,}` lowercase, process substitution.
+
+### `LastDatabaseEtag` is per-node-local, not cross-node-parity-equal
+
+A natural intuition is "wait until every node reports the same etag" — but
+`LastDatabaseEtag` is a per-node writer counter; replicated writes don't carry their
+source-node etag with them. The spec-aligned check is per-node **stability**:
+
+1. Sample each node's etag, record into a map.
+2. Sleep 3–5 s.
+3. Sample again. Drained = every node's etag unchanged between samples.
+
+Implemented in `toolbox/wait/wait_for_etag_parity.yml` (despite the name, it's
+per-node-stability — name kept for tool-set symmetry).
+
+For cross-node convergence use `DatabaseChangeVector` equality
+(`wait_for_quiescence.yml`) — that one IS designed to converge.
+
+### `/stats` fields that drift forever between nodes (per-node-intrinsic)
+
+These three are NOT cross-node parity invariants — they reflect per-node-local storage
+state and do not converge:
+
+- `CountOfCounterEntries` (per upstream guidance, 2026-06-04; deterministic in our T3 lab — 1a always
+  trails ~2-5 entries on RPV-1)
+- `CountOfTimeSeriesSegments` (per same upstream note)
+- `SizeOnDisk` (always — voron compaction is per-node-async)
+
+`diagnostic_stats_parity.yml` flags these as `drift (info)` in a separate
+`INFORMATIONAL DRIFT` banner block but does NOT fail the run. If a future test grows
+parity asserts here, it has to opt out of these three fields explicitly.
+
+### Tombstone-cleanup convergence needs its own wait
+
+After a workload that does deletes / revert-from-revision stops, `CountOfTombstones`
+will drift between nodes until each node's background cleanup runs. Etag stability says
+"no new writes" but tombstone counts only equalize once cleanup catches up. We added
+`wait_for_stats_field_parity.yml` (300s default budget) and call it after every workload
+stop in RV-1 sections 7 / 10 / 12 and the RPV-1 section 12 endpoint.
+
+### TCP TIME_WAIT exhaustion after curl bursts
+
+W-3 and the RP-1 burst step do thousands of short-lived curl calls in a tight loop.
+Ephemeral ports go to TIME_WAIT and the next /stats sweep fails with
+`Cannot assign requested address`. The scenarios already insert `w3_cooldown_secs` /
+`burst_cooldown_secs` (default 45 s) pauses after the burst step. If your kernel's
+ephemeral port range is small, raise the cooldown or `sysctl -w net.ipv4.tcp_tw_reuse=1`
+on the controller.
+
+### `jq` is a hard controller dependency for W-3 and RP-1
+
+`workload_w3.sh` does the revert-from-revision pattern by GETting the prior revision's
+body, stripping `@metadata`, and PUTting it back — that requires `jq`. Same for the RP-1
+burst step that re-PUTs revision payloads. Install with `apt install jq` on the
+controller. The workloads exit early with a clear `ERROR: jq is required` if it's
+missing, but the failure mode is "tests die mid-section", not "graceful skip".
+
+### Workloads run indefinitely until explicitly killed
+
+Per the EMR plan ("continuous from T0 through endpoint") all W-* workloads default to
+`DURATION_SECS=0` (the indefinite sentinel) and only stop when the scenario invokes
+`toolbox/workloads/stop_workload.yml`. **Never** set `duration_secs` to a finite value
+in a scenario unless that section explicitly wants a fixed-window write phase.
+
+The companion `assert_workload_alive.yml` should be called immediately BEFORE every
+`stop_workload` to catch silently-died workers — otherwise `stop_workload` shrugs
+("WORKLOAD ALREADY EXITED") and the run passes with degraded load coverage.
+
+### Parallel runs on one docker daemon need disjoint cluster ids AND networks
+
+Container names are globally unique per daemon. To run RV-1 + RP-1 + RPV-1 in three
+shells on the same host, each `run.sh` invocation needs:
+
+- a **disjoint** `cluster_id_start` range (RV-1 takes 1; RP-1 takes 4–5; RPV-1 takes 7–9),
+- a **unique** `docker_network_name` (`rv1net` / `rp1net` / `rpv1net`).
+
+Teardown is scoped per-network so they don't stomp each other on cleanup. See
+`scenarios/EMR/README.md` for the canonical three-shell pattern.

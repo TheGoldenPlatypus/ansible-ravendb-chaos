@@ -412,6 +412,33 @@ ansible-playbook toolbox/wait/wait_for_marker_propagation.yml \
     -e db_name=Tenants -e source=1a -e '{"targets":["1b","1c"]}' -e timeout_secs=180
 ```
 
+### `wait_for_etag_parity.yml`
+
+```bash
+# Per-node LastDatabaseEtag stability -- two reads ~3s apart, every node identical = drained.
+# spec-aligned "wait by etag" -- replaces wait_for_quiescence for post-workload settles.
+ansible-playbook toolbox/wait/wait_for_etag_parity.yml \
+    -e db_name=db1 -e '{"nodes":["1a","1b","1c"]}'
+
+# Longer budget for slower convergence
+ansible-playbook toolbox/wait/wait_for_etag_parity.yml \
+    -e db_name=db1 -e '{"nodes":["1a","1b","1c"]}' -e timeout=600
+```
+
+### `wait_for_stats_field_parity.yml`
+
+```bash
+# Default -- wait until CountOfTombstones matches across the sink cluster (5min ceiling)
+ansible-playbook toolbox/wait/wait_for_stats_field_parity.yml \
+    -e db_name=db1 -e '{"nodes":["2a","2b","2c"]}'
+
+# Multi-field wait
+ansible-playbook toolbox/wait/wait_for_stats_field_parity.yml \
+    -e db_name=db1 \
+    -e '{"nodes":["2a","2b","2c"],"fields":["CountOfTombstones","CountOfDocuments"]}' \
+    -e timeout=300
+```
+
 ### `wait_for_workload_started.yml`
 
 ```bash
@@ -430,6 +457,43 @@ ansible-playbook toolbox/workloads/stop_workload.yml \
 # Custom grace window before KILL.
 ansible-playbook toolbox/workloads/stop_workload.yml \
     -e pidfile=/tmp/w1-1a-db1.pid -e grace_secs=5
+```
+
+### `assert_workload_alive.yml`
+
+```bash
+# Use BEFORE stop_workload -- catches silently-died workers (OOM, crash, etc.) instead of
+# letting stop_workload shrug "WORKLOAD ALREADY EXITED" and pass with degraded load.
+ansible-playbook toolbox/workloads/assert_workload_alive.yml \
+    -e pidfile=/tmp/w1-1a-db1.pid
+```
+
+### `pause_gate.yml`  (toolbox/control)
+
+```bash
+# Always prints the section banner; only pauses when pause_between_sections=true.
+# Used at the top of every section in EMR scenarios.
+ansible-playbook toolbox/control/pause_gate.yml \
+    -e section_label="SECTION 5 -- upgrade 1a"
+
+# Demo mode: pause for ENTER between sections
+ansible-playbook scenarios/EMR/RP1/rp1.yml -e pause_between_sections=true
+```
+
+### `smuggler_import.yml`  (toolbox/backup)
+
+```bash
+# Stream a .ravendbdump file from controller into an existing DB.  Used by RP-1 to seed a
+# legacy-format counter from a v_old smuggler dump fixture.
+ansible-playbook toolbox/backup/smuggler_import.yml -K \
+    -e target=1a -e db_name=db1 \
+    -e dump_path=$PWD/scenarios/EMR/RP1/fixtures/legacy-counter.ravendbdump
+
+# No-op if fixture file isn't present (useful for optional fixtures)
+ansible-playbook toolbox/backup/smuggler_import.yml -K \
+    -e target=1a -e db_name=db1 \
+    -e dump_path=$PWD/scenarios/EMR/RP1/fixtures/legacy-counter.ravendbdump \
+    -e skip_if_missing=true
 ```
 
 ### `diagnostic_doc_count_parity.yml`
@@ -499,6 +563,118 @@ ansible-playbook toolbox/diagnostic/diagnostic_size_envelope.yml \
     -e db_name=Tenants -e '{"nodes":["1a","1b","1c"]}' \
     -e baseline_file=$PWD/captures/size-baseline-Tenants.json \
     -e max_growth_pct=25
+```
+
+### `diagnostic_orphan_revisions.yml`
+
+```bash
+# Trigger adopt on every node + assert AdoptedCount==0 everywhere.
+ansible-playbook toolbox/diagnostic/diagnostic_orphan_revisions.yml \
+    -e db_name=db1 -e '{"nodes":["1a","1b","1c"]}'
+```
+
+### `diagnostic_equal_stats.yml`
+
+```bash
+# All three extension aspects (attachments + counters + timeseries).
+ansible-playbook toolbox/diagnostic/diagnostic_equal_stats.yml \
+    -e db_name=db1 -e '{"nodes":["1a","1b","1c"]}'
+
+# Only the aspect you care about.
+ansible-playbook toolbox/diagnostic/diagnostic_equal_stats.yml \
+    -e db_name=db1 -e aspects=attachments \
+    -e '{"nodes":["1a","1b","1c"]}'
+```
+
+### `diagnostic_filter_compliance.yml`
+
+```bash
+# Explicit allowed prefixes (recommended -- bypasses DatabaseRecord parse).
+ansible-playbook toolbox/diagnostic/diagnostic_filter_compliance.yml \
+    -e sink_cluster_leader=2a -e db_name=db1 \
+    -e '{"allowed_prefixes":["users/sink1/"]}'
+
+# Auto-fetch from DatabaseRecord.SinkPullReplications[*].AllowedHubToSinkPaths.
+ansible-playbook toolbox/diagnostic/diagnostic_filter_compliance.yml \
+    -e sink_cluster_leader=2a -e db_name=db1
+```
+
+### `diagnostic_stored_item_cv_split.yml`
+
+```bash
+# Post-upgrade: every probed doc on the v_new receiver must be in the new split-form CV.
+ansible-playbook toolbox/diagnostic/diagnostic_stored_item_cv_split.yml \
+    -e db_name=db1 -e target=2a \
+    -e '{"doc_ids":["users/sink1/0","users/sink1/1","users/sink1/2"]}'
+
+# Pre-upgrade baseline: every probed doc must be in the OLD raw-CV form.
+ansible-playbook toolbox/diagnostic/diagnostic_stored_item_cv_split.yml \
+    -e db_name=db1 -e target=1a -e expect=raw \
+    -e '{"doc_ids":["users/hub/0","Internal/0"]}'
+```
+
+### `diagnostic_stats_parity.yml`
+
+```bash
+# Consolidated /stats parity across nodes (12 fields, 1 GET/node) -- replaces
+# doc_count_parity + equal_stats chain.  Prints a single table; asserts 9 of 11 Count*
+# fields (CountOfCounterEntries + CountOfTimeSeriesSegments + SizeOnDisk are info-only).
+ansible-playbook toolbox/diagnostic/diagnostic_stats_parity.yml \
+    -e db_name=db1 -e '{"nodes":["1a","1b","1c"]}'
+
+# Subset assert (only docs + tombstones)
+ansible-playbook toolbox/diagnostic/diagnostic_stats_parity.yml \
+    -e db_name=db1 \
+    -e '{"nodes":["1a","1b","1c"],"assert_fields":["CountOfDocuments","CountOfTombstones"]}'
+
+# Information-only (no asserts) -- safe under live writes
+ansible-playbook toolbox/diagnostic/diagnostic_stats_parity.yml \
+    -e db_name=db1 -e informational_only=true \
+    -e '{"nodes":["1a","1b","1c"]}'
+```
+
+### `diagnostic_cv_boundary_by_dbid.yml`
+
+```bash
+# I-13 (b) by DatabaseId -- works in T3 where tag-letter is too lax (every cluster has A/B/C).
+# Default: tool reports N/A on legacy CV form (no '|' delimiter), informational.
+ansible-playbook toolbox/diagnostic/diagnostic_cv_boundary_by_dbid.yml \
+    -e db_name=db1 \
+    -e '{"source_nodes":["1a","1b","1c"],"receiver_nodes":["2a","2b","2c"]}'
+
+# Strict mode: FAIL if any receiver is in legacy form (i.e. new lane hasn't activated)
+ansible-playbook toolbox/diagnostic/diagnostic_cv_boundary_by_dbid.yml \
+    -e db_name=db1 -e strict_v_new=true \
+    -e '{"source_nodes":["1a","1b","1c"],"receiver_nodes":["2a","2b","2c"]}'
+```
+
+### `diagnostic_lane_inert.yml`
+
+```bash
+# Assert no v_new-lane CV ('|' delimiter) appears in any sampled revision across the probed
+# nodes/prefixes.  Use mid-roll on cross-version connections.
+ansible-playbook toolbox/diagnostic/diagnostic_lane_inert.yml \
+    -e db_name=db1 \
+    -e '{"nodes":["2a","2b","2c"]}' \
+    -e '{"id_prefixes":["users/sink1","orders/sink1"]}'
+```
+
+### `diagnostic_cross_sink_isolation.yml`
+
+```bash
+# Probe sibling-sink ids on a sink leader; fails on any 200 (data leaked across).
+ansible-playbook toolbox/diagnostic/diagnostic_cross_sink_isolation.yml \
+    -e db_name=db1 -e sink_cluster_leader=2a \
+    -e '{"forbidden_prefixes":["users/sink2/","orders/sink2/"]}'
+```
+
+### `diagnostic_db_cv_order_side_only.yml`
+
+```bash
+# Assert the receiver-cluster's DatabaseChangeVector references only receiver-side tags
+# (A, B, C derived from 2a/2b/2c).  Catches source-side tag leakage into a sink's DB CV.
+ansible-playbook toolbox/diagnostic/diagnostic_db_cv_order_side_only.yml \
+    -e db_name=db1 -e '{"receiver_group_nodes":["2a","2b","2c"]}'
 ```
 
 ### `write_attachments.yml`
@@ -681,33 +857,189 @@ RESET (heal everything + drop+recreate DBs + rewire replication; one-liner via `
 
 ---
 
+## 4.5. EMR workloads (`scenarios/EMR/workloads/`)
+
+Continuous background workloads driven by the EMR scenarios.  All accept a pidfile-based start/stop contract — pair with `toolbox/workloads/wait_for_workload_started.yml` and `stop_workload.yml`.
+
+### `workload_w1.yml` -- doc CRUD churn (70% update / 20% put-new / 10% delete)
+
+```bash
+# Single-bucket (legacy mode)
+ansible-playbook scenarios/EMR/workloads/w1/workload_w1.yml \
+    -e target=1a -e db_name=db1 -e id_prefix=seed -e pool_size=10000 -e duration_secs=300
+
+# Multi-bucket (RPV-1 mode) -- weighted prefix:pool_size:weight triples
+ansible-playbook scenarios/EMR/workloads/w1/workload_w1.yml \
+    -e target=1a -e db_name=db1 -e duration_secs=600 \
+    -e 'buckets_spec=users/sink1:2000:13|orders/sink1:2000:13|users/hub:2000:14|Internal:3000:20'
+
+# Multi-writer parallel (RV-1's 4-writer pattern) -- use WRITER_ID for disjoint pidfiles
+nohup ansible-playbook scenarios/EMR/workloads/w1/workload_w1.yml \
+    -e target=1a -e db_name=db1 -e id_prefix=seed -e pool_size=200 -e writer_id=1 &
+nohup ansible-playbook scenarios/EMR/workloads/w1/workload_w1.yml \
+    -e target=1a -e db_name=db1 -e id_prefix=seed -e pool_size=200 -e writer_id=2 &
+# ... etc
+
+# Indefinite mode -- omit duration_secs, kill via stop_workload
+ansible-playbook scenarios/EMR/workloads/w1/workload_w1.yml \
+    -e target=1a -e db_name=db1 -e id_prefix=seed -e pool_size=200
+```
+
+### `workload_w2.yml` -- doc-extension churn (attachments / counters / time-series)
+
+```bash
+# Same shape as W-1 -- single-bucket or multi-bucket.  NO doc CRUD (that's W-1's job).
+ansible-playbook scenarios/EMR/workloads/w2/workload_w2.yml \
+    -e target=1a -e db_name=db1 -e duration_secs=600 \
+    -e 'buckets_spec=users/sink1:2000:13|orders/sink1:2000:13|users/hub:2000:14|Internal:3000:20'
+```
+
+### `workload_w3.yml` -- concurrent churn races on a hot pool (RV-1 Phase 2)
+
+```bash
+# N workers (default 8) racing delete -> revert-from-revision -> put -> +att -> -att.
+# Requires `jq` on the controller.
+ansible-playbook scenarios/EMR/workloads/w3/workload_w3.yml \
+    -e target=1a -e db_name=db1 -e duration_secs=300 \
+    -e id_prefix=hot -e pool_size=1000
+
+# Custom writer count
+ansible-playbook scenarios/EMR/workloads/w3/workload_w3.yml \
+    -e target=1a -e db_name=db1 -e duration_secs=300 \
+    -e id_prefix=hot -e pool_size=1000 -e writers=4
+```
+
+### `workload_w7.yml` -- single-doc revision firehose (RV-1 Phase 3)
+
+```bash
+# One curl PUT loop targeting users/hot for the configured duration.  spec target:
+# 16k revs/min for 60 min -> 1M revisions.  Actual rate is whatever a single writer
+# can sustain; final PUT count printed at exit.
+ansible-playbook scenarios/EMR/workloads/w7/workload_w7.yml \
+    -e target=1a -e db_name=db1 -e doc_id=users/hot -e duration_secs=3600
+```
+
+### `workload_w7_reader.yml` -- concurrent reader for W-7
+
+```bash
+# Every 30s GET /revisions?id=users/hot (full history); every 5min snapshot SizeOnDisk +
+# CountOfRevisionDocuments.  Log lands at /tmp/w7-reader-1a-db1.log.
+ansible-playbook scenarios/EMR/workloads/w7/workload_w7_reader.yml \
+    -e target=1a -e db_name=db1 -e doc_id=users/hot -e duration_secs=3600
+```
+
+---
+
 ## 5. EMR scenarios (`scenarios/EMR/`)
 
-### RV-1 -- mid-rolling-upgrade leader restart + asymmetric partition
+Active scenarios: **RV-1**, **RP-1**, **RPV-1** — each implements one slice of [`EMR_TESTING_PLAN/scenarios.md`](EMR_TESTING_PLAN/scenarios.md).  Earlier retired implementations are archived under [`scenarios/EMR/legacy/`](scenarios/EMR/legacy/) as a composition reference.  Top-level scenarios index + per-scenario detail: [`scenarios/EMR/README.md`](scenarios/EMR/README.md).
 
-End-to-end wrapper (teardown → provision @ v_old → run scenario):
+Common conventions:
+* Each scenario has a `run.sh` wrapper: `teardown → provision → install → form_clusters → scenario`.
+* Smoke-size every scenario via `-e` overrides (see header comment of each `*.yml`).
+* `-e pause_between_sections=true` makes every section wait for ENTER (showcase mode).
+* Every section banner is grep-friendly: `grep ">>>>>" logs/<scenario>-*.log` is a TOC.
+
+### RV-1 -- single-cluster `v_62 → v_new` full chain + churn + 1M-rev (T1)
+
+Single 3-node cluster.  Phase 1 rolling upgrade under W-1×4.  Phase 2 W-3 8-writer churn.
+Phase 3 W-7 1M-revision firehose on `users/hot` + concurrent reader.  Phase 4 count-parity
+sweep across the union dataset.
 
 ```bash
-# build the v_new .deb (once per PR)
-scripts/build_ravendb_pr.sh 22875
-# → builds/raven-pr22875.deb
-
-# run the full RV-1 test
+# End-to-end (~90 min full spec sizing)
 scenarios/EMR/RV1/run.sh 6.2.15 builds/raven-pr22875.deb
+
+# Shakedown (~5 min) -- lab already up
+ansible-playbook scenarios/EMR/RV1/rv1.yml -K \
+    -e v_old=6.2.15 -e v_new_build=$PWD/builds/raven-pr22875.deb \
+    -e phase1_seed_count=200 -e phase1_seed_revs_per_doc=2 \
+    -e phase2_hot_count=20 -e phase2_hot_revs_per_doc=3 -e phase2_churn_duration_secs=30 \
+    -e phase3_duration_secs=60 \
+    -e upgrade_delay_secs=0 \
+    2>&1 | tee logs/rv1-smoke-$(date +%Y%m%d-%H%M%S).log
 ```
 
-Or run the scenario directly against an already-provisioned cluster at v_old:
+### RP-1 -- CV-boundary regression guard on a clean all-v_new T2 cluster
+
+1 hub + 1 filtered-pull sink (RF=3 each).  W-0 deterministic bulk seed + per-family inventory
+(one item per replication-item type, **including a legacy-format counter from a smuggler dump
+fixture** — see [`scenarios/EMR/RP1/fixtures/README.md`](scenarios/EMR/RP1/fixtures/README.md)).
+Burst: 10k `users/sink1/active/*` writes + 2k delete/restore-from-revision iterations.
+Asserts I-13 (a)/(b)/(c) + I-7 + I-5/I-6.  spec step 8: local update on `sink/b`, verify
+replicates to `a/c`.
 
 ```bash
-ansible-playbook scenarios/EMR/RV1/rv1.yml \
-    -e v_old=6.2.15 \
-    -e v_new_build=$PWD/builds/raven-pr22875.deb
+# End-to-end (~12 min spec sizing)
+scenarios/EMR/RP1/run.sh builds/raven-pr22875.deb
 
-# full 50k-revision spec
-ansible-playbook scenarios/EMR/RV1/rv1.yml \
-    -e v_old=6.2.15 -e v_new_build=$PWD/builds/raven-pr22875.deb \
-    -e pool_size=10000
+# Shakedown (~5 min)
+ansible-playbook scenarios/EMR/RP1/rp1.yml -K \
+    -e bulk_users_sink1=100 -e bulk_orders_hub=100 \
+    -e burst_active_count=100 -e burst_restore_iterations=50 \
+    -e drain_budget_secs=60 -e filter_drain_budget_secs=180 \
+    2>&1 | tee logs/rp1-smoke-$(date +%Y%m%d-%H%M%S).log
 ```
+
+### RPV-1 -- cross-cluster `v_62 → v_new` rolling upgrade, filter-aware (T3)
+
+Hub + Sink-1 (filter `users/sink1/* + orders/sink1/*`) + Sink-2 (filter `users/sink2/* +
+orders/sink2/*`).  All 9 nodes start at v_old.  Seed Hub with 7 prefix buckets, run W-1 + W-2
+on Hub indefinitely (stopped explicitly by Section 12), roll all 9 nodes to v_new in a
+variant-specific order, with checkpoints between every 3-node upgrade step.
+
+```bash
+# End-to-end variant A (~30 min spec sizing)
+scenarios/EMR/RPV1/run.sh 6.2.15 builds/raven-pr22875.deb
+
+# Shakedown variant A (~10 min)
+ansible-playbook scenarios/EMR/RPV1/rpv1.yml -K \
+    -e v_old=6.2.15 -e v_new_build=$PWD/builds/raven-pr22875.deb \
+    -e bucket_users_sink1=100 -e bucket_users_sink2=100 -e bucket_users_hub=100 \
+    -e bucket_orders_sink1=100 -e bucket_orders_sink2=100 -e bucket_orders_hub=100 \
+    -e bucket_internal=200 \
+    -e quiesce_budget_secs=300 -e drain_budget_secs=60 -e filter_drain_budget_secs=180 \
+    2>&1 | tee logs/rpv1-smoke-A-$(date +%Y%m%d-%H%M%S).log
+```
+
+**Variants.**  Default is A (sinks first).  Override the three upgrade-step lists on the CLI:
+
+```bash
+# Variant B -- hub first (stresses v_new sender -> v_old receivers at Checkpoint A)
+ansible-playbook scenarios/EMR/RPV1/rpv1.yml -K \
+    -e v_old=6.2.15 -e v_new_build=$PWD/builds/raven-pr22875.deb \
+    -e '{"upgrade_step_1":["1a","1b","1c"],
+         "upgrade_step_2":["2a","2b","2c"],
+         "upgrade_step_3":["3a","3b","3c"]}'
+
+# Variant C -- interleaved random shuffle
+ansible-playbook scenarios/EMR/RPV1/rpv1.yml -K \
+    -e v_old=6.2.15 -e v_new_build=$PWD/builds/raven-pr22875.deb \
+    -e '{"upgrade_step_1":["2a","1b","3c"],
+         "upgrade_step_2":["1a","3b","2c"],
+         "upgrade_step_3":["3a","1c","2b"]}'
+```
+
+### Running 3 scenarios in parallel on the same docker host
+
+Each `run.sh` accepts `[cluster_id_start] [docker_network_name]` positional args.  Each parallel
+run must use a **disjoint cluster_id range** + **unique network name**:
+
+```bash
+# Shell A -- RV-1 on cluster 1, network rv1net
+scenarios/EMR/RV1/run.sh 6.2.15 builds/raven-pr22875.deb 1 rv1net \
+    2>&1 | tee logs/rv1-$(date +%Y%m%d-%H%M%S).log
+
+# Shell B -- RP-1 on clusters 4-5, network rp1net
+scenarios/EMR/RP1/run.sh builds/raven-pr22875.deb 4 rp1net \
+    2>&1 | tee logs/rp1-$(date +%Y%m%d-%H%M%S).log
+
+# Shell C -- RPV-1 on clusters 7-9, network rpv1net
+scenarios/EMR/RPV1/run.sh 6.2.15 builds/raven-pr22875.deb 7 rpv1net \
+    2>&1 | tee logs/rpv1-$(date +%Y%m%d-%H%M%S).log
+```
+
+18 RavenDB containers across 3 isolated docker networks, all running concurrently.
 
 ---
 

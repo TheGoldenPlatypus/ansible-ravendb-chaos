@@ -90,6 +90,22 @@ Studio: open `https://1a.hubsink.test/studio`. Teardown: `ansible-playbook playb
 
 `provision_nodes.yml` also creates a named docker volume `lab_backups` mounted at `/backups` in every container, so `toolbox/backup/backup_database.yml` outputs are visible across all containers without `docker cp`. The volume is removed by `teardown_containers.yml`.
 
+### Parallel labs on the same docker host
+
+Three concurrent labs without name collisions: override `cluster_id_start` (default 1) and `docker_network_name` per run. Each parallel run claims a disjoint cluster-id range:
+
+```bash
+# Run A: clusters 1, network alphanet
+ansible-playbook playbooks/provision_nodes.yml -e clusters_count=1 -e nodes_per_cluster=3 \
+    -e cluster_id_start=1 -e docker_network_name=alphanet
+
+# Run B: clusters 4-5, network betanet
+ansible-playbook playbooks/provision_nodes.yml -e clusters_count=2 -e nodes_per_cluster=3 \
+    -e cluster_id_start=4 -e docker_network_name=betanet
+```
+
+Containers in Run A are named `1a/1b/1c`; in Run B `4a/4b/4c/5a/5b/5c`. `form_clusters` and `teardown_containers` both scope to the configured `docker_network_name`, so the two labs are fully isolated. EMR scenarios accept matching `-e cluster_id_start=N -e docker_network_name=NAME` overrides — see [scenarios/EMR/README.md](scenarios/EMR/README.md) for the parallel-run pattern across RV-1 / RP-1 / RPV-1.
+
 ## Bring-up - SSH mode
 
 ```bash
@@ -200,7 +216,7 @@ Each tool's file header has the full inputs + run examples - click the link to r
 - [`set_mentor_node.yml`](toolbox/tasks/set_mentor_node.yml) - flip `MentorNode` on a pull-rep hub / sink / external task. Other task types pre-stubbed in the dispatch table.
   **Required:** `target`, `db_name`, `task_name`, `task_type` (`hub` / `sink` / `external`), `mentor_node`.
 
-### 📦 backup - backup & restore
+### 📦 backup - backup, restore, smuggler import
 
 - [`backup_database.yml`](toolbox/backup/backup_database.yml) - trigger an on-demand Logical or Snapshot backup; waits for completion.
   **Required:** `target`, `db_name`.
@@ -208,6 +224,9 @@ Each tool's file header has the full inputs + run examples - click the link to r
 - [`restore_backup.yml`](toolbox/backup/restore_backup.yml) - restore a backup folder as a new DB; waits for completion. **`backup_path` is the FOLDER containing the `.ravendb-snapshot` file, not the file itself.**
   **Required:** `target`, `backup_path`, `new_db_name`.
   **Optional:** `timeout` (default 600), `poll_interval` (default 3).
+- [`smuggler_import.yml`](toolbox/backup/smuggler_import.yml) - POST a `.ravendbdump` file from the controller into an existing DB via `/databases/<db>/smuggler/import`. Used by RP-1 to seed a legacy-format counter from a pre-built v_old dump on an all-v_new cluster. Different from `restore_backup.yml` (which restores TO A NEW database from a container-local path).
+  **Required:** `target`, `db_name`, `dump_path` (absolute, on the controller).
+  **Optional:** `skip_if_missing` (default false — when true, a missing dump_path becomes a no-op).
 
 ### 🔁 replication - pull-replication setup
 
@@ -265,6 +284,33 @@ Each tool's file header has the full inputs + run examples - click the link to r
 - [`diagnostic_size_envelope.yml`](toolbox/diagnostic/diagnostic_size_envelope.yml) - whole-DB `SizeOnDisk` envelope check. First call captures baseline; subsequent calls (same `baseline_file`) compare and assert each node's growth ≤ `max_growth_pct`.
   **Required:** `db_name`, `nodes`, `baseline_file` (absolute path).
   **Optional:** `max_growth_pct` (default 300 — sized to catch leaks, not normal writer-side bookkeeping).
+- [`diagnostic_orphan_revisions.yml`](toolbox/diagnostic/diagnostic_orphan_revisions.yml) - Triggers `POST /admin/revisions/orphaned/adopt` on each node, polls until the operation completes, asserts `AdoptedCount == 0` everywhere. Detects revisions whose parent document is missing.
+  **Required:** `db_name`, `nodes`.
+  **Optional:** `budget_secs` (default 60).
+- [`diagnostic_equal_stats.yml`](toolbox/diagnostic/diagnostic_equal_stats.yml) - Asserts non-document `/stats` aggregates are equal across nodes — attachments, counters, time-series. Pairs with `diagnostic_doc_count_parity` for full entity-count parity coverage when a scenario writes attachments / counters / TS.
+  **Required:** `db_name`, `nodes`.
+  **Optional:** `aspects` (CSV subset of `attachments,counters,timeseries`; default all three).
+- [`diagnostic_filter_compliance.yml`](toolbox/diagnostic/diagnostic_filter_compliance.yml) - Enumerates every doc on a sink cluster and asserts each id matches at least one configured allowed-prefix. Catches "doc that should have been filtered out reached the sink anyway."
+  **Required:** `sink_cluster_leader`, `db_name`.
+  **Optional:** `allowed_prefixes` (JSON list; defaults to fetching from `DatabaseRecord.SinkPullReplications[].AllowedHubToSinkPaths`).
+- [`diagnostic_stored_item_cv_split.yml`](toolbox/diagnostic/diagnostic_stored_item_cv_split.yml) - Inspects the stored CV shape on a target node. Two modes: `expect=split` asserts a new-lane "split-form" CV (post-upgrade / on a v_new receiver after filtered ingress); `expect=raw` asserts the old raw-CV form (pre-upgrade baseline). Delimiter heuristic — see the file header.
+  **Required:** `db_name`, `target`, `doc_ids` (JSON list).
+  **Optional:** `delimiter` (default `|`), `expect` (default `split`).
+- [`diagnostic_db_cv_order_side_only.yml`](toolbox/diagnostic/diagnostic_db_cv_order_side_only.yml) - On every node in a receiver-group cluster, asserts every entry in `/stats.DatabaseChangeVector` has a node tag from the receiver-group tags set. Source-side tag leakage = fail. Useful as a regression guard for the CV-boundary fix on filtered-pull receivers.
+  **Required:** `db_name`, `receiver_group_nodes`.
+  **Optional:** `receiver_group_tags` (derived from node names if omitted).
+- [`diagnostic_cv_boundary_by_dbid.yml`](toolbox/diagnostic/diagnostic_cv_boundary_by_dbid.yml) - Directional CV-boundary check (I-13 b) by DatabaseId rather than by tag-letter. Asserts the order-side of every receiver-cluster CV contains no source-cluster dbid. N/A on legacy raw-CV form (no `|` delimiter); `strict_v_new=true` forces failure if any receiver is still legacy.
+  **Required:** `db_name`, `source_nodes`, `receiver_nodes`.
+  **Optional:** `strict_v_new` (default false).
+- [`diagnostic_cross_sink_isolation.yml`](toolbox/diagnostic/diagnostic_cross_sink_isolation.yml) - Probes deterministic sibling-sink doc ids on a sink leader; fails on any 200 response (sibling-sink data leaked across).
+  **Required:** `db_name`, `sink_cluster_leader`, `forbidden_prefixes` (JSON list).
+  **Optional:** `sample_per_prefix` (default 100).
+- [`diagnostic_lane_inert.yml`](toolbox/diagnostic/diagnostic_lane_inert.yml) - Asserts the v_new lane stayed dormant: samples revision CVs across nodes/prefixes and fails if any contains `|` (the new-lane "order\|version" delimiter pinned by the PR).
+  **Required:** `db_name`, `nodes`, `id_prefixes` (JSON list).
+  **Optional:** `sample_per_prefix` (default 25).
+- [`diagnostic_stats_parity.yml`](toolbox/diagnostic/diagnostic_stats_parity.yml) - Consolidated `/stats` parity across nodes (12 fields in 1 GET/node). Replaces the doc_count_parity + equal_stats chain. Prints a single readable table; asserts parity on 9 cross-node-stable fields; `CountOfCounterEntries`, `CountOfTimeSeriesSegments`, and `SizeOnDisk` are shown but NOT asserted (per-node-intrinsic per upstream guidance). Drifts on the info-only fields surface in a prominent `INFORMATIONAL DRIFT` flag block.
+  **Required:** `db_name`, `nodes`.
+  **Optional:** `assert_fields` (subset list), `informational_only` (default false — when true, prints the table but skips the assertion).
 
 ### ⏱ wait - synchronization gates
 
@@ -292,6 +338,18 @@ Each tool's file header has the full inputs + run examples - click the link to r
 - [`wait_for_marker_propagation.yml`](toolbox/wait/wait_for_marker_propagation.yml) - PUT a uniquely-IDed marker doc on `source`, then poll every target until it appears (end-to-end "replication is flowing" check).
   **Required:** `db_name`, `source`, `targets` (JSON list).
   **Optional:** `timeout_secs` (default 60).
+- [`wait_for_etag_parity.yml`](toolbox/wait/wait_for_etag_parity.yml) - Per-node `LastDatabaseEtag` stability — two snapshots ~3-5s apart, every node's etag identical between the two reads = drained. spec-aligned "wait by etag"; less log-noisy than `wait_for_quiescence` (single shell+curl loop, integer compare).
+  **Required:** `db_name`, `nodes`.
+  **Optional:** `timeout` (default 180), `poll_interval` (default 3).
+- [`wait_for_stats_field_parity.yml`](toolbox/wait/wait_for_stats_field_parity.yml) - Polls `/stats` until specified count-field(s) match across nodes. Use after a workload stops to wait for background cleanup (tombstone purge etc.) to bring per-node counts into parity before asserting.
+  **Required:** `db_name`, `nodes`.
+  **Optional:** `fields` (default `["CountOfTombstones"]`), `timeout` (default 180), `poll_interval` (default 3).
+
+### 🚦 control - scenario flow control
+
+- [`pause_gate.yml`](toolbox/control/pause_gate.yml) - Section banner + opt-in pause.  Always prints a 3-line ASCII banner (`>>>>>  SECTION X -- …`); pauses for ENTER when `pause_between_sections=true`.  Used at the top of every section in the EMR scenarios.
+  **Required:** `section_label`.
+  **Optional:** `pause_between_sections` (default false).
 
 ### 🏃 workloads - background-workload process management
 
@@ -301,6 +359,8 @@ Each tool's file header has the full inputs + run examples - click the link to r
 - [`stop_workload.yml`](toolbox/workloads/stop_workload.yml) - TERM (grace window) then KILL via pidfile; idempotent if the workload already exited.
   **Required:** `pidfile`.
   **Optional:** `grace_secs` (default 2).
+- [`assert_workload_alive.yml`](toolbox/workloads/assert_workload_alive.yml) - Asserts a background workload is still running (pidfile present + `kill -0 <pid>` succeeds). Use BEFORE `stop_workload` to catch silently-died workers (OOM, crash, etc.) — without it `stop_workload` shrugs "WORKLOAD ALREADY EXITED" and the scenario passes with degraded load.
+  **Required:** `pidfile`.
 
 ---
 
@@ -312,7 +372,8 @@ Globals in `inventory/group_vars/all.yml`:
 |---|---|
 | `clusters_count` | number of independent clusters |
 | `nodes_per_cluster` | nodes per cluster (1..26) |
-| `docker_network_name` | shared docker network name |
+| `cluster_id_start` | starting cluster_id (default 1 → containers `1a/1b/.../2a/...`).  Override per-run for parallel labs on the same docker host. |
+| `docker_network_name` | shared docker network name (override per-run for isolated parallel labs) |
 | `docker_image` | container base image |
 | `ravendb_domain` | domain stamped into each node's PublicServerUrl |
 | `rdb_version` | RavenDB version to install |
@@ -328,6 +389,6 @@ One-off overrides: `-e key=value` on the command line.
 
 - **[CHEATSHEET.md](CHEATSHEET.md)** - copy-paste runner for every playbook + tool, including optional-var variants.
 - **[NOTES.md](NOTES.md)** - environment caveats (WSL wedge, hardware), per-tool quirks (timeseries date shell-out, delete-range inclusive bounds, backup folder path, etc.), and design decisions (why mode-aware over `_ssh` variants, why CV equality not etag stability, why no `workload_mixed.yml`).
-- **`scenarios/EMR/`** - EMR test plan scenarios (RV-1, RV-2, RP-*, RPV-* etc. — full catalog in [EMR_TESTING_PLAN/](EMR_TESTING_PLAN/)). Each scenario composes toolbox tools end-to-end.
+- **[scenarios/EMR/README.md](scenarios/EMR/README.md)** - end-to-end EMR test scenarios.  RV-1 (single-cluster v_62→v_new + churn + 1M-rev), RP-1 (CV-boundary regression guard), RPV-1 (cross-cluster rolling upgrade, 3 variants).  Each scenario composes toolbox tools, ships with a `run.sh` wrapper, and is parallel-safe via `cluster_id_start` / `docker_network_name` overrides.  Full spec in [EMR_TESTING_PLAN/](EMR_TESTING_PLAN/).
 - **`scripts/build_ravendb_pr.sh`** - build a RavenDB `.deb` (Studio included) from any ravendb/ravendb PR. Output lands in `builds/raven-pr<N>.deb`; hand it to `install_ravendb.yml -e custom_build=...`.
 - **`.github/CODEOWNERS`** - repo ownership.
