@@ -557,16 +557,18 @@
 
 # I-13 (a) item CV shape: walk the per-family inventory on the sink leader.  the spec
 # names this "item CV split" -- assumes the new lane is active on a v_new receiver, putting
-# CVs in the split "order|version" shape.  But PR-22875 keeps the new lane dormant (see also
-# RPV-1: SupportedFeatures lists ThrowRevisionKeyTooBigFix only, no HashedRevisionPk), so all
-# stored CVs are in the legacy RAW form.  Same spec-aligned decision as RPV-1's cv-boundary
-# check: don't demand lane activation; verify the actual on-disk shape (raw, no '|' delimiter).
-# If the lane ever flips on (PR adds HashedRevisionPk to SupportedFeatures), flip expect=split.
+# CVs in the split "order|version" shape.  PR-22899 activates the new lane (its
+# AdminDatabasesHandler stamps SupportedFeatures = ["HashedRevisionPk"] on fresh databases,
+# and the DocumentDatabase gate flips SupportedFeatureTypes.HashedRevisionPk = true when the
+# token is present) -- so stored CVs MUST carry the "|" delimiter.  Confirmed against
+# https://github.com/ravendb/ravendb/pull/22899 (Constants.cs HashedRevisionPk constant +
+# the matching record-stamp + storage-side schema migration to hashed revision PKs).
+# Builds that keep the lane dormant (e.g. PR-22875) need expect=raw -- flip back if testing those.
 - ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_stored_item_cv_split.yml
   vars:
     db_name: db1
     target: "{{ sink_id | default(2) }}a"
-    expect: raw
+    expect: split
     doc_ids:
       - "users/sink1/family/doc/0"
       - "users/sink1/family/rev/0"
