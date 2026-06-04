@@ -12,6 +12,12 @@ nodes_per_cluster: 3
 docker_network_name: hubsinknet
 docker_image: docker.io/geerlingguy/docker-ubuntu2204-ansible:latest
 
+# Force the python interpreter inside the geerlingguy container.  Without this, ansible's
+# auto-discovery can pick a python whose `setup` module returns non-JSON-encodable objects
+# from the community.docker.docker connection plugin, causing "ValueError: unmarshallable
+# object" on every task running against the docker hosts.
+ansible_python_interpreter: /usr/bin/python3
+
 ravendb_domain: hubsink.test
 rdb_version: 7.2.2
 
