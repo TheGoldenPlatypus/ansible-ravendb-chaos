@@ -83,6 +83,25 @@
           - /tmp
       loop: "{{ container_names }}"
 
+    # docker_container with state=started returns as soon as PID 1 (systemd) has been
+    # forked, NOT once systemd-boot has finished.  install_ravendb.yml's first apt task
+    # then races systemd-boot and can SIGKILL the container mid-apt (rc=137,
+    # "container is not running").  Block until systemd reports the system has reached
+    # a stable target before declaring provisioning complete.
+    - name: Wait for systemd to finish booting inside each container
+      ansible.builtin.command:
+        cmd: docker exec {{ item }} systemctl is-system-running --wait
+      loop: "{{ container_names }}"
+      register: systemd_ready
+      retries: 30
+      delay: 2
+      # Acceptable end-states: running, degraded.  "starting" means still booting -> retry.
+      until: systemd_ready.stdout | trim in ['running', 'degraded']
+      changed_when: false
+      # systemctl returns rc!=0 for 'degraded' which is fine for our use; ignore so the
+      # `until` clause decides.
+      failed_when: false
+
     - name: Show what we provisioned
       ansible.builtin.debug:
         msg: "Provisioned {{ container_names | length }} container(s) on '{{ docker_network_name }}': {{ container_names | join(', ') }}"

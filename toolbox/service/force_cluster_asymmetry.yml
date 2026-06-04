@@ -56,16 +56,22 @@
 
     - name: Run toolbox/service/upgrade_node.yml for each entry
       ansible.builtin.command:
+        # Forward docker_network_name so upgrade_node targets the SAME network as the
+        # caller; otherwise the subprocess ansible-playbook falls back to its 'hubsinknet'
+        # default and operates on the wrong containers under parallel scenarios.
+        # playbook_dir here = .../toolbox/service/, so chdir goes up TWO levels (../../)
+        # to reach the repo root where 'toolbox/service/upgrade_node.yml' resolves.
         cmd: >-
           ansible-playbook toolbox/service/upgrade_node.yml
           -e target={{ item.key }}
+          -e docker_network_name={{ docker_network_name | default('hubsinknet') }}
           {% if (item.value is match('^https?://')) or (item.value is search('\.deb$')) %}
           -e custom_build={{ item.value }}
           --skip-tags download
           {% else %}
           -e rdb_version={{ item.value }}
           {% endif %}
-        chdir: "{{ playbook_dir }}/.."
+        chdir: "{{ playbook_dir }}/../.."
       environment:
         ANSIBLE_BECOME_PASS: "{{ ansible_become_pass | default('') }}"
       register: upgrade_runs

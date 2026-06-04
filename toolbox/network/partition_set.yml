@@ -72,11 +72,16 @@
     # and the subprocess then failed to find `toolbox/network/cut_link.yml`.
     - name: Run cut_link per pair
       ansible.builtin.command:
+        # Forward docker_network_name so cut_link operates on the SAME network as this
+        # scenario.  Subprocess ansible-playbook calls don't inherit `-e` from the parent
+        # invocation, so without the explicit pass-through cut_link falls back to its
+        # default ('hubsinknet') and inspects the wrong network.
         cmd: >-
           ansible-playbook {{ cut_tool }}
           {% if effective_mode == 'ssh' %}-i inventory/ssh_hosts.yml{% endif %}
           -e node_a={{ item.0 }}
           -e node_b={{ item.1 }}
+          -e docker_network_name={{ docker_network_name | default('hubsinknet') }}
         chdir: "{{ playbook_dir }}/../.."
       environment:
         ANSIBLE_BECOME_PASS: "{{ ansible_become_pass | default('') }}"
