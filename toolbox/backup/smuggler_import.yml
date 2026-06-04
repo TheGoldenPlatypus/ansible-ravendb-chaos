@@ -1,0 +1,100 @@
+##################################################################################################
+# toolbox/backup/smuggler_import.yml
+#
+# Imports a .ravendbdump file (smuggler export) INTO an existing database via the
+# `POST /databases/<db>/smuggler/import` REST endpoint.  Different from restore_backup.yml
+# (which restores into a NEW database from a snapshot/smuggler path inside a container) --
+# this one streams a local file from the controller into an existing DB.
+#
+# Primary use case in this repo: seed legacy-format data (e.g. legacy counters) into an
+# all-v_new cluster.  You create the dump once on a v_old lab, commit (or stash) the
+# .ravendbdump file, then scenarios import it during setup.  The dump's on-disk legacy
+# format is preserved by the smuggler import path -- exactly the test surface for the
+# "legacy-form-on-v_new" cases that can't be created any other way on a clean v_new cluster.
+#
+# INPUTS:
+#   target            REQUIRED.  Container/host to import into (typically the cluster leader).
+#   db_name           REQUIRED.  Existing database name -- create it BEFORE calling this.
+#   dump_path         REQUIRED.  Absolute path on the controller to the .ravendbdump file.
+#   skip_if_missing   OPTIONAL.  Default false.  When true, a missing dump_path becomes a
+#                                no-op (prints SKIP and exits ok).  Useful for scenarios
+#                                that reference an optional fixture file that may not yet
+#                                exist in every checkout.
+#
+# RUN EXAMPLES:
+#   ansible-playbook toolbox/backup/smuggler_import.yml \
+#       -e target=1a -e db_name=db1 \
+#       -e dump_path=$PWD/scenarios/EMR/RP1/fixtures/legacy-counter.ravendbdump
+#
+#   # No-op if the fixture isn't checked in:
+#   ansible-playbook toolbox/backup/smuggler_import.yml \
+#       -e target=1a -e db_name=db1 \
+#       -e dump_path=$PWD/scenarios/EMR/RP1/fixtures/legacy-counter.ravendbdump \
+#       -e skip_if_missing=true
+##################################################################################################
+
+- name: Smuggler import a .ravendbdump file into an existing database
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - target is defined
+          - db_name is defined
+          - dump_path is defined
+        fail_msg: "Required: -e target=<node> -e db_name=<db> -e dump_path=<absolute-path-to-.ravendbdump>"
+
+    - name: Stat the dump file on the controller
+      ansible.builtin.stat:
+        path: "{{ dump_path }}"
+      register: dump_stat
+
+    - name: SKIP -- dump file missing and skip_if_missing=true
+      ansible.builtin.debug:
+        msg: >-
+          SKIP  smuggler import: dump file not found at {{ dump_path }}
+          (skip_if_missing=true; this is intentional -- the fixture isn't checked in).
+      when:
+        - not dump_stat.stat.exists
+        - (skip_if_missing | default(false) | bool)
+
+    - name: FAIL -- dump file missing and skip_if_missing=false
+      ansible.builtin.assert:
+        that:
+          - dump_stat.stat.exists
+        fail_msg: >-
+          Dump file not found at {{ dump_path }}.
+          Pass -e skip_if_missing=true to make this call a no-op when the fixture is absent.
+      when:
+        - not (skip_if_missing | default(false) | bool)
+
+    # POST the file as multipart/form-data.  RavenDB Studio uses the same shape: one form
+    # field `importOptions` (JSON, may be empty) and one `file` part with the binary body.
+    # curl handles the multipart framing via -F.
+    - name: POST {{ dump_path | basename }} -> {{ target }}/{{ db_name }} smuggler import
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -u
+          OUT=$(curl -sk --cert "{{ cert_dir }}/client.pem" --cacert "{{ cert_ca_crt }}" \
+            -w '\nHTTP:%{http_code}' \
+            -F 'importOptions={}' \
+            -F "file=@{{ dump_path }}" \
+            "https://{{ target }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/smuggler/import")
+          echo "$OUT"
+          # /smuggler/import returns 200 on success.  Anything else = fail.
+          echo "$OUT" | grep -qE '^HTTP:200$' || exit 1
+      register: smuggler_out
+      changed_when: true
+      when: dump_stat.stat.exists
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: "IMPORTED  {{ dump_path | basename }} -> {{ target }}/{{ db_name }} (HTTP 200)"
+      when:
+        - dump_stat.stat.exists
+        - smuggler_out is defined
+        - smuggler_out.rc == 0

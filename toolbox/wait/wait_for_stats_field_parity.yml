@@ -1,0 +1,136 @@
+##################################################################################################
+# toolbox/wait/wait_for_stats_field_parity.yml
+#
+# Polls /stats on each node until the specified count-field(s) match ACROSS the convergence
+# set, or a timeout is reached.  Different from wait_for_etag_parity:
+#   * wait_for_etag_parity asserts per-node stability (etag unchanged across a window).
+#   * wait_for_stats_field_parity asserts cross-node parity of a specific field's value now.
+#
+# Use case: after a workload stops and etags are stable, RavenDB's background tombstone
+# cleanup (and similar background jobs) still needs idle time to bring per-node counts into
+# agreement.  This tool polls /stats until the specified fields match -- replaces a fragile
+# fixed sleep with an actual signal.
+#
+# Default field is CountOfTombstones (the one that bit us in RV-1 Sec 8).  Pass `fields` to
+# also wait on attachments / counters / TS / etc.  Nodes returning non-200 are dropped from
+# the comparison on every poll.
+#
+# INPUTS:
+#   db_name        REQUIRED.  Database name.
+#   nodes          REQUIRED.  JSON list of node names.
+#   fields         OPTIONAL.  JSON list of /stats count-field names to wait on parity for.
+#                             Default: ["CountOfTombstones"] -- the one field we have direct
+#                             evidence undergoes lazy per-node cleanup that converges given
+#                             idle time.  Pass an explicit list to wait on additional fields
+#                             only if you have evidence they converge (not all /stats counts
+#                             are guaranteed cross-node parity even when the cluster is quiet
+#                             and the DCV matches -- some may be per-node intrinsic).
+#   timeout        OPTIONAL.  Max wall-clock seconds to wait.  Default 180.
+#   poll_interval  OPTIONAL.  Seconds between polls.  Default 3.
+#
+# RUN EXAMPLES:
+#   # default -- wait for CountOfTombstones to match across all 3 nodes
+#   ansible-playbook toolbox/wait/wait_for_stats_field_parity.yml \
+#       -e db_name=db1 -e '{"nodes":["1a","1b","1c"]}'
+#
+#   # multi-field wait
+#   ansible-playbook toolbox/wait/wait_for_stats_field_parity.yml \
+#       -e db_name=db1 \
+#       -e '{"nodes":["1a","1b","1c"],"fields":["CountOfTombstones","CountOfDocuments"]}'
+##################################################################################################
+
+- name: Wait until specified /stats fields match across every node
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - db_name is defined
+          - nodes is defined
+          - nodes is iterable
+          - (nodes | length) > 0
+        fail_msg: "Required: -e db_name=<db> -e '{\"nodes\":[\"1a\",\"1b\",\"1c\"]}'"
+
+    - name: Resolve params
+      ansible.builtin.set_fact:
+        eff_timeout: "{{ (timeout | default(180)) | int }}"
+        eff_poll: "{{ (poll_interval | default(3)) | int }}"
+        eff_fields: "{{ fields | default(['CountOfTombstones']) }}"
+
+    # Single bash loop: poll /stats per node, extract the requested fields, check cross-node
+    # parity for each.  Exit 0 the moment every field has parity across the convergence set.
+    - name: Poll /stats until specified fields converge across nodes
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -u
+          SLEEP_SECS={{ eff_poll | int }}
+          MAX_WALL={{ eff_timeout | int }}
+          DEADLINE=$(( $(date +%s) + MAX_WALL ))
+          FIELDS="{{ eff_fields | join(' ') }}"
+          NODES="{{ nodes | join(' ') }}"
+
+          read_field() {
+            local body="$1" field="$2"
+            echo "$body" | grep -oE "\"$field\":[0-9]+" | head -1 | awk -F: '{print $2}'
+          }
+
+          while true; do
+            declare -A vals
+            SKIPPED=""
+            for n in $NODES; do
+              body=$(curl -sk --cert "{{ cert_dir }}/client.pem" --cacert "{{ cert_ca_crt }}" \
+                -w '\nHTTP_CODE:%{http_code}' \
+                "https://${n}.{{ ravendb_domain }}:443/databases/{{ db_name }}/stats" 2>/dev/null)
+              code=$(echo "$body" | grep -oE '^HTTP_CODE:[0-9]+$' | awk -F: '{print $2}')
+              if [ "$code" != "200" ]; then
+                SKIPPED="$SKIPPED $n($code)"
+                continue
+              fi
+              for f in $FIELDS; do
+                vals[${n}__${f}]=$(read_field "$body" "$f")
+              done
+            done
+
+            ALL_OK=1
+            REPORT=""
+            for f in $FIELDS; do
+              uniq_vals=""
+              line=""
+              for n in $NODES; do
+                v="${vals[${n}__${f}]:-}"
+                line="$line $n=$v"
+                [ -n "$v" ] && uniq_vals="$uniq_vals $v"
+              done
+              UNIQ=$(echo "$uniq_vals" | tr ' ' '\n' | grep -v '^$' | sort -u | wc -l)
+              if [ "$UNIQ" -le 1 ]; then
+                REPORT="$REPORT  $f:OK($line )"
+              else
+                ALL_OK=0
+                REPORT="$REPORT  $f:DRIFT($line )"
+              fi
+            done
+
+            unset vals
+
+            if [ "$ALL_OK" = "1" ]; then
+              echo "CONVERGED$REPORT  skipped=$SKIPPED"
+              exit 0
+            fi
+            echo "WAITING$REPORT  skipped=$SKIPPED" >&2
+
+            if [ $(date +%s) -ge $DEADLINE ]; then
+              echo "TIMEOUT after ${MAX_WALL}s -- last:$REPORT  skipped=$SKIPPED" >&2
+              exit 1
+            fi
+            sleep $SLEEP_SECS
+          done
+      register: probe
+      changed_when: false
+
+    - name: Show verdict
+      ansible.builtin.debug:
+        msg: "PASS  {{ probe.stdout }}"

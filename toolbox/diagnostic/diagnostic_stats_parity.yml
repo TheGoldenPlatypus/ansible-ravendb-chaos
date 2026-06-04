@@ -1,0 +1,258 @@
+##################################################################################################
+# toolbox/diagnostic/diagnostic_stats_parity.yml
+#
+# One-shot consolidated /stats parity check.  GETs /databases/<db>/stats once per node and
+# asserts every count-field is identical across the convergence set, printing a single readable
+# table.  Replaces the doc_count_parity + equal_stats chain (and the doc-count slice of
+# size_envelope) -- one HTTP call per node instead of three, and one debug play instead of three.
+#
+# Fields collected per node (12):
+#   CountOfAttachments              CountOfConflicts            CountOfCounterEntries
+#   CountOfDocuments                CountOfDocumentsConflicts   CountOfRemoteAttachments
+#   CountOfRevisionDocuments        CountOfTimeSeriesDeletedRanges
+#   CountOfTimeSeriesSegments       CountOfTombstones           CountOfUniqueAttachments
+#   SizeOnDisk (from SizeOnDisk.SizeInBytes -- informational, NOT asserted)
+#
+# Asserted by default: 9 of the 11 Count* fields above.
+# INFORMATIONAL-ONLY (shown but not asserted):
+#   * SizeOnDisk                  -- Voron page pre-allocation legitimately diverges by a few MB
+#                                    between writer-target and replicas on healthy clusters.
+#                                    Use diagnostic_size_envelope.yml for vs-baseline checks.
+#   * CountOfCounterEntries       -- per the spec: per-node intrinsic; cross-node mismatch
+#                                    is acceptable.  Deeper per-doc value validation is the
+#                                    real check (not the segment count).
+#   * CountOfTimeSeriesSegments   -- per the spec: same as counters above.  Segments split
+#                                    differently per node; per-doc TS data-point validation
+#                                    is the real check.
+#
+# Nodes returning 404/500/503 (DB not on that node) are dropped from the convergence set
+# before the assertion fires.
+#
+# INPUTS:
+#   db_name              REQUIRED.  Database name.
+#   nodes                REQUIRED.  JSON list of node names.
+#   assert_fields        OPTIONAL.  JSON list -- subset of count fields to assert.
+#                                   Default = the 9 cross-node parity-equal fields (excludes
+#                                   CountOfCounterEntries + CountOfTimeSeriesSegments which are
+#                                   per-node intrinsic per Karmel).  Pass an explicit list to
+#                                   override.
+#   informational_only   OPTIONAL.  Default false.  When true, prints the table but skips
+#                                   the parity assertion.  Useful mid-roll under live writes.
+#
+# RUN EXAMPLES:
+#   # default -- assert parity on all 11 count fields, print SizeOnDisk informationally
+#   ansible-playbook toolbox/diagnostic/diagnostic_stats_parity.yml \
+#       -e db_name=db1 -e '{"nodes":["1a","1b","1c"]}'
+#
+#   # subset assert (only docs + tombstones)
+#   ansible-playbook toolbox/diagnostic/diagnostic_stats_parity.yml \
+#       -e db_name=db1 \
+#       -e '{"nodes":["1a","1b","1c"],"assert_fields":["CountOfDocuments","CountOfTombstones"]}'
+#
+#   # information-only (no asserts) -- safe under live writes
+#   ansible-playbook toolbox/diagnostic/diagnostic_stats_parity.yml \
+#       -e db_name=db1 -e informational_only=true \
+#       -e '{"nodes":["1a","1b","1c"]}'
+##################################################################################################
+
+- name: /stats consolidated parity across nodes (12 fields, 1 GET/node)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - db_name is defined
+          - nodes is defined
+          - nodes is iterable
+          - (nodes | length) > 0
+        fail_msg: "Required: -e db_name=<db> -e '{\"nodes\":[\"1a\",\"1b\",\"1c\"]}'"
+
+    # set_fact persists across plays in the same run.  Without resetting, multiple invocations
+    # of this playbook in one scenario (Sec 3, Sec 8, Sec 11, Sec 13...) would APPEND to the
+    # accumulators from previous calls -- the table would show every section's rows stacked
+    # together and the mismatch list would carry forward stale findings.  Reset explicitly.
+    - name: Reset per-call accumulators (set_fact persists across plays)
+      ansible.builtin.set_fact:
+        per_node_stats: {}
+        stats_rows: []
+        mismatched_fields: []
+        flagged_info_fields: []
+        flag_lines: []
+
+    - name: Resolve count-field set + assert subset
+      ansible.builtin.set_fact:
+        all_count_fields:
+          - CountOfAttachments
+          - CountOfConflicts
+          - CountOfCounterEntries
+          - CountOfDocuments
+          - CountOfDocumentsConflicts
+          - CountOfRemoteAttachments
+          - CountOfRevisionDocuments
+          - CountOfTimeSeriesDeletedRanges
+          - CountOfTimeSeriesSegments
+          - CountOfTombstones
+          - CountOfUniqueAttachments
+        # CountOfCounterEntries + CountOfTimeSeriesSegments are intentionally absent --
+        # per-node intrinsic per Karmel (still printed in the table for visibility, just
+        # not asserted).  See header docstring for the full rationale + TODO.
+        eff_assert_fields: "{{ assert_fields | default([
+              'CountOfAttachments',
+              'CountOfConflicts',
+              'CountOfDocuments',
+              'CountOfDocumentsConflicts',
+              'CountOfRemoteAttachments',
+              'CountOfRevisionDocuments',
+              'CountOfTimeSeriesDeletedRanges',
+              'CountOfTombstones',
+              'CountOfUniqueAttachments'
+            ]) }}"
+
+    - name: GET /stats on each node
+      ansible.builtin.uri:
+        url: "https://{{ item }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/stats"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        status_code: [200, 404, 500, 503]
+      register: stats
+      loop: "{{ nodes }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Compute convergence_set + skipped
+      ansible.builtin.set_fact:
+        convergence_set: "{{ stats.results | selectattr('status', 'equalto', 200) | map(attribute='item') | list }}"
+        skipped_nodes: "{{ stats.results | rejectattr('status', 'equalto', 200) | map(attribute='item') | list }}"
+
+    - name: Note any skipped nodes
+      ansible.builtin.debug:
+        msg: "SKIPPED  {{ skipped_nodes }} (non-200 from /stats; DB not present)"
+      when: (skipped_nodes | length) > 0
+
+    - name: Fail if no node has the DB
+      ansible.builtin.assert:
+        that:
+          - (convergence_set | length) > 0
+        fail_msg: "No node has DB '{{ db_name }}'"
+
+    - name: Build per-node stats dict (all 12 fields)
+      ansible.builtin.set_fact:
+        per_node_stats: >-
+          {{
+            (per_node_stats | default({})) | combine({
+              item.item: {
+                'CountOfAttachments':              item.json.CountOfAttachments              | default(0),
+                'CountOfConflicts':                item.json.CountOfConflicts                | default(0),
+                'CountOfCounterEntries':           item.json.CountOfCounterEntries           | default(0),
+                'CountOfDocuments':                item.json.CountOfDocuments                | default(0),
+                'CountOfDocumentsConflicts':       item.json.CountOfDocumentsConflicts       | default(0),
+                'CountOfRemoteAttachments':        item.json.CountOfRemoteAttachments        | default(0),
+                'CountOfRevisionDocuments':        item.json.CountOfRevisionDocuments        | default(0),
+                'CountOfTimeSeriesDeletedRanges':  item.json.CountOfTimeSeriesDeletedRanges  | default(0),
+                'CountOfTimeSeriesSegments':       item.json.CountOfTimeSeriesSegments       | default(0),
+                'CountOfTombstones':               item.json.CountOfTombstones               | default(0),
+                'CountOfUniqueAttachments':        item.json.CountOfUniqueAttachments        | default(0),
+                'SizeOnDisk':                      (item.json.SizeOnDisk | default({})).SizeInBytes | default(0)
+              }
+            })
+          }}
+      loop: "{{ stats.results | selectattr('status', 'equalto', 200) | list }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Find mismatched fields (parity broken on asserted fields -- FAILS the run)
+      ansible.builtin.set_fact:
+        mismatched_fields: >-
+          {{
+            (mismatched_fields | default([])) +
+            ([{
+              'field': item,
+              'values': dict(convergence_set | zip(convergence_set | map('extract', per_node_stats) | map(attribute=item) | list))
+            }]
+            if (convergence_set | map('extract', per_node_stats) | map(attribute=item) | unique | list | length) > 1
+            else [])
+          }}
+      loop: "{{ eff_assert_fields }}"
+      loop_control:
+        label: "{{ item }}"
+
+    # Per Karmel (2026-06-04): "flag this, but don't fail the run" for the info-only fields
+    # that legitimately diverge per-node (CountOfCounterEntries, CountOfTimeSeriesSegments).
+    # Collect them here as `flagged_info_fields`; emit a prominent banner below if non-empty.
+    - name: Find drifted info-only fields (NOT asserted -- flagged for operator review)
+      ansible.builtin.set_fact:
+        flagged_info_fields: >-
+          {{
+            (flagged_info_fields | default([])) +
+            ([{
+              'field': item,
+              'values': dict(convergence_set | zip(convergence_set | map('extract', per_node_stats) | map(attribute=item) | list))
+            }]
+            if (item not in eff_assert_fields)
+                and ((convergence_set | map('extract', per_node_stats) | map(attribute=item) | unique | list | length) > 1)
+            else [])
+          }}
+      loop: "{{ all_count_fields }}"
+      loop_control:
+        label: "{{ item }}"
+
+    # Build the table as a LIST of pre-formatted strings.  Each list element gets its own
+    # line in the debug output -- the default callback escapes `\n` inside a single-string
+    # msg, but renders a list-of-strings cleanly.
+    - name: Compose per-field table rows
+      ansible.builtin.set_fact:
+        stats_rows: "{{ (stats_rows | default([])) + [row_line] }}"
+      vars:
+        values: "{{ convergence_set | map('extract', per_node_stats) | map(attribute=item) | list }}"
+        is_uniform: "{{ (values | unique | list | length) == 1 }}"
+        is_asserted: "{{ item in eff_assert_fields }}"
+        # Status column: OK / MISMATCH for asserted fields; "ok (info)" / "drift (info)"
+        # for the per-node-intrinsic fields that are printed but not asserted on.
+        status_label: "{{ ('OK' if is_uniform else 'MISMATCH') if is_asserted else ('ok (info)' if is_uniform else 'drift (info)') }}"
+        row_line: "{{ '%-32s' | format(item) }}{% for v in values %}{{ '%16d' | format(v) }}{% endfor %}  {{ status_label }}"
+      loop: "{{ all_count_fields }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Show stats table
+      ansible.builtin.debug:
+        msg: "{{ [banner, header_line] + stats_rows + [size_line] }}"
+      vars:
+        banner:      "/stats parity  db={{ db_name }}  nodes={{ convergence_set | string }}"
+        header_line: "{{ '%-32s' | format('field') }}{% for n in convergence_set %}{{ '%16s' | format(n) }}{% endfor %}  status"
+        size_line:   "{{ '%-32s' | format('SizeOnDisk (info only)') }}{% for n in convergence_set %}{{ '%16d' | format(per_node_stats[n]['SizeOnDisk']) }}{% endfor %}"
+
+    # Per Karmel: "flag this, but don't fail the run."  Build one line per flagged field,
+    # then emit a prominent banner -- separate task so it stands out from the stats table
+    # and is grep-friendly via "INFORMATIONAL DRIFT".
+    - name: Build flag lines for drifted info-only fields
+      ansible.builtin.set_fact:
+        flag_lines: "{{ (flag_lines | default([])) + ['  - ' ~ ('%-32s' | format(item.field)) ~ '  ' ~ (item.values | string)] }}"
+      loop: "{{ flagged_info_fields | default([]) }}"
+      loop_control:
+        label: "{{ item.field }}"
+      when: (flagged_info_fields | default([])) | length > 0
+
+    - name: "FLAG  informational drifts (per the spec: flag, don't fail)"
+      ansible.builtin.debug:
+        msg: "{{ flag_header + flag_lines + flag_footer }}"
+      vars:
+        flag_header:
+          - "================================================================================"
+          - "WARNING  INFORMATIONAL DRIFT  -- fields differ across nodes but NOT asserted."
+          - "         Per the spec these are per-node intrinsic; flagged for operator review."
+          - "         Verify these are NOT a regression.  Drifted fields:"
+        flag_footer:
+          - "================================================================================"
+      when: (flagged_info_fields | default([])) | length > 0
+
+    - name: Assert per-field parity (skip when informational_only)
+      ansible.builtin.assert:
+        that:
+          - (mismatched_fields | default([])) | length == 0
+        fail_msg: "FAIL  /stats parity broken on field(s): {{ mismatched_fields }}"
+        success_msg: "PASS  every asserted count field parity-equal across {{ convergence_set }}  (asserted: {{ eff_assert_fields | length }} fields)"
+      when: not (informational_only | default(false) | bool)

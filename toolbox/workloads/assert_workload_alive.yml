@@ -1,0 +1,53 @@
+##################################################################################################
+# toolbox/workloads/assert_workload_alive.yml
+#
+# Asserts a background workload is still running -- pidfile exists AND `kill -0 <pid>` succeeds.
+# Use just BEFORE stop_workload to catch workers that died silently during a scenario phase
+# (curl crashed, OOM-killed, bash quirk, etc.).  Without this check, stop_workload silently
+# accepts a missing pidfile as "already exited" and the scenario passes with degraded load.
+#
+# Three failure modes detected:
+#   1. Pidfile missing entirely (worker exited or was killed externally)
+#   2. Pidfile present but the recorded PID is gone (worker crashed without removing pidfile)
+#   3. Pidfile unreadable / empty
+#
+# INPUTS:
+#   pidfile   REQUIRED.  Absolute path to the workload's pidfile.
+#
+# RUN EXAMPLE:
+#   ansible-playbook toolbox/workloads/assert_workload_alive.yml \
+#       -e pidfile=/tmp/w1-1a-db1-w1.pid
+##################################################################################################
+
+- name: Assert a background workload is still alive (pidfile + kill -0)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - pidfile is defined
+        fail_msg: "Required: -e pidfile=<path>"
+
+    - name: Probe pidfile + recorded PID
+      ansible.builtin.shell: |
+        set -u
+        if [ ! -f "{{ pidfile }}" ]; then echo "NO_PIDFILE"; exit 0; fi
+        PID=$(cat "{{ pidfile }}" 2>/dev/null || true)
+        if [ -z "$PID" ]; then echo "EMPTY_PIDFILE"; exit 0; fi
+        if kill -0 "$PID" 2>/dev/null; then echo "ALIVE pid=$PID"; exit 0; fi
+        echo "DEAD pid=$PID (pidfile lingered after process exit)"; exit 0
+      register: probe
+      changed_when: false
+
+    - name: Assert workload is alive
+      ansible.builtin.assert:
+        that:
+          - probe.stdout is search('^ALIVE ')
+        fail_msg: >-
+          WORKLOAD DIED  pidfile={{ pidfile }}  state="{{ probe.stdout }}"
+          -- a background worker exited before the scenario stopped it; results from
+          this phase may be partial (degraded write load).
+        success_msg: "WORKLOAD ALIVE  pidfile={{ pidfile }}  {{ probe.stdout }}"
