@@ -25,7 +25,7 @@
 #   docker_network_name  shared docker network to discover containers from   (default: hubsinknet)
 #   rdb_version          RavenDB version to install                          (default: 7.2.2)
 #   ravendb_domain       domain stamped into each node's PublicServerUrl     (default: hubsink.test)
-#   cert_dir             folder containing the cert + license files          (default: /mnt/c/dev/hub-sink/selfsignedmaterials)
+#   cert_dir             folder containing the cert + license files          (default: /home/kaiju-1/EMR/selfsignedmaterials)
 #                        cert_ca_crt / cert_server_pfx / cert_client_pfx /
 #                        cert_license / cert_ca_key are derived from this.
 #   custom_build         OPTIONAL.  Path or URL to a custom RavenDB .deb.
