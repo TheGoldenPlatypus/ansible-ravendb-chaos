@@ -1,0 +1,641 @@
+##################################################################################################
+# scenarios/EMR/RP1/rp1.yml -- CV-boundary regression guard on a clean all-v_new T2 cluster.
+#
+# 1 hub ({{ hub_id | default(1) }}a/{{ hub_id | default(1) }}b/{{ hub_id | default(1) }}c) + 1 sink ({{ sink_id | default(2) }}a/{{ sink_id | default(2) }}b/{{ sink_id | default(2) }}c) with filtered pull `users/sink1/*`; both clusters RF=3,
+# all 6 nodes start AND stay on v_new (no upgrade in this scenario).  Karmel: "All peers must
+# be v_new for the scenario to be meaningful."
+#
+#   0.  Kill any leftover background processes from a previous interrupted run.  Validate inputs.
+#   1.  Create db1 on hub + sink with the default revisions config.
+#   2.  Wire filtered pull hub -> sink with the `users/sink1/*` filter.
+#   3.  W-0 deterministic bulk seed on Hub: N users/sink1/* + N orders/hub/* + per-family
+#       inventory (one item of each replication-item type under users/sink1/family/*).
+#   4.  Wait for filtered pull + Sink internal replication to drain.  Baseline filter compliance
+#       check (catches any seeding leak before chaos).
+#   5.  Burst: N users/sink1/active/{i} writes on Hub (write_docs_revisions, foreground).
+#   6.  Burst: 2k delete/restore-from-revision ops on the seeded users/sink1/* pool (inline
+#       shell loop on Hub).
+#   7.  Wait for replication to drain end-to-end.  Then wait for tombstone-count parity across
+#       the sink replicas (delete burst created tombstones; background cleanup needs idle time).
+#   8.  Post-burst checkpoint -- the load-bearing assertions:
+#         * I-7 filter compliance (sink): no source `orders/hub/*` leaked through.
+#         * I-7 + I-13 (c) doc-id-set parity on sink for the seeded pool: every source
+#           `users/sink1/*` id present on every sink replica (no missing, no replica drop).
+#         * I-13 (a) item CV split: per-family inventory ids pass assert_stored_item_cv_split
+#           on the sink leader.
+#         * I-13 (b) DB CV order-side: cv_boundary_by_dbid hub -> sink (the load-bearing
+#           regression guard, N/A on legacy CV form; informational here since PR-22875 keeps
+#           the new lane dormant unless explicitly opted in).
+#         * I-1 + I-5/I-6: consolidated /stats parity across sink replicas (docs, tombstones,
+#           attachments, counters, time-series).
+#         * I-6 "no stuck task": diagnostic_replication dump (informational, operator review).
+#   9.  Karmel step 8: locally update one item per family on SB; verify it replicates to SA/SC
+#       (the sink's internal-replication path).
+#
+# Deep version (invariants, risks, validators) -> EMR_TESTING_PLAN/scenarios.md (RP-1).
+#
+# PREREQ -- bring up a clean T2 lab (2 clusters x 3 nodes) at v_new.
+#
+#   1. ansible-playbook playbooks/teardown_containers.yml -K
+#   2. ansible-playbook playbooks/provision_nodes.yml -K -e clusters_count=2 -e nodes_per_cluster=3
+#   3. ansible-playbook playbooks/install_ravendb.yml -K -e custom_build=<v_new .deb> --skip-tags download
+#   4. ansible-playbook playbooks/form_clusters.yml -K -e clusters_count=2 -e nodes_per_cluster=3
+#
+# RUN:
+#   ansible-playbook scenarios/EMR/RP1/rp1.yml -K
+#
+# OPT-IN: -e pause_between_sections=true makes the playbook wait for ENTER before each section
+# (useful for demo / showcase walkthroughs).  Default off.
+##################################################################################################
+
+
+# =====================================================================================
+# SECTION 0 -- kill any orphan processes from a previously interrupted run + validate
+# =====================================================================================
+
+- ansible.builtin.import_playbook: ../../../toolbox/control/pause_gate.yml
+  vars: { section_label: "SECTION 0 -- validate inputs" }
+
+- name: RP-1 SECTION 0 -- validate inputs + show plan
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - vars.yml
+
+  tasks:
+    - name: Show plan
+      ansible.builtin.debug:
+        msg: >-
+          RP-1  hub=[{{ hub_id | default(1) }}a,{{ hub_id | default(1) }}b,{{ hub_id | default(1) }}c]  sink=[{{ sink_id | default(2) }}a,{{ sink_id | default(2) }}b,{{ sink_id | default(2) }}c]  filter=users/sink1/*
+          bulk_users_sink1={{ bulk_users_sink1 }}  bulk_orders_hub={{ bulk_orders_hub }}
+          burst_active={{ burst_active_count }}  burst_restore={{ burst_restore_iterations }}
+
+
+# =====================================================================================
+# SECTION 1 -- create db1 on hub + sink (default revisions config)
+# =====================================================================================
+
+- ansible.builtin.import_playbook: ../../../toolbox/control/pause_gate.yml
+  vars: { section_label: "SECTION 1 -- create db1 on hub + sink (default revisions)" }
+
+- name: RP-1 SECTION 1 -- create db1 on hub + sink
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.debug:
+        msg: "==== SECTION 1 -- create db1 on hub + sink with default revisions config ===="
+
+- ansible.builtin.import_playbook: ../../../toolbox/db/create_database.yml
+  vars: { cluster_leader: "{{ hub_id | default(1) }}a", db_name: db1, replication_factor: 3 }
+
+- ansible.builtin.import_playbook: ../../../toolbox/db/create_database.yml
+  vars: { cluster_leader: "{{ sink_id | default(2) }}a", db_name: db1, replication_factor: 3 }
+
+# Default revisions config on hub (sink inherits via replication; configure_revisions on hub
+# is enough for the per-family revision-doc / revision-tombstone inventory items to record).
+- ansible.builtin.import_playbook: ../../../toolbox/db/configure_revisions.yml
+  vars:
+    target: "{{ hub_id | default(1) }}a"
+    db_name: db1
+
+
+# =====================================================================================
+# SECTION 2 -- wire filtered pull hub -> sink with `users/sink1/*` filter
+# =====================================================================================
+
+- ansible.builtin.import_playbook: ../../../toolbox/control/pause_gate.yml
+  vars: { section_label: "SECTION 2 -- wire filtered pull (hub -> sink, users/sink1/*)" }
+
+- name: RP-1 SECTION 2 -- wire filtered pull
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.debug:
+        msg: "==== SECTION 2 -- filtered pull hub -> sink with users/sink1/* ===="
+
+- ansible.builtin.import_playbook: ../../../toolbox/replication/define_hub.yml
+  vars:
+    hub_leader: "{{ hub_id | default(1) }}a"
+    db_name: db1
+    hub_task_name: rp1-hub
+    sink_cluster_ids: ["{{ sink_id | default(2) | int }}"]
+    sink_allowed_paths:
+      "{{ sink_id | default(2) | int }}": ["users/sink1/*"]
+
+- ansible.builtin.import_playbook: ../../../toolbox/replication/attach_sinks.yml
+  vars:
+    db_name: db1
+    hub_task_name: rp1-hub
+    hub_topology_urls:
+      - "https://{{ hub_id | default(1) }}a.hubsink.test:443"
+      - "https://{{ hub_id | default(1) }}b.hubsink.test:443"
+      - "https://{{ hub_id | default(1) }}c.hubsink.test:443"
+    sink_cluster_ids: ["{{ sink_id | default(2) | int }}"]
+    sink_allowed_paths:
+      "{{ sink_id | default(2) | int }}": ["users/sink1/*"]
+
+
+# =====================================================================================
+# SECTION 3 -- W-0 bulk seed + per-family inventory
+# =====================================================================================
+
+- ansible.builtin.import_playbook: ../../../toolbox/control/pause_gate.yml
+  vars: { section_label: "SECTION 3 -- W-0 bulk seed + per-family inventory" }
+
+- name: RP-1 SECTION 3 -- W-0 bulk seed (hub) + per-family inventory
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - vars.yml
+  tasks:
+    - ansible.builtin.debug:
+        msg: "==== SECTION 3 -- W-0 bulk seed: {{ bulk_users_sink1 }} users/sink1 + {{ bulk_orders_hub }} orders/hub + per-family inventory ===="
+
+# Bulk seed (filtered-pull-tracked): users/sink1 + orders/hub on hub.
+- ansible.builtin.import_playbook: ../../../toolbox/writes/write_docs_revisions.yml
+  vars:
+    target: "{{ hub_id | default(1) }}a"
+    db_name: db1
+    id_prefix: "users/sink1"
+    collection: "Users"
+    count: "{{ bulk_users_sink1 | default(10000) | int }}"
+    revs_per_doc: 1
+
+- ansible.builtin.import_playbook: ../../../toolbox/writes/write_docs_revisions.yml
+  vars:
+    target: "{{ hub_id | default(1) }}a"
+    db_name: db1
+    id_prefix: "orders/hub"
+    collection: "Orders"
+    count: "{{ bulk_orders_hub | default(10000) | int }}"
+    revs_per_doc: 1
+
+# ---------- Per-family inventory: one item per replication-item type ----------
+# Each item lives under users/sink1/family/<type>/0 so the filtered pull picks it up.
+# Asserted at Sec 8 via diagnostic_stored_item_cv_split on the sink leader.
+
+# 1. document
+- ansible.builtin.import_playbook: ../../../toolbox/writes/write_docs.yml
+  vars: { target: "{{ hub_id | default(1) }}a", db_name: db1, id_prefix: "users/sink1/family/doc", count: 1 }
+
+# 2. document tombstone (create + delete)
+- ansible.builtin.import_playbook: ../../../toolbox/writes/write_docs.yml
+  vars: { target: "{{ hub_id | default(1) }}a", db_name: db1, id_prefix: "users/sink1/family/doctomb", count: 1 }
+- ansible.builtin.import_playbook: ../../../toolbox/writes/delete_docs.yml
+  vars: { target: "{{ hub_id | default(1) }}a", db_name: db1, id_prefix: "users/sink1/family/doctomb", count: 1 }
+
+# 3. conflict document -- partition hub <-> sink, write the same id on both sides with
+#    different bodies, heal.  When replication resumes, the two writes collide and the
+#    conflict-detection path is exercised.  Karmel calls this a "spot check"; deeper
+#    conflict coverage (resolution timing, multi-side conflicts under chaos) lives in RP-2
+#    phase (a).
+- ansible.builtin.import_playbook: ../../../toolbox/network/partition_set.yml
+  vars:
+    set_a: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
+    set_b: ["{{ sink_id | default(2) }}a", "{{ sink_id | default(2) }}b", "{{ sink_id | default(2) }}c"]
+
+- name: RP-1 SECTION 3 -- create conflict document under partition
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: PUT users/sink1/family/conflict/0 on hub ({{ hub_id | default(1) }}a) with body version=hub
+      ansible.builtin.uri:
+        url: "https://{{ hub_id | default(1) }}a.{{ ravendb_domain }}:443/databases/db1/docs?id=users/sink1/family/conflict/0"
+        method: PUT
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        body_format: json
+        body: { "src": "hub", "v": "A", "@metadata": { "@collection": "Users" } }
+        status_code: [200, 201]
+
+    - name: PUT users/sink1/family/conflict/0 on sink ({{ sink_id | default(2) }}a) with body version=sink (different content)
+      ansible.builtin.uri:
+        url: "https://{{ sink_id | default(2) }}a.{{ ravendb_domain }}:443/databases/db1/docs?id=users/sink1/family/conflict/0"
+        method: PUT
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        body_format: json
+        body: { "src": "sink", "v": "B", "@metadata": { "@collection": "Users" } }
+        status_code: [200, 201]
+
+# Heal the partition.  When replication catches up, hub and sink each see a conflicting
+# write from the other side for users/sink1/family/conflict/0 -- conflict-detection path
+# fires.  Resolution timing is non-deterministic (default LWW); RP-1's "spot check" is
+# satisfied by having exercised the path.  Section 8 dumps CountOfConflicts as visibility.
+- ansible.builtin.import_playbook: ../../../toolbox/network/heal_all.yml
+
+# 4. revision document (3 distinct revisions)
+- ansible.builtin.import_playbook: ../../../toolbox/writes/write_docs_revisions.yml
+  vars:
+    target: "{{ hub_id | default(1) }}a"
+    db_name: db1
+    id_prefix: "users/sink1/family/rev"
+    collection: "Users"
+    count: 1
+    revs_per_doc: 3
+
+# 5. revision tombstone (revisioned doc that gets deleted)
+- ansible.builtin.import_playbook: ../../../toolbox/writes/write_docs_revisions.yml
+  vars:
+    target: "{{ hub_id | default(1) }}a"
+    db_name: db1
+    id_prefix: "users/sink1/family/revtomb"
+    collection: "Users"
+    count: 1
+    revs_per_doc: 3
+- ansible.builtin.import_playbook: ../../../toolbox/writes/delete_docs.yml
+  vars: { target: "{{ hub_id | default(1) }}a", db_name: db1, id_prefix: "users/sink1/family/revtomb", count: 1 }
+
+# 6 + 7. attachment metadata + stream (PUT attachment on a doc)
+- ansible.builtin.import_playbook: ../../../toolbox/writes/write_docs.yml
+  vars: { target: "{{ hub_id | default(1) }}a", db_name: db1, id_prefix: "users/sink1/family/att", count: 1 }
+- ansible.builtin.import_playbook: ../../../toolbox/writes/write_attachments.yml
+  vars:
+    target: "{{ hub_id | default(1) }}a"
+    db_name: db1
+    doc_id_prefix: "users/sink1/family/att"
+    attachment_name: "data"
+    count: 1
+
+# 8. attachment tombstone (create attachment + delete it) -- no dedicated tool, inline DELETE.
+- ansible.builtin.import_playbook: ../../../toolbox/writes/write_docs.yml
+  vars: { target: "{{ hub_id | default(1) }}a", db_name: db1, id_prefix: "users/sink1/family/atttomb", count: 1 }
+- ansible.builtin.import_playbook: ../../../toolbox/writes/write_attachments.yml
+  vars:
+    target: "{{ hub_id | default(1) }}a"
+    db_name: db1
+    doc_id_prefix: "users/sink1/family/atttomb"
+    attachment_name: "data"
+    count: 1
+
+- name: RP-1 SECTION 3 -- delete attachment to create attachment tombstone
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: DELETE attachment on users/sink1/family/atttomb/0
+      ansible.builtin.uri:
+        url: "https://{{ hub_id | default(1) }}a.{{ ravendb_domain }}:443/databases/db1/attachments?id=users/sink1/family/atttomb/0&name=data"
+        method: DELETE
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        status_code: [204, 404]
+
+# 9. counter group
+- ansible.builtin.import_playbook: ../../../toolbox/writes/write_docs.yml
+  vars: { target: "{{ hub_id | default(1) }}a", db_name: db1, id_prefix: "users/sink1/family/cnt", count: 1 }
+- ansible.builtin.import_playbook: ../../../toolbox/writes/write_counters.yml
+  vars:
+    target: "{{ hub_id | default(1) }}a"
+    db_name: db1
+    doc_id: "users/sink1/family/cnt/0"
+    counter_name: "likes"
+    delta: 1
+
+# 10. time-series segment
+- ansible.builtin.import_playbook: ../../../toolbox/writes/write_docs.yml
+  vars: { target: "{{ hub_id | default(1) }}a", db_name: db1, id_prefix: "users/sink1/family/ts", count: 1 }
+- ansible.builtin.import_playbook: ../../../toolbox/writes/write_timeseries.yml
+  vars:
+    target: "{{ hub_id | default(1) }}a"
+    db_name: db1
+    doc_id: "users/sink1/family/ts/0"
+    ts_name: "Heartrate"
+    count: 5
+    interval_seconds: 60
+    start_timestamp: "2026-01-01T00:00:00.000Z"
+
+# 11. deleted time-series range (create TS segment + delete a range from it)
+- ansible.builtin.import_playbook: ../../../toolbox/writes/write_docs.yml
+  vars: { target: "{{ hub_id | default(1) }}a", db_name: db1, id_prefix: "users/sink1/family/tsdel", count: 1 }
+- ansible.builtin.import_playbook: ../../../toolbox/writes/write_timeseries.yml
+  vars:
+    target: "{{ hub_id | default(1) }}a"
+    db_name: db1
+    doc_id: "users/sink1/family/tsdel/0"
+    ts_name: "Heartrate"
+    count: 10
+    interval_seconds: 60
+    start_timestamp: "2026-01-01T00:00:00.000Z"
+- ansible.builtin.import_playbook: ../../../toolbox/writes/write_timeseries.yml
+  vars:
+    target: "{{ hub_id | default(1) }}a"
+    db_name: db1
+    doc_id: "users/sink1/family/tsdel/0"
+    ts_name: "Heartrate"
+    delete_from: "2026-01-01T00:02:00.000Z"
+    delete_to:   "2026-01-01T00:05:00.000Z"
+
+# 12. legacy counter -- seeded via a pre-built v_old smuggler dump.  v_new only writes the
+#     current counter format, so the only way to get a legacy-format counter into storage
+#     on an all-v_new RP-1 cluster is to create it once on a v_old lab, export, and import
+#     here.  REQUIRED per Karmel's RP-1 spec -- if the fixture file is missing, the
+#     scenario fails loud.  See scenarios/EMR/RP1/fixtures/README.md for the one-time
+#     fixture creation procedure.
+- ansible.builtin.import_playbook: ../../../toolbox/backup/smuggler_import.yml
+  vars:
+    target: "{{ hub_id | default(1) }}a"
+    db_name: db1
+    # Absolute path computed from the shell PWD (where the user invoked ansible-playbook).
+    # `playbook_dir` would resolve to the IMPORTED playbook's dir (toolbox/backup/) here,
+    # not this file's -- same gotcha as vars.yml not being reachable from this scope.
+    # Relative paths bit us too because ansible's stat module resolves them against an
+    # ambiguous working directory once import_playbook scoping kicks in.  PWD is reliable.
+    dump_path: "{{ lookup('env', 'PWD') }}/scenarios/EMR/RP1/fixtures/legacy-counter.ravendbdump"
+
+
+# =====================================================================================
+# SECTION 4 -- wait for filtered pull + sink internal replication to drain + baseline check
+# =====================================================================================
+
+- ansible.builtin.import_playbook: ../../../toolbox/control/pause_gate.yml
+  vars: { section_label: "SECTION 4 -- drain filtered pull + sink internal replication" }
+
+- name: RP-1 SECTION 4 -- drain + baseline filter compliance
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.debug:
+        msg: "==== SECTION 4 -- drain hub-side + sink-side, then baseline filter compliance ===="
+
+# Per-node etag stability on hub (Karmel's "wait by etag" approach -- replaces CV-string
+# comparison; cleaner under bidirectional pull asymmetries even though RP-1 is one-way).
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_etag_parity.yml
+  vars: { db_name: db1, nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"] }
+
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_etag_parity.yml
+  vars: { db_name: db1, nodes: ["{{ sink_id | default(2) }}a", "{{ sink_id | default(2) }}b", "{{ sink_id | default(2) }}c"] }
+
+# Baseline filter compliance: catches any seeding leak BEFORE the burst.  (orders/hub/* must
+# not be on sink; users/sink1/* must be on sink.)
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_filter_compliance.yml
+  vars:
+    sink_cluster_leader: "{{ sink_id | default(2) }}a"
+    db_name: db1
+    allowed_prefixes: ["users/sink1/"]
+
+
+# =====================================================================================
+# SECTION 5 -- burst writes: 10k users/sink1/active/*
+# =====================================================================================
+
+- ansible.builtin.import_playbook: ../../../toolbox/control/pause_gate.yml
+  vars: { section_label: "SECTION 5 -- burst writes (10k users/sink1/active/*)" }
+
+- name: RP-1 SECTION 5 -- burst writes (users/sink1/active)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - vars.yml
+  tasks:
+    - ansible.builtin.debug:
+        msg: "==== SECTION 5 -- burst {{ burst_active_count }} users/sink1/active/* writes on hub ===="
+
+- ansible.builtin.import_playbook: ../../../toolbox/writes/write_docs_revisions.yml
+  vars:
+    target: "{{ hub_id | default(1) }}a"
+    db_name: db1
+    id_prefix: "{{ burst_active_prefix | default('users/sink1/active') }}"
+    collection: "Users"
+    count: "{{ burst_active_count | default(10000) | int }}"
+    revs_per_doc: 1
+
+
+# =====================================================================================
+# SECTION 6 -- delete/restore-from-revision burst (2k iterations on the seeded pool)
+# =====================================================================================
+
+- ansible.builtin.import_playbook: ../../../toolbox/control/pause_gate.yml
+  vars: { section_label: "SECTION 6 -- delete/restore-from-revision burst (2k iterations)" }
+
+- name: RP-1 SECTION 6 -- delete + restore-from-revision burst on the seeded pool
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - vars.yml
+  tasks:
+    - ansible.builtin.debug:
+        msg: "==== SECTION 6 -- {{ burst_restore_iterations }} delete/restore iterations on {{ burst_restore_prefix }}/0..{{ burst_restore_pool_size }} ===="
+
+    # Inline bash loop -- finite, deterministic.  Per iteration:
+    #   1. pick random id from the seeded pool
+    #   2. DELETE the doc (creates a tombstone)
+    #   3. GET prior revision via /revisions?id=X&pageSize=2 (Results[1] = the last live rev)
+    #   4. PUT that body back as the live doc (the "restore-from-revision" step)
+    # Requires jq on the controller.  Not a continuous workload; runs to completion.
+    - name: Delete-and-restore-from-revision burst
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -u
+          command -v jq >/dev/null 2>&1 || { echo "ERROR: jq required (apt install jq)" >&2; exit 4; }
+          URL="https://{{ hub_id | default(1) }}a.{{ ravendb_domain }}:443/databases/{{ db_name }}"
+          POOL_SIZE={{ burst_restore_pool_size | int }}
+          ITERATIONS={{ burst_restore_iterations | default(2000) | int }}
+          RESTORED=0; NO_PRIOR=0
+          for i in $(seq 1 $ITERATIONS); do
+            n=$((RANDOM % POOL_SIZE))
+            id="{{ burst_restore_prefix | default('users/sink1') }}/$n"
+            curl -sk -o /dev/null --cert "{{ cert_dir }}/client.pem" --cacert "{{ cert_ca_crt }}" \
+              -X DELETE "$URL/docs?id=$id" || true
+            PRIOR=$(curl -sk --cert "{{ cert_dir }}/client.pem" --cacert "{{ cert_ca_crt }}" \
+              "$URL/revisions?id=$id&pageSize=2" | jq -c '.Results[1] // empty' 2>/dev/null || echo "")
+            if [ -n "$PRIOR" ]; then
+              curl -sk -o /dev/null --cert "{{ cert_dir }}/client.pem" --cacert "{{ cert_ca_crt }}" \
+                -X PUT "$URL/docs?id=$id" -H "Content-Type: application/json" -d "$PRIOR" || true
+              RESTORED=$((RESTORED+1))
+            else
+              NO_PRIOR=$((NO_PRIOR+1))
+            fi
+          done
+          echo "RP-1 delete/restore burst DONE  iterations=$ITERATIONS  restored=$RESTORED  no_prior_rev=$NO_PRIOR"
+      register: burst_out
+      changed_when: false
+
+    - ansible.builtin.debug:
+        msg: "{{ burst_out.stdout }}"
+
+
+# =====================================================================================
+# SECTION 7 -- drain end-to-end + post-burst tombstone settle
+# =====================================================================================
+
+- ansible.builtin.import_playbook: ../../../toolbox/control/pause_gate.yml
+  vars: { section_label: "SECTION 7 -- drain end-to-end + tombstone settle" }
+
+- name: RP-1 SECTION 7 -- post-burst drain + tombstone settle
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - vars.yml
+  tasks:
+    - ansible.builtin.debug:
+        msg: "==== SECTION 7 -- drain hub + sink + controller TCP cooldown + wait for tombstone parity ===="
+
+    # Controller-side TCP cooldown after the delete/restore burst (~4-8k short-lived TCP
+    # connections; each lingers ~60s in TIME_WAIT, exhausting ephemeral ports).
+    - name: Pause {{ burst_cooldown_secs | default(45) | int }}s for controller TIME_WAIT sockets to recycle
+      ansible.builtin.pause:
+        seconds: "{{ burst_cooldown_secs | default(45) | int }}"
+      when: (burst_cooldown_secs | default(45) | int) > 0
+
+# Per-node etag stability (Karmel-style: wait by etag).
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_etag_parity.yml
+  vars: { db_name: db1, nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"] }
+
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_etag_parity.yml
+  vars: { db_name: db1, nodes: ["{{ sink_id | default(2) }}a", "{{ sink_id | default(2) }}b", "{{ sink_id | default(2) }}c"] }
+
+# Tombstone-cleanup convergence wait: the delete burst created tombstones; RavenDB's
+# background cleanup runs at different rates per node depending on each node's burst load.
+# Polls CountOfTombstones until parity across the sink cluster (or times out).
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_stats_field_parity.yml
+  vars:
+    db_name: db1
+    nodes: ["{{ sink_id | default(2) }}a", "{{ sink_id | default(2) }}b", "{{ sink_id | default(2) }}c"]
+    fields: ["CountOfTombstones"]
+    timeout: "{{ tombstone_settle_timeout_secs | default(300) | int }}"
+    poll_interval: 3
+
+
+# =====================================================================================
+# SECTION 8 -- post-burst checkpoint: I-13 (a)(b)(c), I-7, I-5/I-6
+# =====================================================================================
+
+- ansible.builtin.import_playbook: ../../../toolbox/control/pause_gate.yml
+  vars: { section_label: "SECTION 8 -- post-burst checkpoint (I-13 + I-7 + I-5/6)" }
+
+- name: RP-1 SECTION 8 -- post-burst checkpoint
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.debug:
+        msg: "==== SECTION 8 -- I-13 (a)(b)(c) + I-7 + I-5/I-6 on a quiet cluster ===="
+
+# I-7 (no leak): filter compliance on the sink leader (every doc matches users/sink1/*).
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_filter_compliance.yml
+  vars:
+    sink_cluster_leader: "{{ sink_id | default(2) }}a"
+    db_name: db1
+    allowed_prefixes: ["users/sink1/"]
+
+# I-7 (no missing) + I-13 (c) replica preservation: sampled doc-id-set parity across sink
+# replicas for the bulk-seeded users/sink1/* pool.
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_doc_id_set_parity.yml
+  vars:
+    db_name: db1
+    nodes: ["{{ sink_id | default(2) }}a", "{{ sink_id | default(2) }}b", "{{ sink_id | default(2) }}c"]
+    id_prefix: "users/sink1"
+    count: "{{ parity_probe_count | default(50) | int }}"
+
+# Same parity probe for the burst-written users/sink1/active/* pool.
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_doc_id_set_parity.yml
+  vars:
+    db_name: db1
+    nodes: ["{{ sink_id | default(2) }}a", "{{ sink_id | default(2) }}b", "{{ sink_id | default(2) }}c"]
+    id_prefix: "users/sink1/active"
+    count: "{{ parity_probe_count | default(50) | int }}"
+
+# I-13 (a) item CV shape: walk the per-family inventory on the sink leader.  Karmel's spec
+# names this "item CV split" -- assumes the new lane is active on a v_new receiver, putting
+# CVs in the split "order|version" shape.  But PR-22875 keeps the new lane dormant (see also
+# RPV-1: SupportedFeatures lists ThrowRevisionKeyTooBigFix only, no HashedRevisionPk), so all
+# stored CVs are in the legacy RAW form.  Same Karmel-aligned decision as RPV-1's cv-boundary
+# check: don't demand lane activation; verify the actual on-disk shape (raw, no '|' delimiter).
+# If the lane ever flips on (PR adds HashedRevisionPk to SupportedFeatures), flip expect=split.
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_stored_item_cv_split.yml
+  vars:
+    db_name: db1
+    target: "{{ sink_id | default(2) }}a"
+    expect: raw
+    doc_ids:
+      - "users/sink1/family/doc/0"
+      - "users/sink1/family/rev/0"
+      - "users/sink1/family/att/0"
+      - "users/sink1/family/cnt/0"
+      - "users/sink1/family/ts/0"
+      - "users/sink1/family/tsdel/0"
+      - "users/sink1/family/conflict/0"     # post-resolution survivor of the per-family conflict
+      - "users/sink1/family/legacy-cnt/0"   # legacy counter; required, seeded via fixture in Sec 3
+
+# I-13 (b) DB CV order-side -- the load-bearing regression guard.  Hub -> Sink direction.
+# Tool reports N/A on legacy raw-CV form (PR-22875 keeps the new lane dormant unless
+# explicitly opted in); strict_v_new NOT set per the spec (Karmel asks for I-13, not
+# specifically the strict-activation mode).
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_cv_boundary_by_dbid.yml
+  vars:
+    db_name: db1
+    source_nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
+    receiver_nodes: ["{{ sink_id | default(2) }}a", "{{ sink_id | default(2) }}b", "{{ sink_id | default(2) }}c"]
+
+# I-1 + I-5/I-6: consolidated /stats parity across sink replicas (CountOfDocuments + tombstones
+# + attachments + counters + time-series).  One GET/node, one table, one assertion.
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_stats_parity.yml
+  vars: { db_name: db1, nodes: ["{{ sink_id | default(2) }}a", "{{ sink_id | default(2) }}b", "{{ sink_id | default(2) }}c"] }
+
+# I-6 "no stuck task" -- informational dump of incoming/outgoing replication connections on
+# the sink leader.  Operator review; no exact "stuck" predicate in the toolbox to assert on.
+- ansible.builtin.import_playbook: ../../../toolbox/diagnostic/diagnostic_replication.yml
+  vars: { target: "{{ sink_id | default(2) }}a", db_name: db1 }
+
+
+# =====================================================================================
+# SECTION 9 -- Karmel step 8: local update on SB, verify replicates to SA/SC
+# =====================================================================================
+
+- ansible.builtin.import_playbook: ../../../toolbox/control/pause_gate.yml
+  vars: { section_label: "SECTION 9 -- local update on SB, verify replicates to SA + SC" }
+
+- name: RP-1 SECTION 9 -- local update on SB, verify internal-replication path
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.debug:
+        msg: "==== SECTION 9 -- update on {{ sink_id | default(2) }}b (sink replica), verify replicates to {{ sink_id | default(2) }}a + {{ sink_id | default(2) }}c ===="
+
+# Update one item on {{ sink_id | default(2) }}b (not via hub) -- write_docs targets that node directly.  Then a marker
+# propagation confirms replication SB -> SA + SC.  The "both halves of the stored CV" check
+# from Karmel's spec is N/A here since the new lane is dormant; the data-replication check
+# is the load-bearing observation.
+- ansible.builtin.import_playbook: ../../../toolbox/writes/write_docs.yml
+  vars:
+    target: "{{ sink_id | default(2) }}b"
+    db_name: db1
+    id_prefix: "users/sink1/family/local-update"
+    count: 1
+
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_marker_propagation.yml
+  vars:
+    db_name: db1
+    source: "{{ sink_id | default(2) }}b"
+    targets: ["{{ sink_id | default(2) }}a", "{{ sink_id | default(2) }}c"]
+    marker_id_prefix: "users/sink1/family/local-update/"
+    timeout_secs: 120
+
+
+# =====================================================================================
+# SECTION 10 -- DONE
+# =====================================================================================
+
+- name: RP-1 -- DONE
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.debug:
+        msg: >-
+          RP-1 PASS  hub=[{{ hub_id | default(1) }}a,{{ hub_id | default(1) }}b,{{ hub_id | default(1) }}c]  sink=[{{ sink_id | default(2) }}a,{{ sink_id | default(2) }}b,{{ sink_id | default(2) }}c]  db=db1
+          CV-boundary regression guard, per-family inventory walk, sink internal-replication
+          verification all held.
