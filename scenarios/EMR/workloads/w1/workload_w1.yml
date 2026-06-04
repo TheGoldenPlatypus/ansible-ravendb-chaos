@@ -4,23 +4,33 @@
 # Thin ansible wrapper around workload_w1.sh -- validates inputs, exports group_vars-derived
 # values as env vars, exec's the script.  See workload_w1.sh for the workload logic.
 #
-# W-1 is the EMR-plan's continuous doc CRUD mix (70/20/10 update/put-new/delete).  Used by
-# RV-1, RV-2, RP-2, SK-1, SK-2.  Lives under scenarios/EMR/workloads/w1/ (not toolbox/)
-# because it bakes in the EMR plan's MicroDocs collection convention.
+# W-1 is the EMR-plan's continuous doc CRUD mix (70/20/10 update/put-new/delete).
+#
+# TWO MODES (passed through to the script):
+#   * Single-bucket: pass id_prefix + pool_size.
+#   * Multi-bucket (RPV-1): pass buckets_spec (pipe-separated "prefix:pool:weight" triples).
 #
 # INPUTS:
 #   target          REQUIRED.  Node to direct writes at (e.g. 1a).
 #   db_name         REQUIRED.  Database name.
-#   id_prefix       REQUIRED.  Prefix of the seeded pool ids.
-#   pool_size       REQUIRED.  Number of ids in the seeded pool.
 #   duration_secs   REQUIRED.  Wall-clock seconds.
+#   buckets_spec    OPTIONAL.  Multi-bucket spec.  If set, id_prefix/pool_size are ignored.
+#   id_prefix       OPTIONAL.  Single-bucket prefix.  Required with pool_size if buckets_spec not set.
+#   pool_size       OPTIONAL.  Single-bucket pool size.
+#   writer_id       OPTIONAL.  Distinct id (e.g. 1..4) when launching multiple W-1 instances in
+#                              parallel against the same (target, db) -- becomes a pidfile suffix
+#                              so each instance gets its own /tmp/w1-...-wN.pid.  Unset = legacy
+#                              single-writer pidfile (RPV-1's contract).
 #
 # RUN EXAMPLES:
+#   # Single-bucket (legacy):
 #   ansible-playbook scenarios/EMR/workloads/w1/workload_w1.yml \
 #       -e target=1a -e db_name=db1 -e id_prefix=seed -e pool_size=10000 -e duration_secs=300
 #
-#   # Background use from a scenario:
-#   nohup ansible-playbook scenarios/EMR/workloads/w1/workload_w1.yml -e ... </dev/null >/tmp/w1.log 2>&1 &
+#   # Multi-bucket (RPV-1 default 40/40/20 group split):
+#   ansible-playbook scenarios/EMR/workloads/w1/workload_w1.yml \
+#       -e target=1a -e db_name=db1 -e duration_secs=600 \
+#       -e 'buckets_spec=users/sink1:2000:20|orders/sink1:2000:20|users/sink2:2000:20|orders/sink2:2000:20|users/hub:2000:7|orders/hub:2000:7|Internal:3000:6'
 ##################################################################################################
 
 - name: W-1 doc CRUD mix
@@ -34,10 +44,11 @@
         that:
           - target is defined
           - db_name is defined
-          - id_prefix is defined
-          - pool_size is defined and (pool_size | int) > 0
-          - duration_secs is defined and (duration_secs | int) > 0
-        fail_msg: "Required: -e target=<node> -e db_name=<db> -e id_prefix=<p> -e pool_size=<N> -e duration_secs=<secs>"
+          - (buckets_spec is defined) or (id_prefix is defined and pool_size is defined and (pool_size | int) > 0)
+        fail_msg: >-
+          Required: -e target=<node> -e db_name=<db> AND
+          either -e buckets_spec='...' OR -e id_prefix=<p> -e pool_size=<N>.
+          OPTIONAL: -e duration_secs=<secs>  (default = 0 = run until killed via stop_workload).
 
     - name: Run workload_w1.sh
       ansible.builtin.command:
@@ -45,12 +56,14 @@
       environment:
         TARGET: "{{ target }}"
         DB_NAME: "{{ db_name }}"
-        ID_PREFIX: "{{ id_prefix }}"
-        POOL_SIZE: "{{ pool_size }}"
-        DURATION_SECS: "{{ duration_secs }}"
+        DURATION_SECS: "{{ duration_secs | default(0) }}"
         RAVEN_DOMAIN: "{{ ravendb_domain }}"
         CERT_PEM: "{{ cert_dir }}/client.pem"
         CA_CRT: "{{ cert_ca_crt }}"
+        BUCKETS_SPEC: "{{ buckets_spec | default('') }}"
+        ID_PREFIX: "{{ id_prefix | default('') }}"
+        POOL_SIZE: "{{ pool_size | default('') }}"
+        WRITER_ID: "{{ writer_id | default('') }}"
       register: out
 
     - name: Done

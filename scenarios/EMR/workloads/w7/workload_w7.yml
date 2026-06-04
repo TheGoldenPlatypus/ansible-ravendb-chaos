@@ -1,0 +1,54 @@
+##################################################################################################
+# scenarios/EMR/workloads/w7/workload_w7.yml
+#
+# Thin ansible wrapper around workload_w7.sh (writer).  See workload_w7.sh for the workload
+# logic.  W-7 is the RV-1 Phase 3 single-doc revision firehose -- writes ~16k revs/min on
+# DOC_ID (users/hot) for $duration_secs.
+#
+# For the matching concurrent reader (latency + voron stats sampler) see workload_w7_reader.yml.
+#
+# INPUTS:
+#   target          REQUIRED.  Node to direct writes at.
+#   db_name         REQUIRED.  Database name.
+#   duration_secs   REQUIRED.  Wall-clock seconds (RV-1 spec: 3600 = 60 min).
+#   doc_id          REQUIRED.  Single doc to hammer (RV-1 spec: users/hot).
+#   collection      OPTIONAL.  RavenDB collection name.  Default "HotDocs".
+#
+# RUN EXAMPLE:
+#   ansible-playbook scenarios/EMR/workloads/w7/workload_w7.yml \
+#       -e target=1a -e db_name=db1 -e doc_id=users/hot -e duration_secs=3600
+##################################################################################################
+
+- name: W-7 single-doc revision firehose (RV-1 Phase 3)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - target is defined
+          - db_name is defined
+          - duration_secs is defined and (duration_secs | int) > 0
+          - doc_id is defined
+        fail_msg: >-
+          Required: -e target=<node> -e db_name=<db> -e duration_secs=<secs> -e doc_id=<id>.
+
+    - name: Run workload_w7.sh
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/workload_w7.sh"
+      environment:
+        TARGET: "{{ target }}"
+        DB_NAME: "{{ db_name }}"
+        DURATION_SECS: "{{ duration_secs }}"
+        DOC_ID: "{{ doc_id }}"
+        COLLECTION: "{{ collection | default('HotDocs') }}"
+        RAVEN_DOMAIN: "{{ ravendb_domain }}"
+        CERT_PEM: "{{ cert_dir }}/client.pem"
+        CA_CRT: "{{ cert_ca_crt }}"
+      register: out
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: "{{ out.stdout }}"
