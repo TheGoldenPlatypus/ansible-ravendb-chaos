@@ -61,6 +61,7 @@ COMMON_OVERRIDES=(
     -e "cluster_id_start=$CLUSTER_ID_START"
     -e "cluster_id=$CLUSTER_ID_START"
     -e "docker_network_name=$DOCKER_NETWORK_NAME"
+    -e "backups_volume_name=lab_backups_${DOCKER_NETWORK_NAME}"
 )
 
 echo "==> RV-1 run: cluster_id_start=$CLUSTER_ID_START  docker_network_name=$DOCKER_NETWORK_NAME"

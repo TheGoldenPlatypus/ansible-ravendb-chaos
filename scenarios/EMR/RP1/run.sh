@@ -61,6 +61,7 @@ COMMON_OVERRIDES=(
     -e "hub_id=$HUB_ID"
     -e "sink_id=$SINK_ID"
     -e "docker_network_name=$DOCKER_NETWORK_NAME"
+    -e "backups_volume_name=lab_backups_${DOCKER_NETWORK_NAME}"
 )
 
 echo "==> RP-1 run: hub=${HUB_ID}a/b/c  sink=${SINK_ID}a/b/c  docker_network_name=$DOCKER_NETWORK_NAME"
