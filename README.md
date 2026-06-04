@@ -56,7 +56,7 @@ Four pre-built cert files (`ca.crt`, `ca.key`, `server.pfx`, `client.pfx`) live 
 
 > https://drive.google.com/file/d/1frqQp_3ZeSvoDfTBhj8YoSO6XgFc76q8/view?usp=sharing
 
-Bring your own `license.json` (from your RavenDB account) and drop it next to the four cert files. Default lookup path is `/mnt/c/dev/hub-sink/selfsignedmaterials/` - override `cert_dir` in `inventory/group_vars/all.yml` if you put it elsewhere.
+Bring your own `license.json` (from your RavenDB account) and drop it next to the four cert files. Default lookup path is `/home/kaiju-1/EMR/selfsignedmaterials/` - override `cert_dir` in `inventory/group_vars/all.yml` if you put it elsewhere.
 
 ---
 

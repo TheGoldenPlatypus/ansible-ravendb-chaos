@@ -1,0 +1,6 @@
+# Force LF line endings on files that get executed on Linux, regardless of the
+# OS the commit was authored on.  Windows checkouts of *.sh with CRLF cause
+# `/bin/bash^M: bad interpreter` on Linux.
+*.sh        text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
