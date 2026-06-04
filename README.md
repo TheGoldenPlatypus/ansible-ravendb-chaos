@@ -16,7 +16,13 @@
 | python 3 | ansible runs on python |
 | ansible (>= 2.15) | the playbook runner |
 
-The `ravendb.ravendb` ansible collection ships with the standard ansible distribution, so you don't have to install it separately.
+Install the required ansible collections (one-time, per controller):
+
+```bash
+ansible-galaxy collection install -r requirements.yml
+```
+
+This pulls `ravendb.ravendb`, `community.docker`, `community.general`, and `ansible.posix`. Older ansible distributions used to bundle `ravendb.ravendb` automatically; newer ones don't, so installing explicitly avoids the "role `ravendb.ravendb.ravendb_node` was not found" error on a fresh clone.
 
 ### Linux / WSL2
 

@@ -128,7 +128,10 @@
         networks:
           - name: "{{ docker_network_name }}"
         networks_cli_compatible: true
-        purge_networks: true
+        # community.docker >=4.0 dropped purge_networks; the equivalent is
+        # comparisons.networks=strict (drop any extra networks not listed above).
+        comparisons:
+          networks: strict
         volumes:
           - /sys/fs/cgroup:/sys/fs/cgroup:rw
         tmpfs:
