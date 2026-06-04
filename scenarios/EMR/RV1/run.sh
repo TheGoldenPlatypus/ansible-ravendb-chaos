@@ -36,6 +36,10 @@ V_OLD="${1:-}"
 V_NEW_BUILD="${2:-}"
 CLUSTER_ID_START="${3:-1}"
 DOCKER_NETWORK_NAME="${4:-hubsinknet}"
+# Consume the 4 positional args; whatever's left in "$@" is extra `-e foo=bar` overrides
+# the caller wants to pass through to the scenario playbook (e.g. smoke-mode sizing).
+shift 4 2>/dev/null || true
+EXTRA_VARS=("$@")
 
 if [ -z "$V_OLD" ] || [ -z "$V_NEW_BUILD" ]; then
   echo "Usage: $0 <v_old_version> <v_new_deb_path> [cluster_id_start] [docker_network_name]" >&2
@@ -87,11 +91,13 @@ run ansible-playbook playbooks/form_clusters.yml \
     "${COMMON_OVERRIDES[@]}" \
     -e clusters_count=1 -e nodes_per_cluster=3
 
-# 3. run RV-1
+# 3. run RV-1.  Forward any extra `-e` overrides the caller appended on the cmdline so
+#    smoke-mode sizing (e.g. -e phase1_seed_count=500) actually reaches the scenario.
 run ansible-playbook scenarios/EMR/RV1/rv1.yml \
     "${COMMON_OVERRIDES[@]}" \
     -e v_old="$V_OLD" \
-    -e v_new_build="$V_NEW_BUILD"
+    -e v_new_build="$V_NEW_BUILD" \
+    "${EXTRA_VARS[@]}"
 
 echo
 echo "==> RV-1 finished."

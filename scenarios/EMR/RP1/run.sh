@@ -32,6 +32,9 @@ export PYTHONDONTWRITEBYTECODE=1
 V_NEW_BUILD="${1:-}"
 CLUSTER_ID_START="${2:-1}"
 DOCKER_NETWORK_NAME="${3:-hubsinknet}"
+# Consume positionals; rest of "$@" is extra `-e foo=bar` overrides for the scenario.
+shift 3 2>/dev/null || true
+EXTRA_VARS=("$@")
 
 if [ -z "$V_NEW_BUILD" ]; then
   echo "Usage: $0 <v_new_deb_path> [cluster_id_start] [docker_network_name]" >&2
@@ -88,8 +91,11 @@ run ansible-playbook playbooks/form_clusters.yml \
     -e clusters_count=2 -e nodes_per_cluster=3
 
 # 3. run RP-1
+# Forward any extra `-e` overrides the caller appended on the cmdline so smoke-mode
+# sizing (e.g. -e bulk_users_sink1=200) actually reaches the scenario.
 run ansible-playbook scenarios/EMR/RP1/rp1.yml \
-    "${COMMON_OVERRIDES[@]}"
+    "${COMMON_OVERRIDES[@]}" \
+    "${EXTRA_VARS[@]}"
 
 echo
 echo "==> RP-1 finished."
