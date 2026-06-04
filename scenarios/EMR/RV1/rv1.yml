@@ -262,7 +262,7 @@
           -e target={{ cluster_id | default(1) }}a -e custom_build={{ v_new_build }} --skip-tags download \
           > /tmp/rv1-upgrade-{{ cluster_id | default(1) }}a.log 2>&1
         ansible-playbook toolbox/wait/wait_for_member.yml \
-          -e cluster_leader={{ peer_map['{{ cluster_id | default(1) }}a'] }} -e db_name={{ db_name }} \
+          -e cluster_leader={{ peer_map[((cluster_id | default(1)) | string) ~ 'a'] }} -e db_name={{ db_name }} \
           -e target={{ cluster_id | default(1) }}a -e timeout_secs={{ member_budget_secs | default(300) | int }} \
           > /tmp/rv1-member-{{ cluster_id | default(1) }}a.log 2>&1
       args:
@@ -326,7 +326,7 @@
           -e target={{ cluster_id | default(1) }}b -e custom_build={{ v_new_build }} --skip-tags download \
           > /tmp/rv1-upgrade-{{ cluster_id | default(1) }}b.log 2>&1
         ansible-playbook toolbox/wait/wait_for_member.yml \
-          -e cluster_leader={{ peer_map['{{ cluster_id | default(1) }}b'] }} -e db_name={{ db_name }} \
+          -e cluster_leader={{ peer_map[((cluster_id | default(1)) | string) ~ 'b'] }} -e db_name={{ db_name }} \
           -e target={{ cluster_id | default(1) }}b -e timeout_secs={{ member_budget_secs | default(300) | int }} \
           > /tmp/rv1-member-{{ cluster_id | default(1) }}b.log 2>&1
       args:
@@ -386,7 +386,7 @@
           -e target={{ cluster_id | default(1) }}c -e custom_build={{ v_new_build }} --skip-tags download \
           > /tmp/rv1-upgrade-{{ cluster_id | default(1) }}c.log 2>&1
         ansible-playbook toolbox/wait/wait_for_member.yml \
-          -e cluster_leader={{ peer_map['{{ cluster_id | default(1) }}c'] }} -e db_name={{ db_name }} \
+          -e cluster_leader={{ peer_map[((cluster_id | default(1)) | string) ~ 'c'] }} -e db_name={{ db_name }} \
           -e target={{ cluster_id | default(1) }}c -e timeout_secs={{ member_budget_secs | default(300) | int }} \
           > /tmp/rv1-member-{{ cluster_id | default(1) }}c.log 2>&1
       args:

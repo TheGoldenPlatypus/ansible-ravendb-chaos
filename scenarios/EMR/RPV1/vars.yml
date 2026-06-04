@@ -94,16 +94,25 @@ upgrade_step_3: "{{ sink2_cluster_nodes }}"
 # Peer-query map for wait_for_member -- for each node, gives a cluster peer to query
 # its topology from.  Variant-agnostic: any variant's upgrade order picks a peer in the
 # SAME cluster as the target (so the topology query stays inside one cluster).
-peer_map:
-  "{{ hub_id | default(1) }}a":   "{{ hub_id | default(1) }}b"
-  "{{ hub_id | default(1) }}b":   "{{ hub_id | default(1) }}c"
-  "{{ hub_id | default(1) }}c":   "{{ hub_id | default(1) }}a"
-  "{{ sink1_id | default(2) }}a": "{{ sink1_id | default(2) }}b"
-  "{{ sink1_id | default(2) }}b": "{{ sink1_id | default(2) }}c"
-  "{{ sink1_id | default(2) }}c": "{{ sink1_id | default(2) }}a"
-  "{{ sink2_id | default(3) }}a": "{{ sink2_id | default(3) }}b"
-  "{{ sink2_id | default(3) }}b": "{{ sink2_id | default(3) }}c"
-  "{{ sink2_id | default(3) }}c": "{{ sink2_id | default(3) }}a"
+#
+# Build as a single Jinja expression -- templated KEYS in a YAML dict literal don't
+# resolve reliably through import_playbook / vars_files scoping, leaving the dict with
+# keys like literal "{{ sink1_id... }}a" and peer_map['8a'] lookups failing with
+# "'dict object' has no attribute '8a'".
+peer_map: >-
+  {{
+    {
+      ((hub_id   | default(1)) | string) ~ 'a': ((hub_id   | default(1)) | string) ~ 'b',
+      ((hub_id   | default(1)) | string) ~ 'b': ((hub_id   | default(1)) | string) ~ 'c',
+      ((hub_id   | default(1)) | string) ~ 'c': ((hub_id   | default(1)) | string) ~ 'a',
+      ((sink1_id | default(2)) | string) ~ 'a': ((sink1_id | default(2)) | string) ~ 'b',
+      ((sink1_id | default(2)) | string) ~ 'b': ((sink1_id | default(2)) | string) ~ 'c',
+      ((sink1_id | default(2)) | string) ~ 'c': ((sink1_id | default(2)) | string) ~ 'a',
+      ((sink2_id | default(3)) | string) ~ 'a': ((sink2_id | default(3)) | string) ~ 'b',
+      ((sink2_id | default(3)) | string) ~ 'b': ((sink2_id | default(3)) | string) ~ 'c',
+      ((sink2_id | default(3)) | string) ~ 'c': ((sink2_id | default(3)) | string) ~ 'a'
+    }
+  }}
 
 # ---------- Budgets (in seconds) --------------------------------------------
 member_budget_secs: 300

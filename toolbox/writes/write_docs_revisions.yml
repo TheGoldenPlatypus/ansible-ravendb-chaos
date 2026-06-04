@@ -47,7 +47,18 @@
         URL="https://{{ target }}.{{ ravendb_domain }}:443/databases/{{ db_name }}"
         PEM="{{ cert_dir }}/client.pem"
         CA="{{ cert_ca_crt }}"
-        OK=0; ERR=0
+        TOTAL=$(( {{ count | int }} * {{ revs_per_doc | int }} ))
+        # Progress tick: TOTAL/20 -- at most 500, at least 1 -- so we get ~20 lines for
+        # any size run.  Lines also go to a side log; `tail -f /tmp/write_docs_revisions-*.log`
+        # from another shell to watch live.
+        TICK=$(( TOTAL / 20 ))
+        [ $TICK -lt 1 ]   && TICK=1
+        [ $TICK -gt 500 ] && TICK=500
+        OK=0; ERR=0; DONE=0
+        START=$(date +%s)
+        LOG=/tmp/write_docs_revisions-{{ target }}-{{ db_name }}.log
+        : > "$LOG"
+        echo "writing $TOTAL PUTs to $URL ({{ count | int }} docs x {{ revs_per_doc | int }} revs) -- tick every $TICK" | tee -a "$LOG" >&2
         for v in $(seq 1 {{ revs_per_doc | int }}); do
           for n in $(seq 0 {{ (count | int) - 1 }}); do
             id="{{ id_prefix | default('seed') }}/$n"
@@ -56,9 +67,17 @@
               -X PUT "$URL/docs?id=$id" \
               -H "Content-Type: application/json" -d "$body")
             if [ "$code" = "200" ] || [ "$code" = "201" ]; then OK=$((OK+1)); else ERR=$((ERR+1)); fi
+            DONE=$((DONE+1))
+            if [ $((DONE % TICK)) -eq 0 ] || [ $DONE -eq $TOTAL ]; then
+              ELAPSED=$(( $(date +%s) - START ))
+              [ $ELAPSED -lt 1 ] && ELAPSED=1
+              RATE=$(( DONE / ELAPSED ))
+              PCT=$(( DONE * 100 / TOTAL ))
+              echo "  [$PCT%] done=$DONE/$TOTAL  ok=$OK  err=$ERR  ${RATE} PUT/s  ${ELAPSED}s" | tee -a "$LOG" >&2
+            fi
           done
         done
-        echo "WROTE  ok=$OK  errors=$ERR  expected=$(( {{ count | int }} * {{ revs_per_doc | int }} ))"
+        echo "WROTE  ok=$OK  errors=$ERR  expected=$TOTAL"
       register: out
 
     - name: Done

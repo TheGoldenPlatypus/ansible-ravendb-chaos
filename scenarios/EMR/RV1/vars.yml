@@ -25,10 +25,17 @@ upgrade_order:
   - "{{ cluster_id | default(1) }}c"
 
 # Peer-query map for wait_for_member -- next-letter wrap inside the cluster.
-peer_map:
-  "{{ cluster_id | default(1) }}a": "{{ cluster_id | default(1) }}b"
-  "{{ cluster_id | default(1) }}b": "{{ cluster_id | default(1) }}c"
-  "{{ cluster_id | default(1) }}c": "{{ cluster_id | default(1) }}a"
+# Built as a single Jinja expression so the templated KEYS resolve before the dict is
+# constructed; YAML dict literals with templated keys don't render in import_playbook /
+# vars_files scope, leaving peer_map['1a'] lookups failing with "no attribute '1a'".
+peer_map: >-
+  {{
+    {
+      ((cluster_id | default(1)) | string) ~ 'a': ((cluster_id | default(1)) | string) ~ 'b',
+      ((cluster_id | default(1)) | string) ~ 'b': ((cluster_id | default(1)) | string) ~ 'c',
+      ((cluster_id | default(1)) | string) ~ 'c': ((cluster_id | default(1)) | string) ~ 'a'
+    }
+  }}
 
 # ---------- Phase 1 -- v_62 -> v_new full chain -----------------------------
 # Per the RV-1 spec: "10k docs x 5 revs = 50k revisions seeded in v_62 raw-CV form."
