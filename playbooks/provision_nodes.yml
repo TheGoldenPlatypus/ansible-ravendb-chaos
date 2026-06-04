@@ -29,12 +29,17 @@
   gather_facts: false
 
   tasks:
-    - name: Build the list of container names (1a, 1b, ..., 2a, 2b, ...)
+    # cluster_id_start defaults to 1 -- single-lab runs name containers 1a/1b/.../2a/...
+    # For parallel runs on the same docker host, override -e cluster_id_start=4 (or any
+    # offset) so each parallel run's containers occupy a disjoint cluster_id range and
+    # don't collide globally on the docker daemon.
+    - name: Build the list of container names (<cluster_id_start>a, b, c, ...)
       ansible.builtin.set_fact:
         container_names: "{{ raw_names.split() }}"
       vars:
+        cluster_id_start_eff: "{{ cluster_id_start | default(1) | int }}"
         raw_names: |-
-          {% for cluster in range(1, clusters_count | int + 1) %}
+          {% for cluster in range(cluster_id_start_eff | int, (cluster_id_start_eff | int) + (clusters_count | int)) %}
           {% for letter in 'abcdefghijklmnopqrstuvwxyz'[: nodes_per_cluster | int] %}
           {{ cluster }}{{ letter }}
           {% endfor %}

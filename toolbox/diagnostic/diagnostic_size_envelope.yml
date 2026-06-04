@@ -13,6 +13,11 @@
 #   db_name           REQUIRED.  Database name.
 #   nodes             REQUIRED.  JSON list of nodes to probe.
 #   baseline_file     REQUIRED.  Absolute path to the baseline JSON file.
+#   informational_only  OPTIONAL.  Default false.  When true, prints the growth table but
+#                                  skips the assertion.  Use when the workload is heavily
+#                                  writer-concentrated (writer-target legitimately grows
+#                                  multiple-x past baseline due to Voron page pre-allocation)
+#                                  and you want operator-eyeball signal, not a hard ceiling.
 #   max_growth_pct    OPTIONAL.  Default 300.  Per-node growth ceiling vs baseline.
 #                                Sized to catch runaway leaks (revision table not cleaned up,
 #                                tombstones piling up forever, etc.) which produce multi-x
@@ -123,10 +128,24 @@
         msg: "{{ growth }}"
       when: baseline_stat.stat.exists
 
+    - name: Note informational_only mode (skipping the assertion)
+      ansible.builtin.debug:
+        msg: >-
+          INFO-ONLY  storage envelope NOT asserted (informational_only=true).
+          Growth values printed above are for operator review.  EMR_TESTING_PLAN's I-8
+          ("monotonic voron growth past envelope") is a directional invariant -- the
+          threshold here is policy, not from the spec; single-point % growth is not the
+          right shape for that check anyway.
+      when:
+        - baseline_stat.stat.exists
+        - (informational_only | default(false) | bool)
+
     - name: Assert every node is within budget
       ansible.builtin.assert:
         that:
           - (growth.values() | map(attribute='pct') | max) <= (max_growth_pct | default(300) | float)
         fail_msg: "FAIL  storage envelope blown (>{{ max_growth_pct | default(300) }}%): {{ growth }}"
         success_msg: "PASS  storage envelope within {{ max_growth_pct | default(300) }}%: {{ growth }}"
-      when: baseline_stat.stat.exists
+      when:
+        - baseline_stat.stat.exists
+        - not (informational_only | default(false) | bool)

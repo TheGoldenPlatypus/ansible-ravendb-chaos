@@ -66,6 +66,10 @@
       ansible.builtin.debug:
         msg: "Will cut {{ pairs | length }} pair(s) via {{ cut_tool }} (mode={{ effective_mode }})"
 
+    # chdir to the repo root so the relative path `toolbox/network/cut_link.yml` resolves.
+    # playbook_dir here = .../toolbox/network/  -- go up TWO levels (../../) to reach the
+    # repo root.  Previously this was `playbook_dir/..` which only went up to `toolbox/`
+    # and the subprocess then failed to find `toolbox/network/cut_link.yml`.
     - name: Run cut_link per pair
       ansible.builtin.command:
         cmd: >-
@@ -73,7 +77,7 @@
           {% if effective_mode == 'ssh' %}-i inventory/ssh_hosts.yml{% endif %}
           -e node_a={{ item.0 }}
           -e node_b={{ item.1 }}
-        chdir: "{{ playbook_dir }}/.."
+        chdir: "{{ playbook_dir }}/../.."
       environment:
         ANSIBLE_BECOME_PASS: "{{ ansible_become_pass | default('') }}"
       register: cut_runs
