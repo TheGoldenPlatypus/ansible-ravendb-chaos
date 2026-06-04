@@ -70,6 +70,7 @@ fi
 # ---------- 5. strip the /etc/hosts block (requires sudo) -----------------------------------------
 if grep -q 'ANSIBLE MANAGED CHAOS LAB' /etc/hosts 2>/dev/null; then
   say "==> stripping /etc/hosts block (requires sudo)"
+  # form_clusters.yml writes one block per docker network -- nuke them all.
   sudo sed -i '/# BEGIN ANSIBLE MANAGED CHAOS LAB/,/# END ANSIBLE MANAGED CHAOS LAB/d' /etc/hosts
 fi
 

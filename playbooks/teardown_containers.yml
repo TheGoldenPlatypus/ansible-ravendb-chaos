@@ -56,7 +56,9 @@
 
   tasks:
     - name: Remove the ANSIBLE MANAGED CHAOS LAB block from /etc/hosts
+      # Match the per-network marker scoped by form_clusters.yml so a parallel
+      # teardown only strips ITS scenario's host block, not the other scenarios'.
       ansible.builtin.blockinfile:
         path: /etc/hosts
-        marker: "# {mark} ANSIBLE MANAGED CHAOS LAB"
+        marker: "# {mark} ANSIBLE MANAGED CHAOS LAB ({{ docker_network_name | default('default') }})"
         state: absent

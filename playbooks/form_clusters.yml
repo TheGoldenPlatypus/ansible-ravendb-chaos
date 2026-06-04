@@ -137,7 +137,11 @@
     - name: Upsert the ANSIBLE MANAGED CHAOS LAB block in /etc/hosts
       ansible.builtin.blockinfile:
         path: /etc/hosts
-        marker: "# {mark} ANSIBLE MANAGED CHAOS LAB"
+        # Scope the marker per docker network so parallel scenarios (RV-1 on rv1net,
+        # RP-1 on rp1net, RPV-1 on rpv1net) maintain DISJOINT /etc/hosts blocks instead
+        # of stomping on each other -- otherwise the second scenario's form_clusters
+        # erases the first scenario's host entries and curl rc=6 follows.
+        marker: "# {mark} ANSIBLE MANAGED CHAOS LAB ({{ docker_network_name | default('default') }})"
         block: "{{ hostvars['localhost'].hosts_block }}"
 
 
@@ -158,7 +162,11 @@
     - name: Upsert the ANSIBLE MANAGED CHAOS LAB block in /etc/hosts (on target)
       ansible.builtin.blockinfile:
         path: /etc/hosts
-        marker: "# {mark} ANSIBLE MANAGED CHAOS LAB"
+        # Scope the marker per docker network so parallel scenarios (RV-1 on rv1net,
+        # RP-1 on rp1net, RPV-1 on rpv1net) maintain DISJOINT /etc/hosts blocks instead
+        # of stomping on each other -- otherwise the second scenario's form_clusters
+        # erases the first scenario's host entries and curl rc=6 follows.
+        marker: "# {mark} ANSIBLE MANAGED CHAOS LAB ({{ docker_network_name | default('default') }})"
         block: "{{ hostvars['localhost'].hosts_block }}"
         unsafe_writes: true
 
