@@ -486,12 +486,12 @@ ansible-playbook toolbox/control/pause_gate.yml \
 # legacy-format counter from a v_old smuggler dump fixture.
 ansible-playbook toolbox/backup/smuggler_import.yml -K \
     -e target=1a -e db_name=db1 \
-    -e dump_path=$PWD/scenarios/EMR/RP1/fixtures/legacy-counter.ravendbdump
+    -e dump_path=$PWD/scenarios/company-1/RP1/fixtures/legacy-counter.ravendbdump
 
 # No-op if fixture file isn't present (useful for optional fixtures)
 ansible-playbook toolbox/backup/smuggler_import.yml -K \
     -e target=1a -e db_name=db1 \
-    -e dump_path=$PWD/scenarios/EMR/RP1/fixtures/legacy-counter.ravendbdump \
+    -e dump_path=$PWD/scenarios/company-1/RP1/fixtures/legacy-counter.ravendbdump \
     -e skip_if_missing=true
 ```
 
@@ -856,31 +856,31 @@ RESET (heal everything + drop+recreate DBs + rewire replication; one-liner via `
 
 ---
 
-## 4.5. EMR workloads (`scenarios/EMR/workloads/`)
+## 4.5. company-1 workloads (`scenarios/company-1/workloads/`)
 
-Continuous background workloads driven by the EMR scenarios.  All accept a pidfile-based start/stop contract — pair with `toolbox/workloads/wait_for_workload_started.yml` and `stop_workload.yml`.
+Continuous background workloads driven by the company-1 scenarios.  All accept a pidfile-based start/stop contract — pair with `toolbox/workloads/wait_for_workload_started.yml` and `stop_workload.yml`.
 
 ### `workload_w1.yml` -- doc CRUD churn (70% update / 20% put-new / 10% delete)
 
 ```bash
 # Single-bucket (legacy mode)
-ansible-playbook scenarios/EMR/workloads/w1/workload_w1.yml \
+ansible-playbook scenarios/company-1/workloads/w1/workload_w1.yml \
     -e target=1a -e db_name=db1 -e id_prefix=seed -e pool_size=10000 -e duration_secs=300
 
 # Multi-bucket (RPV-1 mode) -- weighted prefix:pool_size:weight triples
-ansible-playbook scenarios/EMR/workloads/w1/workload_w1.yml \
+ansible-playbook scenarios/company-1/workloads/w1/workload_w1.yml \
     -e target=1a -e db_name=db1 -e duration_secs=600 \
     -e 'buckets_spec=users/sink1:2000:13|orders/sink1:2000:13|users/hub:2000:14|Internal:3000:20'
 
 # Multi-writer parallel (RV-1's 4-writer pattern) -- use WRITER_ID for disjoint pidfiles
-nohup ansible-playbook scenarios/EMR/workloads/w1/workload_w1.yml \
+nohup ansible-playbook scenarios/company-1/workloads/w1/workload_w1.yml \
     -e target=1a -e db_name=db1 -e id_prefix=seed -e pool_size=200 -e writer_id=1 &
-nohup ansible-playbook scenarios/EMR/workloads/w1/workload_w1.yml \
+nohup ansible-playbook scenarios/company-1/workloads/w1/workload_w1.yml \
     -e target=1a -e db_name=db1 -e id_prefix=seed -e pool_size=200 -e writer_id=2 &
 # ... etc
 
 # Indefinite mode -- omit duration_secs, kill via stop_workload
-ansible-playbook scenarios/EMR/workloads/w1/workload_w1.yml \
+ansible-playbook scenarios/company-1/workloads/w1/workload_w1.yml \
     -e target=1a -e db_name=db1 -e id_prefix=seed -e pool_size=200
 ```
 
@@ -888,7 +888,7 @@ ansible-playbook scenarios/EMR/workloads/w1/workload_w1.yml \
 
 ```bash
 # Same shape as W-1 -- single-bucket or multi-bucket.  NO doc CRUD (that's W-1's job).
-ansible-playbook scenarios/EMR/workloads/w2/workload_w2.yml \
+ansible-playbook scenarios/company-1/workloads/w2/workload_w2.yml \
     -e target=1a -e db_name=db1 -e duration_secs=600 \
     -e 'buckets_spec=users/sink1:2000:13|orders/sink1:2000:13|users/hub:2000:14|Internal:3000:20'
 ```
@@ -898,12 +898,12 @@ ansible-playbook scenarios/EMR/workloads/w2/workload_w2.yml \
 ```bash
 # N workers (default 8) racing delete -> revert-from-revision -> put -> +att -> -att.
 # Requires `jq` on the controller.
-ansible-playbook scenarios/EMR/workloads/w3/workload_w3.yml \
+ansible-playbook scenarios/company-1/workloads/w3/workload_w3.yml \
     -e target=1a -e db_name=db1 -e duration_secs=300 \
     -e id_prefix=hot -e pool_size=1000
 
 # Custom writer count
-ansible-playbook scenarios/EMR/workloads/w3/workload_w3.yml \
+ansible-playbook scenarios/company-1/workloads/w3/workload_w3.yml \
     -e target=1a -e db_name=db1 -e duration_secs=300 \
     -e id_prefix=hot -e pool_size=1000 -e writers=4
 ```
@@ -913,7 +913,7 @@ ansible-playbook scenarios/EMR/workloads/w3/workload_w3.yml \
 ```bash
 # Hammer the filter boundary by interleaving writes to an in-allowed prefix vs an out-allowed
 # prefix.  Used by RP-2 step 6 (widen + narrow with backlog under W-4 load).
-ansible-playbook scenarios/EMR/workloads/w4/workload_w4.yml \
+ansible-playbook scenarios/company-1/workloads/w4/workload_w4.yml \
     -e target=1a -e db_name=db1 \
     -e in_prefix=users -e out_prefix=orders \
     -e pool_size=1000 -e duration_secs=60
@@ -924,7 +924,7 @@ ansible-playbook scenarios/EMR/workloads/w4/workload_w4.yml \
 ```bash
 # Launch TWO instances on opposite sides of a partition with same id_prefix + pool_size and
 # DISTINCT side_label so the resulting writes conflict on heal.  Used by RP-2 step 20.
-ansible-playbook scenarios/EMR/workloads/w5/workload_w5.yml \
+ansible-playbook scenarios/company-1/workloads/w5/workload_w5.yml \
     -e target=1a -e db_name=db1 \
     -e id_prefix=users/conflict -e pool_size=500 \
     -e side_label=majority -e duration_secs=180
@@ -936,7 +936,7 @@ ansible-playbook scenarios/EMR/workloads/w5/workload_w5.yml \
 # One curl PUT loop targeting users/hot for the configured duration.  spec target:
 # 16k revs/min for 60 min -> 1M revisions.  Actual rate is whatever a single writer
 # can sustain; final PUT count printed at exit.
-ansible-playbook scenarios/EMR/workloads/w7/workload_w7.yml \
+ansible-playbook scenarios/company-1/workloads/w7/workload_w7.yml \
     -e target=1a -e db_name=db1 -e doc_id=users/hot -e duration_secs=3600
 ```
 
@@ -945,7 +945,7 @@ ansible-playbook scenarios/EMR/workloads/w7/workload_w7.yml \
 ```bash
 # Every 30s GET /revisions?id=users/hot (full history); every 5min snapshot SizeOnDisk +
 # CountOfRevisionDocuments.  Log lands at /tmp/w7-reader-1a-db1.log.
-ansible-playbook scenarios/EMR/workloads/w7/workload_w7_reader.yml \
+ansible-playbook scenarios/company-1/workloads/w7/workload_w7_reader.yml \
     -e target=1a -e db_name=db1 -e doc_id=users/hot -e duration_secs=3600
 ```
 
@@ -1138,9 +1138,9 @@ Info-only by default; pass `assert_mode: true` to make a parity / invariant kind
 
 ---
 
-## 5. EMR scenarios (`scenarios/EMR/`)
+## 5. company-1 scenarios (`scenarios/company-1/`)
 
-Active scenarios: **RV-1**, **RP-1**, **RP-2**, **RPV-1** — each implements one slice of [`EMR_TESTING_PLAN/scenarios.md`](EMR_TESTING_PLAN/scenarios.md).
+Active scenarios: **RV-1**, **RP-1**, **RP-2**, **RPV-1** — each implements one slice of [`company-1_TESTING_PLAN/scenarios.md`](company-1_TESTING_PLAN/scenarios.md).
 
 Common conventions:
 * Each scenario has a `run.sh` wrapper: `teardown → provision → install → form_clusters → scenario`.
@@ -1155,10 +1155,10 @@ sweep across the union dataset.
 
 ```bash
 # End-to-end (~90 min full spec sizing)
-scenarios/EMR/RV1/run.sh 6.2.15 builds/raven-pr22875.deb
+scenarios/company-1/RV1/run.sh 6.2.15 builds/raven-pr22875.deb
 
 # Shakedown (~5 min) -- lab already up
-ansible-playbook scenarios/EMR/RV1/rv1.yml -K \
+ansible-playbook scenarios/company-1/RV1/rv1.yml -K \
     -e v_old=6.2.15 -e v_new_build=$PWD/builds/raven-pr22875.deb \
     -e phase1_seed_count=200 -e phase1_seed_revs_per_doc=2 \
     -e phase2_hot_count=20 -e phase2_hot_revs_per_doc=3 -e phase2_churn_duration_secs=30 \
@@ -1171,17 +1171,17 @@ ansible-playbook scenarios/EMR/RV1/rv1.yml -K \
 
 1 hub + 1 filtered-pull sink (RF=3 each).  W-0 deterministic bulk seed + per-family inventory
 (one item per replication-item type, **including a legacy-format counter from a smuggler dump
-fixture** — see [`scenarios/EMR/RP1/fixtures/README.md`](scenarios/EMR/RP1/fixtures/README.md)).
+fixture** — see [`scenarios/company-1/RP1/fixtures/README.md`](scenarios/company-1/RP1/fixtures/README.md)).
 Burst: 10k `users/sink1/active/*` writes + 2k delete/restore-from-revision iterations.
 Asserts I-13 (a)/(b)/(c) + I-7 + I-5/I-6.  spec step 8: local update on `sink/b`, verify
 replicates to `a/c`.
 
 ```bash
 # End-to-end (~12 min spec sizing)
-scenarios/EMR/RP1/run.sh builds/raven-pr22875.deb
+scenarios/company-1/RP1/run.sh builds/raven-pr22875.deb
 
 # Shakedown (~5 min)
-ansible-playbook scenarios/EMR/RP1/rp1.yml -K \
+ansible-playbook scenarios/company-1/RP1/rp1.yml -K \
     -e bulk_users_sink1=100 -e bulk_orders_hub=100 \
     -e burst_active_count=100 -e burst_restore_iterations=50 \
     -e drain_budget_secs=60 -e filter_drain_budget_secs=180 \
@@ -1198,10 +1198,10 @@ upstream reply — the test correctly surfaces the issue).
 
 ```bash
 # End-to-end (~40 min spec sizing)
-scenarios/EMR/RP2/run.sh builds/raven-pr22875.deb
+scenarios/company-1/RP2/run.sh builds/raven-pr22875.deb
 
 # Shakedown (~10 min)
-scenarios/EMR/RP2/run.sh builds/raven-pr22875.deb \
+scenarios/company-1/RP2/run.sh builds/raven-pr22875.deb \
     -e setup_hub_users=200 -e setup_sink1_users=200 \
     -e phase_a_active_count=100 -e phase_a_conflict_count=100 -e phase_a_leak_check_count=100 \
     -e phase_b_backlog_count=100 -e phase_b_archived_count=200 \
@@ -1225,10 +1225,10 @@ variant-specific order, with checkpoints between every 3-node upgrade step.
 
 ```bash
 # End-to-end variant A (~30 min spec sizing)
-scenarios/EMR/RPV1/run.sh 6.2.15 builds/raven-pr22875.deb
+scenarios/company-1/RPV1/run.sh 6.2.15 builds/raven-pr22875.deb
 
 # Shakedown variant A (~10 min)
-ansible-playbook scenarios/EMR/RPV1/rpv1.yml -K \
+ansible-playbook scenarios/company-1/RPV1/rpv1.yml -K \
     -e v_old=6.2.15 -e v_new_build=$PWD/builds/raven-pr22875.deb \
     -e bucket_users_sink1=100 -e bucket_users_sink2=100 -e bucket_users_hub=100 \
     -e bucket_orders_sink1=100 -e bucket_orders_sink2=100 -e bucket_orders_hub=100 \
@@ -1241,14 +1241,14 @@ ansible-playbook scenarios/EMR/RPV1/rpv1.yml -K \
 
 ```bash
 # Variant B -- hub first (stresses v_new sender -> v_old receivers at Checkpoint A)
-ansible-playbook scenarios/EMR/RPV1/rpv1.yml -K \
+ansible-playbook scenarios/company-1/RPV1/rpv1.yml -K \
     -e v_old=6.2.15 -e v_new_build=$PWD/builds/raven-pr22875.deb \
     -e '{"upgrade_step_1":["1a","1b","1c"],
          "upgrade_step_2":["2a","2b","2c"],
          "upgrade_step_3":["3a","3b","3c"]}'
 
 # Variant C -- interleaved random shuffle
-ansible-playbook scenarios/EMR/RPV1/rpv1.yml -K \
+ansible-playbook scenarios/company-1/RPV1/rpv1.yml -K \
     -e v_old=6.2.15 -e v_new_build=$PWD/builds/raven-pr22875.deb \
     -e '{"upgrade_step_1":["2a","1b","3c"],
          "upgrade_step_2":["1a","3b","2c"],
@@ -1274,13 +1274,13 @@ Export the BECOME password once so no shell re-prompts:
 read -rsp "BECOME password: " ANSIBLE_BECOME_PASS; echo; export ANSIBLE_BECOME_PASS
 
 # Shell A
-scenarios/EMR/RV1/run.sh 6.2.15 builds/raven-pr22875.deb 1 rv1net   ...  2>&1 | tee logs/rv1-$(date +%Y%m%d-%H%M).log
+scenarios/company-1/RV1/run.sh 6.2.15 builds/raven-pr22875.deb 1 rv1net   ...  2>&1 | tee logs/rv1-$(date +%Y%m%d-%H%M).log
 # Shell B
-scenarios/EMR/RP1/run.sh builds/raven-pr22875.deb 2 rp1net          ...  2>&1 | tee logs/rp1-$(date +%Y%m%d-%H%M).log
+scenarios/company-1/RP1/run.sh builds/raven-pr22875.deb 2 rp1net          ...  2>&1 | tee logs/rp1-$(date +%Y%m%d-%H%M).log
 # Shell C
-scenarios/EMR/RP2/run.sh builds/raven-pr22875.deb 4 rp2net          ...  2>&1 | tee logs/rp2-$(date +%Y%m%d-%H%M).log
+scenarios/company-1/RP2/run.sh builds/raven-pr22875.deb 4 rp2net          ...  2>&1 | tee logs/rp2-$(date +%Y%m%d-%H%M).log
 # Shell D
-scenarios/EMR/RPV1/run.sh 6.2.15 builds/raven-pr22875.deb 7 rpv1net ...  2>&1 | tee logs/rpv1-$(date +%Y%m%d-%H%M).log
+scenarios/company-1/RPV1/run.sh 6.2.15 builds/raven-pr22875.deb 7 rpv1net ...  2>&1 | tee logs/rpv1-$(date +%Y%m%d-%H%M).log
 ```
 
 All four in parallel = 27 RavenDB containers.  WSL2 default kernel limits (`pid_max=32768`)
