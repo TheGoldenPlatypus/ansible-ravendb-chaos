@@ -1,0 +1,46 @@
+##################################################################################################
+# toolbox/network/inject_egress_delay.yml
+#
+# Add a fixed egress latency to a container's primary interface via `tc qdisc netem`.  Used by
+# RP-2 phase (b) sub-phase "out-of-order injection" -- holds packets on hub node 1a long enough
+# to reorder arrival at sink relative to other hub peers.
+#
+# Pairs with clear_egress_delay.yml -- always clear before scenario teardown or the qdisc
+# persists across runs (it's bound to the container's eth0, not the network).
+#
+# DOCKER MODE ONLY for now (matches the rest of toolbox/network/*).  SSH-mode variant would
+# need `become: true` + `tc` installed on the host.
+#
+# INPUTS:
+#   target        REQUIRED.  Container name (e.g. 1a).
+#   delay_ms      REQUIRED.  Delay in milliseconds (e.g. 2000).
+#   interface     OPTIONAL.  Default "eth0".
+#
+# RUN:
+#   ansible-playbook toolbox/network/inject_egress_delay.yml -K \
+#       -e target=1a -e delay_ms=2000
+##################################################################################################
+
+- name: Inject egress delay via tc netem
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - target is defined
+          - delay_ms is defined
+          - (delay_ms | int) > 0
+        fail_msg: "Required: -e target=<container> -e delay_ms=<ms>"
+
+    - name: docker exec -- tc qdisc replace netem delay
+      ansible.builtin.command:
+        cmd: docker exec {{ target }} tc qdisc replace dev {{ interface | default('eth0') }} root netem delay {{ delay_ms | int }}ms
+      register: out
+      changed_when: true
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: "EGRESS-DELAY  {{ target }}:{{ interface | default('eth0') }} = {{ delay_ms }}ms"

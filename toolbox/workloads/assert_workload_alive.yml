@@ -42,12 +42,28 @@
       register: probe
       changed_when: false
 
+    # On NO_PIDFILE / EMPTY_PIDFILE / DEAD: dump the worker's debug log so we can
+    # see WHY it died (signal received, last op, last HTTP code, etc).  The .sh
+    # writes /tmp/wN-<target>-<db>[-w<id>].debug.log alongside its pidfile.
+    - name: Dump worker debug log on failure (if present)
+      ansible.builtin.shell: |
+        log="{{ pidfile | regex_replace('\\.pid$', '.debug.log') }}"
+        if [ -f "$log" ]; then echo "=== $log ==="; tail -n 60 "$log"; else echo "(no debug log at $log)"; fi
+      register: debug_dump
+      changed_when: false
+      when: probe.stdout is not search('^ALIVE ')
+
+    - name: Show worker debug log
+      ansible.builtin.debug:
+        msg: "{{ debug_dump.stdout_lines }}"
+      when: probe.stdout is not search('^ALIVE ')
+
     - name: Assert workload is alive
       ansible.builtin.assert:
         that:
           - probe.stdout is search('^ALIVE ')
         fail_msg: >-
           WORKLOAD DIED  pidfile={{ pidfile }}  state="{{ probe.stdout }}"
-          -- a background worker exited before the scenario stopped it; results from
-          this phase may be partial (degraded write load).
+          -- a background worker exited before the scenario stopped it; debug log
+          dumped above.  Results from this phase may be partial (degraded write load).
         success_msg: "WORKLOAD ALIVE  pidfile={{ pidfile }}  {{ probe.stdout }}"

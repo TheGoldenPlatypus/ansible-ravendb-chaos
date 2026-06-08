@@ -31,9 +31,6 @@
   gather_facts: false
 
   tasks:
-    # Multi-line banner -- passing msg as a list-of-strings makes ansible's default callback
-    # print each item on its own line (a single `|-` block scalar would get \n-escaped in the
-    # default callback's JSON dump and render as one line of literal "\n" sequences).
     - name: ">>> Section banner"
       ansible.builtin.debug:
         msg:
