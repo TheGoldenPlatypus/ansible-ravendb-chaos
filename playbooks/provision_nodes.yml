@@ -102,6 +102,27 @@
       # `until` clause decides.
       failed_when: false
 
+    # Hard verification: every container we asked for must actually be Running.
+    # The systemd-wait task above swallows docker-exec failures via failed_when:false,
+    # so a container that never spawned (image pull error, name collision on a different
+    # network, docker daemon transient) would slip through.  Catch that here.
+    - name: Verify every container is in state=running
+      ansible.builtin.shell: |
+        docker inspect -f '{% raw %}{{.State.Running}}{% endraw %}' {{ item }} 2>/dev/null || echo "MISSING"
+      loop: "{{ container_names }}"
+      register: ps_check
+      changed_when: false
+
+    - name: Fail loud if any container is missing or not running
+      ansible.builtin.assert:
+        that:
+          - ps_check.results | rejectattr('stdout', 'equalto', 'true') | list | length == 0
+        fail_msg: >-
+          PROVISION FAILED  expected {{ container_names | length }} containers
+          ({{ container_names | join(', ') }}); not running:
+          {{ ps_check.results | rejectattr('stdout', 'equalto', 'true') | map(attribute='item') | list }}
+        success_msg: "All {{ container_names | length }} containers running"
+
     - name: Show what we provisioned
       ansible.builtin.debug:
         msg: "Provisioned {{ container_names | length }} container(s) on '{{ docker_network_name }}': {{ container_names | join(', ') }}"
