@@ -29,7 +29,14 @@ echo "RPV-1  hub=${HUB}a/b/c  sink1=${S1}a/b/c  sink2=${S2}a/b/c  net=$NET  v_ol
 
 step "teardown";    ansible-playbook playbooks/teardown_containers.yml "${C[@]}"
 step "provision";   ansible-playbook playbooks/provision_nodes.yml     "${C[@]}" -e clusters_count=3 -e nodes_per_cluster=3
-step "install";     ansible-playbook playbooks/install_ravendb.yml     "${C[@]}" -e rdb_version="$V_OLD"
+# Default: role downloads v_old from S3.  Set V_OLD_DEB=<path> in env to use a cached .deb.
+if [ -n "${V_OLD_DEB:-}" ]; then
+  step "install v_old (cached: $V_OLD_DEB)"
+  ansible-playbook playbooks/install_ravendb.yml "${C[@]}" -e custom_build="$V_OLD_DEB" --skip-tags download
+else
+  step "install v_old (S3 download)"
+  ansible-playbook playbooks/install_ravendb.yml "${C[@]}" -e rdb_version="$V_OLD"
+fi
 step "form";        ansible-playbook playbooks/form_clusters.yml       "${C[@]}" -e clusters_count=3 -e nodes_per_cluster=3
 step "rpv1";        ansible-playbook scenarios/company-1/RPV1/rpv1.yml       "${C[@]}" -e v_old="$V_OLD" -e v_new_build="$V_NEW" "${EXTRA[@]}"
 
