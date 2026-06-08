@@ -1,0 +1,127 @@
+# scenarios/EMR/RPV1/vars.yml -- shared config for the new RPV-1
+# (cross-cluster v_62 -> v_new rolling upgrade across T3, filter-aware)
+
+# ---------- Topology -- T3: 1 hub + 2 sink clusters, 9 nodes total ------------
+db_name: db1
+
+# Default cluster ids -- hub at 1, sink-1 at 2, sink-2 at 3.  For parallel runs on the
+# same docker host, override -e hub_id=4 -e sink1_id=5 -e sink2_id=6 (and matching
+# -e cluster_id_start=4 on provision_nodes + -e docker_network_name=<unique-net>).
+# All three ids must be DISJOINT across concurrent runs.
+hub_id: 1
+sink1_id: 2
+sink2_id: 3
+
+# Derived (these defaults are also inlined at every import_playbook call site in rpv1.yml
+# because vars.yml is not reachable from that scope).
+hub_cluster_leader: "{{ hub_id | default(1) }}a"
+hub_cluster_nodes:
+  - "{{ hub_id | default(1) }}a"
+  - "{{ hub_id | default(1) }}b"
+  - "{{ hub_id | default(1) }}c"
+
+sink1_cluster_leader: "{{ sink1_id | default(2) }}a"
+sink1_cluster_nodes:
+  - "{{ sink1_id | default(2) }}a"
+  - "{{ sink1_id | default(2) }}b"
+  - "{{ sink1_id | default(2) }}c"
+
+sink2_cluster_leader: "{{ sink2_id | default(3) }}a"
+sink2_cluster_nodes:
+  - "{{ sink2_id | default(3) }}a"
+  - "{{ sink2_id | default(3) }}b"
+  - "{{ sink2_id | default(3) }}c"
+
+# ---------- Seed -- 7 prefix buckets on Hub, 15k docs total ------------------
+# Override per bucket with -e bucket_X=N for a fast dev shakedown.
+bucket_users_sink1:  2000
+bucket_users_sink2:  2000
+bucket_users_hub:    2000
+bucket_orders_sink1: 2000
+bucket_orders_sink2: 2000
+bucket_orders_hub:   2000
+bucket_internal:     3000
+
+# ---------- Filter spec -- disjoint sink filters; hub-only collections stay on hub ----
+sink1_allowed_prefixes: ["users/sink1/*", "orders/sink1/*"]
+sink2_allowed_prefixes: ["users/sink2/*", "orders/sink2/*"]
+
+# ---------- Per-bucket parity loop -- 7 buckets across the right clusters ---------
+# Each entry: prefix, count (pool_size), nodes (where the bucket is expected to land).
+# Used by Section 12 to loop the existing diagnostic_doc_id_set_parity tool per bucket.
+all_buckets:
+  - { prefix: "users/sink1",  count: "{{ bucket_users_sink1  | default(2000) | int }}", nodes: "{{ sink1_cluster_nodes }}" }
+  - { prefix: "orders/sink1", count: "{{ bucket_orders_sink1 | default(2000) | int }}", nodes: "{{ sink1_cluster_nodes }}" }
+  - { prefix: "users/sink2",  count: "{{ bucket_users_sink2  | default(2000) | int }}", nodes: "{{ sink2_cluster_nodes }}" }
+  - { prefix: "orders/sink2", count: "{{ bucket_orders_sink2 | default(2000) | int }}", nodes: "{{ sink2_cluster_nodes }}" }
+  - { prefix: "users/hub",    count: "{{ bucket_users_hub    | default(2000) | int }}", nodes: "{{ hub_cluster_nodes }}" }
+  - { prefix: "orders/hub",   count: "{{ bucket_orders_hub   | default(2000) | int }}", nodes: "{{ hub_cluster_nodes }}" }
+  - { prefix: "Internal",     count: "{{ bucket_internal     | default(3000) | int }}", nodes: "{{ hub_cluster_nodes }}" }
+
+# ---------- Default-segment fallback for the per-collection revisions config -----------
+# Used by configure_revisions when collections_config is set -- governs collections that
+# aren't named (none here; the RPV-1 spec lists Users/Orders/Internal, the full set).
+default_keep: 25
+default_max_age_secs: 21600
+
+# ---------- Workload -- W-1 + W-2 on Hub through the rolling upgrade ---------
+# Per the RPV-1 spec: "continuous from T0 through endpoint".  No duration var -- W-1 + W-2
+# run indefinitely until Section 12's explicit stop_workload kills them.  No more "what if
+# the scenario takes longer than the duration" race.
+
+# Per the RPV-1 spec: W-1 + W-2 hit the 3 collections weighted 40 / 40 / 20
+# (users / orders / Internal).  Within each collection the buckets get an even split:
+#   users   = sink1 (13) + sink2 (13) + hub (14) = 40
+#   orders  = sink1 (13) + sink2 (13) + hub (14) = 40
+#   Internal = 20
+# Format is workload_w*.sh's BUCKETS_SPEC: pipe-separated "prefix:pool_size:weight" triples.
+workload_buckets_spec: "users/sink1:{{ bucket_users_sink1 | default(2000) | int }}:13|orders/sink1:{{ bucket_orders_sink1 | default(2000) | int }}:13|users/sink2:{{ bucket_users_sink2 | default(2000) | int }}:13|orders/sink2:{{ bucket_orders_sink2 | default(2000) | int }}:13|users/hub:{{ bucket_users_hub | default(2000) | int }}:14|orders/hub:{{ bucket_orders_hub | default(2000) | int }}:14|Internal:{{ bucket_internal | default(3000) | int }}:20"
+
+# ---------- Probe sets for parity asserts -----------------------------------
+parity_probe_count: 50
+
+# How many revision CVs to sample per (node, prefix) for the lane-inert check.
+lane_inert_sample_per_prefix: 25
+
+# ---------- Variant -- which 3 nodes get upgraded at each step --------------
+# Variant A (sinks first) is the default.  B and C variants change these three lists
+# (override on the CLI: -e '{"upgrade_step_1":[...], "upgrade_step_2":[...], "upgrade_step_3":[...]}').
+# Variant A: sink-1 -> hub -> sink-2
+upgrade_step_1: "{{ sink1_cluster_nodes }}"
+upgrade_step_2: "{{ hub_cluster_nodes }}"
+upgrade_step_3: "{{ sink2_cluster_nodes }}"
+
+# Peer-query map for wait_for_member -- for each node, gives a cluster peer to query
+# its topology from.  Variant-agnostic: any variant's upgrade order picks a peer in the
+# SAME cluster as the target (so the topology query stays inside one cluster).
+#
+# Build as a single Jinja expression -- templated KEYS in a YAML dict literal don't
+# resolve reliably through import_playbook / vars_files scoping, leaving the dict with
+# keys like literal "{{ sink1_id... }}a" and peer_map['8a'] lookups failing with
+# "'dict object' has no attribute '8a'".
+peer_map: >-
+  {{
+    {
+      ((hub_id   | default(1)) | string) ~ 'a': ((hub_id   | default(1)) | string) ~ 'b',
+      ((hub_id   | default(1)) | string) ~ 'b': ((hub_id   | default(1)) | string) ~ 'c',
+      ((hub_id   | default(1)) | string) ~ 'c': ((hub_id   | default(1)) | string) ~ 'a',
+      ((sink1_id | default(2)) | string) ~ 'a': ((sink1_id | default(2)) | string) ~ 'b',
+      ((sink1_id | default(2)) | string) ~ 'b': ((sink1_id | default(2)) | string) ~ 'c',
+      ((sink1_id | default(2)) | string) ~ 'c': ((sink1_id | default(2)) | string) ~ 'a',
+      ((sink2_id | default(3)) | string) ~ 'a': ((sink2_id | default(3)) | string) ~ 'b',
+      ((sink2_id | default(3)) | string) ~ 'b': ((sink2_id | default(3)) | string) ~ 'c',
+      ((sink2_id | default(3)) | string) ~ 'c': ((sink2_id | default(3)) | string) ~ 'a'
+    }
+  }}
+
+# ---------- Budgets (in seconds) --------------------------------------------
+member_budget_secs: 300
+drain_budget_secs: 180
+quiesce_budget_secs: 1200
+filter_drain_budget_secs: 600
+
+# Budget for post-workload-stop tombstone-count convergence (Section 12).  RavenDB's
+# background tombstone cleanup runs on its own timer; etag stability says "no new writes"
+# but per-node counts only equalize once cleanup has caught up.  300s = 5min ceiling;
+# bump for slower labs.
+tombstone_settle_timeout_secs: 300

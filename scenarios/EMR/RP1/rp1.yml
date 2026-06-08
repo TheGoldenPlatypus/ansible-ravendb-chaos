@@ -1,0 +1,846 @@
+##################################################################################################
+# scenarios/EMR/RP1/rp1.yml
+#
+# Two 3-node clusters: a "hub" cluster (1a/1b/1c) and a "sink" cluster (2a/2b/2c).
+# The hub pulls only docs matching `users/sink1/*` over to the sink; everything else stays
+# on the hub.  All 6 nodes run the same new RavenDB build the whole way -- no upgrades here.
+#
+# What this scenario does:
+#   pre.  Sanity-check inputs.
+#   1.    Create the database on both clusters and wire up the filtered pull
+#         (hub -> sink, allowed path = users/sink1/*).
+#   3.    Baseline snapshot: capture each cluster leader's DatabaseChangeVector while the DB
+#         is still empty.  This is the "before" picture step 6 will diff against.
+#   2.    Seed the hub with users + orders + inventory docs.  Wait for the filtered set
+#         to land on the sink.
+#   4.    Burst workload: a wave of new users/sink1/active/* writes plus 2000 rounds of
+#         "delete a doc, then restore its previous revision".  Stresses the filter + the
+#         revisions path.
+#   5.    Wait for replication to settle and for tombstone cleanup to converge.
+#   6.    Post-batch snapshot: capture each cluster leader's DatabaseChangeVector again and
+#         print baseline-vs-post side by side so you can eyeball the delta -- hub should have
+#         advanced, sink should have moved with it, no rogue dbId entries appeared.
+#   7.    Cluster is quiet now -- check the invariants:
+#           * only filter-matching docs reached the sink
+#           * no docs in restricted families crossed over
+#           * change vectors line up between hub and sink
+#           * no replication lag, no stuck queue
+#   8.    Edit a doc on sink node 2b directly and confirm the change makes it to peers 2a + 2c
+#         (in-cluster replication still works alongside the pull-from-hub task).
+#
+# Deep version (invariants, risks, validators) -> EMR_TESTING_PLAN/scenarios.md (RP-1).
+#
+# PREREQ -- bring up a clean lab with 2 clusters x 3 nodes on the new RavenDB build.
+#
+#   1. ansible-playbook playbooks/teardown_containers.yml -K
+#   2. ansible-playbook playbooks/provision_nodes.yml -K -e clusters_count=2 -e nodes_per_cluster=3
+#   3. ansible-playbook playbooks/install_ravendb.yml -K -e custom_build=<path to .deb> --skip-tags download
+#   4. ansible-playbook playbooks/form_clusters.yml -K -e clusters_count=2 -e nodes_per_cluster=3
+#
+# RUN:
+#   ansible-playbook scenarios/EMR/RP1/rp1.yml -K
+##################################################################################################
+
+
+# ----- pre: validate inputs + show plan -------------------------------------------------------
+
+- name: RP-1 pre -- validate inputs + show plan
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - ansible.builtin.debug:
+        msg: >-
+          RP-1  hub=[{{ hub_id | default(1) }}a,{{ hub_id | default(1) }}b,{{ hub_id | default(1) }}c]  sink=[{{ sink_id | default(2) }}a,{{ sink_id | default(2) }}b,{{ sink_id | default(2) }}c]  filter=users/sink1/*
+          bulk_users_sink1={{ bulk_users_sink1 }}  bulk_orders_hub={{ bulk_orders_hub }}
+          burst_active={{ burst_active_count }}  burst_restore={{ burst_restore_iterations }}
+
+
+# ----- step 1: create the database on both clusters + wire the filtered pull ------------------
+- ansible.builtin.import_playbook: ../../../toolbox/db/create_database.yml
+  vars: { cluster_leader: "{{ hub_id | default(1) }}a", db_name: db1, replication_factor: 3 }
+- ansible.builtin.import_playbook: ../../../toolbox/db/create_database.yml
+  vars: { cluster_leader: "{{ sink_id | default(2) }}a", db_name: db1, replication_factor: 3 }
+
+- name: RP-1 step 1 -- configure revisions + wire filtered pull hub -> sink
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: "Configure revisions on hub 1a/db1"
+      ravendb_revisions:
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Hub-side: define the PullReplicationAsHub task + per-sink access entry.
+    - name: "Define hub pull task 'rp1-hub' + access entry for sink"
+      ravendb_tasks:
+        kind: define_hub
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        hub_leader: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        hub_task_name: rp1-hub
+        sink_cluster_ids: ["{{ sink_id | default(2) | int }}"]
+        sink_allowed_paths: "{{ {(sink_id | default(2) | int | string): ['users/sink1/*']} }}"
+        replication_certs_dir: "{{ playbook_dir }}/../../../replication-certs"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Sink-side: create the sink-pull task that pulls from the hub topology.
+    - name: "Attach sink pull task to hub topology (filter users/sink1/*)"
+      ravendb_tasks:
+        kind: attach_sinks
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        hub_task_name: rp1-hub
+        hub_topology_urls:
+          - "https://{{ hub_id | default(1) }}a.hubsink.test:443"
+          - "https://{{ hub_id | default(1) }}b.hubsink.test:443"
+          - "https://{{ hub_id | default(1) }}c.hubsink.test:443"
+        sink_cluster_ids: ["{{ sink_id | default(2) | int }}"]
+        sink_allowed_paths: "{{ {(sink_id | default(2) | int | string): ['users/sink1/*']} }}"
+        replication_certs_dir: "{{ playbook_dir }}/../../../replication-certs"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ----- step 3: baseline snapshot before any data is written -----------------------------------
+- name: RP-1 step 3 -- baseline change-vector capture (hub + sink, pre-seed)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Reset capture dir for this run
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/capture"
+        state: absent
+    - ansible.builtin.file:
+        path: "{{ playbook_dir }}/capture/baseline"
+        state: directory
+
+    - name: "Capture baseline change vectors on hub + sink leaders"
+      ravendb_diagnostic:
+        kind: capture_cv
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes:
+          - "{{ hub_id | default(1) }}a"
+          - "{{ sink_id | default(2) }}a"
+        output_dir: "{{ playbook_dir }}/capture/baseline"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ----- step 2: seed the hub with users, orders, and one of every replication-item type --------
+- name: RP-1 step 2a -- W-0 bulk seed on hub
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Seed Users (users/sink1/*, count=bulk_users_sink1, 1 rev) on hub 1a/db1"
+      ravendb_writes:
+        kind: docs_revisions
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        id_prefix: "users/sink1"
+        collection: "Users"
+        count: "{{ bulk_users_sink1 | default(10000) | int }}"
+        revs_per_doc: 1
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Seed Orders (orders/hub/*, count=bulk_orders_hub, 1 rev) on hub 1a/db1"
+      ravendb_writes:
+        kind: docs_revisions
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        id_prefix: "orders/hub"
+        collection: "Orders"
+        count: "{{ bulk_orders_hub | default(10000) | int }}"
+        revs_per_doc: 1
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# Per-family inventory: one item per replication-item type, all under users/sink1/family/* so
+# the filtered pull picks them up.  Asserted at step 7 via stored_item_cv_split on the sink.
+- name: RP-1 step 2b -- per-family inventory (doc, tombstone, revision, attachment, counter, TS, ...)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    # 1. plain document
+    - name: "Family inventory: write plain doc users/sink1/family/doc/0"
+      ravendb_writes:
+        kind: docs
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        id_prefix: "users/sink1/family/doc"
+        count: 1
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # 2. document tombstone (create + delete)
+    - name: "Family inventory: write doc users/sink1/family/doctomb/0 (to be tombstoned)"
+      ravendb_writes:
+        kind: docs
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        id_prefix: "users/sink1/family/doctomb"
+        count: 1
+
+    - name: "Family inventory: delete users/sink1/family/doctomb/0 (create doc tombstone)"
+      ravendb_writes:
+        kind: delete
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        id_prefix: "users/sink1/family/doctomb"
+        count: 1
+
+    # 4. revision document (3 distinct revisions)
+    - name: "Family inventory: write revisioned doc users/sink1/family/rev/0 (3 revisions)"
+      ravendb_writes:
+        kind: docs_revisions
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        id_prefix: "users/sink1/family/rev"
+        collection: "Users"
+        count: 1
+        revs_per_doc: 3
+
+    # 5. revision tombstone (revisioned doc that gets deleted)
+    - name: "Family inventory: write revisioned doc users/sink1/family/revtomb/0 (3 revisions)"
+      ravendb_writes:
+        kind: docs_revisions
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        id_prefix: "users/sink1/family/revtomb"
+        collection: "Users"
+        count: 1
+        revs_per_doc: 3
+
+    - name: "Family inventory: delete users/sink1/family/revtomb/0 (create revision tombstone)"
+      ravendb_writes:
+        kind: delete
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        id_prefix: "users/sink1/family/revtomb"
+        count: 1
+
+    # 6 + 7. attachment metadata + stream
+    - name: "Family inventory: write attachment-host doc users/sink1/family/att/0"
+      ravendb_writes:
+        kind: docs
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        id_prefix: "users/sink1/family/att"
+        count: 1
+
+    - name: "Family inventory: attach 'data' stream to users/sink1/family/att/0"
+      ravendb_writes:
+        kind: attachments
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        doc_id_prefix: "users/sink1/family/att"
+        attachment_name: "data"
+        count: 1
+
+    # 8. attachment tombstone (create attachment + delete inline)
+    - name: "Family inventory: write attachment-host doc users/sink1/family/atttomb/0"
+      ravendb_writes:
+        kind: docs
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        id_prefix: "users/sink1/family/atttomb"
+        count: 1
+
+    - name: "Family inventory: attach 'data' stream to users/sink1/family/atttomb/0"
+      ravendb_writes:
+        kind: attachments
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        doc_id_prefix: "users/sink1/family/atttomb"
+        attachment_name: "data"
+        count: 1
+
+    - name: DELETE attachment on users/sink1/family/atttomb/0
+      ansible.builtin.uri:
+        url: "https://{{ hub_id | default(1) }}a.{{ ravendb_domain }}:443/databases/db1/attachments?id=users/sink1/family/atttomb/0&name=data"
+        method: DELETE
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        status_code: [204, 404]
+
+    # 9. counter group
+    - name: "Family inventory: write counter-host doc users/sink1/family/cnt/0"
+      ravendb_writes:
+        kind: docs
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        id_prefix: "users/sink1/family/cnt"
+        count: 1
+
+    - name: "Family inventory: increment 'likes' counter on users/sink1/family/cnt/0"
+      ravendb_writes:
+        kind: counters
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        doc_id: "users/sink1/family/cnt/0"
+        counter_name: "likes"
+        delta: 1
+
+    # 10. time-series segment
+    - name: "Family inventory: write time-series host doc users/sink1/family/ts/0"
+      ravendb_writes:
+        kind: docs
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        id_prefix: "users/sink1/family/ts"
+        count: 1
+
+    - name: "Family inventory: append 5 Heartrate samples to users/sink1/family/ts/0"
+      ravendb_writes:
+        kind: timeseries
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        doc_id: "users/sink1/family/ts/0"
+        ts_name: "Heartrate"
+        count: 5
+        interval_seconds: 60
+        start_timestamp: "2026-01-01T00:00:00.000Z"
+
+    # 11. deleted time-series range (create + delete a range from it)
+    - name: "Family inventory: write time-series host doc users/sink1/family/tsdel/0"
+      ravendb_writes:
+        kind: docs
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        id_prefix: "users/sink1/family/tsdel"
+        count: 1
+
+    - name: "Family inventory: append 10 Heartrate samples to users/sink1/family/tsdel/0"
+      ravendb_writes:
+        kind: timeseries
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        doc_id: "users/sink1/family/tsdel/0"
+        ts_name: "Heartrate"
+        count: 10
+        interval_seconds: 60
+        start_timestamp: "2026-01-01T00:00:00.000Z"
+
+    - name: "Family inventory: delete Heartrate range 00:02-00:05 on users/sink1/family/tsdel/0"
+      ravendb_writes:
+        kind: timeseries
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        doc_id: "users/sink1/family/tsdel/0"
+        ts_name: "Heartrate"
+        delete_from: "2026-01-01T00:02:00.000Z"
+        delete_to:   "2026-01-01T00:05:00.000Z"
+
+
+# 3. conflict document -- partition hub <-> sink, write the same id with different bodies
+#    on both sides, then heal.
+- ansible.builtin.import_playbook: ../../../toolbox/network/partition_set.yml
+  vars:
+    set_a: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
+    set_b: ["{{ sink_id | default(2) }}a", "{{ sink_id | default(2) }}b", "{{ sink_id | default(2) }}c"]
+
+- name: RP-1 step 2c -- create conflict document under partition
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: PUT users/sink1/family/conflict/0 on hub with body version=hub
+      ansible.builtin.uri:
+        url: "https://{{ hub_id | default(1) }}a.{{ ravendb_domain }}:443/databases/db1/docs?id=users/sink1/family/conflict/0"
+        method: PUT
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        body_format: json
+        body: { "src": "hub", "v": "A", "@metadata": { "@collection": "Users" } }
+        status_code: [200, 201]
+
+    - name: PUT users/sink1/family/conflict/0 on sink with body version=sink (different content)
+      ansible.builtin.uri:
+        url: "https://{{ sink_id | default(2) }}a.{{ ravendb_domain }}:443/databases/db1/docs?id=users/sink1/family/conflict/0"
+        method: PUT
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        body_format: json
+        body: { "src": "sink", "v": "B", "@metadata": { "@collection": "Users" } }
+        status_code: [200, 201]
+
+- ansible.builtin.import_playbook: ../../../toolbox/network/heal_all.yml
+
+
+# 12. legacy counter -- seeded via a pre-built v_old smuggler dump.
+- name: RP-1 step 2d -- smuggler-import the legacy-counter fixture
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: "Smuggler-import legacy-counter fixture into hub 1a/db1"
+      ravendb_smuggler:
+        kind: import
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        dump_path: "{{ lookup('env', 'PWD') }}/scenarios/EMR/RP1/fixtures/legacy-counter.ravendbdump"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# step 2 drain: per-node etag stability on hub + sink, then baseline filter-compliance check.
+- name: RP-1 step 2e -- drain filtered pull + sink internal replication + baseline filter check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: "Wait for etag parity across hub a/b/c (post-seed drain)"
+      ravendb_wait:
+        kind: etag_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Wait for etag parity across sink a/b/c (post-seed drain)"
+      ravendb_wait:
+        kind: etag_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ sink_id | default(2) }}a", "{{ sink_id | default(2) }}b", "{{ sink_id | default(2) }}c"]
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Catches any seeding leak BEFORE the burst: orders/hub/* must NOT be on sink.
+    - name: "Baseline filter-compliance check on sink leader (allowed users/sink1/*)"
+      ravendb_diagnostic:
+        kind: filter_compliance
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        sink_cluster_leader: "{{ sink_id | default(2) }}a"
+        db_name: db1
+        allowed_prefixes: ["users/sink1/"]
+        assert_mode: true
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ----- step 4: stress burst -- new writes + a delete/restore loop -----------------------------
+# Two things hit the hub at once:
+#   * a wave of fresh users/sink1/active/* documents (covered by the filter, so they should
+#     replicate to the sink),
+#   * 2000 iterations of "delete an existing doc, then put back its previous revision"
+#     (exercises the revisions path and generates a lot of tombstones to clean up).
+
+- name: RP-1 step 4a -- burst N users/sink1/active/* writes on hub
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Burst write users/sink1/active/* (count=burst_active_count, 1 rev) on hub 1a/db1"
+      ravendb_writes:
+        kind: docs_revisions
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        id_prefix: "{{ burst_active_prefix | default('users/sink1/active') }}"
+        collection: "Users"
+        count: "{{ burst_active_count | default(10000) | int }}"
+        revs_per_doc: 1
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+- name: RP-1 step 4b -- delete/restore-from-revision burst (2k iterations on seeded pool)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    # Inline bash loop -- finite, deterministic.  Per iteration:
+    #   1. pick random id from the seeded pool
+    #   2. DELETE the doc
+    #   3. GET prior live revision (/revisions?id=X&pageSize=2 -> Results[1])
+    #   4. PUT that body back as the live doc (the "restore-from-revision" step)
+    # Requires jq on the controller.
+    - name: Delete-and-restore-from-revision burst
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -u
+          command -v jq >/dev/null 2>&1 || { echo "ERROR: jq required (apt install jq)" >&2; exit 4; }
+          URL="https://{{ hub_id | default(1) }}a.{{ ravendb_domain }}:443/databases/db1"
+          POOL_SIZE={{ burst_restore_pool_size | int }}
+          ITERATIONS={{ burst_restore_iterations | default(2000) | int }}
+          RESTORED=0; NO_PRIOR=0
+          for i in $(seq 1 $ITERATIONS); do
+            n=$((RANDOM % POOL_SIZE))
+            id="{{ burst_restore_prefix | default('users/sink1') }}/$n"
+            curl -sk -o /dev/null --cert "{{ cert_dir }}/client.pem" --cacert "{{ cert_ca_crt }}" \
+              -X DELETE "$URL/docs?id=$id" || true
+            PRIOR=$(curl -sk --cert "{{ cert_dir }}/client.pem" --cacert "{{ cert_ca_crt }}" \
+              "$URL/revisions?id=$id&pageSize=2" | jq -c '.Results[1] // empty' 2>/dev/null || echo "")
+            if [ -n "$PRIOR" ]; then
+              curl -sk -o /dev/null --cert "{{ cert_dir }}/client.pem" --cacert "{{ cert_ca_crt }}" \
+                -X PUT "$URL/docs?id=$id" -H "Content-Type: application/json" -d "$PRIOR" || true
+              RESTORED=$((RESTORED+1))
+            else
+              NO_PRIOR=$((NO_PRIOR+1))
+            fi
+          done
+          echo "RP-1 delete/restore burst DONE  iterations=$ITERATIONS  restored=$RESTORED  no_prior_rev=$NO_PRIOR"
+      register: burst_out
+      changed_when: false
+
+    - ansible.builtin.debug: { msg: "{{ burst_out.stdout }}" }
+
+
+# ----- step 5: let the dust settle ------------------------------------------------------------
+# Wait for the burst to fully replicate hub -> sink, then wait for every node in the sink
+# cluster to converge on the same tombstone count (proves cleanup propagated across peers).
+
+- name: RP-1 step 5 -- drain + tombstone settle
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    # Controller-side TCP cooldown after the burst
+    - name: Pause for controller TIME_WAIT sockets to recycle
+      ansible.builtin.pause:
+        seconds: "{{ burst_cooldown_secs | default(45) | int }}"
+      when: (burst_cooldown_secs | default(45) | int) > 0
+
+    - name: "Wait for etag parity across hub a/b/c (post-burst drain)"
+      ravendb_wait:
+        kind: etag_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Wait for etag parity across sink a/b/c (post-burst drain)"
+      ravendb_wait:
+        kind: etag_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ sink_id | default(2) }}a", "{{ sink_id | default(2) }}b", "{{ sink_id | default(2) }}c"]
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Tombstone-cleanup convergence: the delete burst created tombstones; cleanup runs at
+    # different rates per node depending on each node's burst load.
+    - name: "Wait for tombstone-count convergence across sink a/b/c"
+      ravendb_wait:
+        kind: stats_field_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ sink_id | default(2) }}a", "{{ sink_id | default(2) }}b", "{{ sink_id | default(2) }}c"]
+        fields: ["CountOfTombstones"]
+        timeout: "{{ tombstone_settle_timeout_secs | default(300) | int }}"
+        poll_interval: 3
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ----- step 6: post-batch snapshot + before-vs-after diff -------------------------------------
+# Everything is quiet now.  Save each leader's change vector again and print a side-by-side
+# comparison with the baseline from step 3.
+- name: RP-1 step 6 -- post-batch change-vector capture + delta vs baseline
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.file:
+        path: "{{ playbook_dir }}/capture/postbatch"
+        state: directory
+
+    - name: "Capture post-batch change vectors on hub + sink leaders"
+      ravendb_diagnostic:
+        kind: capture_cv
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes:
+          - "{{ hub_id | default(1) }}a"
+          - "{{ sink_id | default(2) }}a"
+        output_dir: "{{ playbook_dir }}/capture/postbatch"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: Side-by-side diff of baseline vs post-batch DatabaseChangeVector
+      ansible.builtin.shell: |
+        for n in {{ hub_id | default(1) }}a {{ sink_id | default(2) }}a; do
+          echo "=== $n ==="
+          echo "baseline : $(cat {{ playbook_dir }}/capture/baseline/$n.cv 2>/dev/null || echo MISSING)"
+          echo "postbatch: $(cat {{ playbook_dir }}/capture/postbatch/$n.cv 2>/dev/null || echo MISSING)"
+          echo
+        done
+      register: cv_diff
+      changed_when: false
+    - ansible.builtin.debug: { msg: "{{ cv_diff.stdout_lines }}" }
+
+
+# ----- step 7: post-burst checkpoint on the quiet cluster -------------------------------------
+# Cluster is settled.  Run the actual assertions:
+#   * every replication-item type (doc, tombstone, revision, attachment, counter, TS, ...)
+#     made the trip from hub to sink under the filter,
+#   * nothing outside users/sink1/* leaked over,
+#   * change vectors line up between hub and sink for the items that should match,
+#   * the sink's view of the hub task is sane (no stuck queue, no resend storm).
+
+- name: RP-1 step 7 -- post-burst checkpoint
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: "Assert filter compliance on sink leader (only users/sink1/* allowed)"
+      ravendb_diagnostic:
+        kind: filter_compliance
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        sink_cluster_leader: "{{ sink_id | default(2) }}a"
+        db_name: db1
+        allowed_prefixes: ["users/sink1/"]
+        assert_mode: true
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # I-7 (no missing) + I-13(c) replica preservation: sampled doc-id-set parity across sink
+    # replicas for the bulk-seeded users/sink1/* pool.
+    - name: "Assert doc-id-set parity across sink a/b/c for users/sink1/* pool"
+      ravendb_diagnostic:
+        kind: doc_id_set_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ sink_id | default(2) }}a", "{{ sink_id | default(2) }}b", "{{ sink_id | default(2) }}c"]
+        id_prefix: "users/sink1"
+        count: "{{ parity_probe_count | default(50) | int }}"
+        assert_mode: true
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Same parity probe for the burst-written users/sink1/active/* pool.
+    - name: "Assert doc-id-set parity across sink a/b/c for users/sink1/active/* pool"
+      ravendb_diagnostic:
+        kind: doc_id_set_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ sink_id | default(2) }}a", "{{ sink_id | default(2) }}b", "{{ sink_id | default(2) }}c"]
+        id_prefix: "users/sink1/active"
+        count: "{{ parity_probe_count | default(50) | int }}"
+        assert_mode: true
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # I-13(a) item CV shape: walk the per-family inventory on the sink leader.  Builds that
+    # keep the lane dormant (PR-22875) need expect=raw -- flip back if testing those.
+    - name: "Assert per-family inventory item CV split shape on sink leader"
+      ravendb_diagnostic:
+        kind: stored_item_cv_split
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        target: "{{ sink_id | default(2) }}a"
+        expect: split
+        doc_ids:
+          - "users/sink1/family/doc/0"
+          - "users/sink1/family/rev/0"
+          - "users/sink1/family/att/0"
+          - "users/sink1/family/cnt/0"
+          - "users/sink1/family/ts/0"
+          - "users/sink1/family/tsdel/0"
+          - "users/sink1/family/conflict/0"
+          - "users/sink1/family/legacy-cnt/0"
+        assert_mode: true
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # I-13(b) DB CV order-side -- the load-bearing regression guard.  Hub -> Sink direction.
+    # Tool reports N/A on legacy raw-CV form.
+    - name: "Assert CV order-side boundary by dbid (hub -> sink direction)"
+      ravendb_diagnostic:
+        kind: cv_boundary_by_dbid
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        source_nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
+        receiver_nodes: ["{{ sink_id | default(2) }}a", "{{ sink_id | default(2) }}b", "{{ sink_id | default(2) }}c"]
+        assert_mode: true
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # I-1 + I-5/I-6: consolidated /stats parity across sink replicas (docs + tombstones +
+    # attachments + counters + time-series).  One GET/node, one table, one assertion.
+    - name: "Assert /stats parity across sink a/b/c (docs+tombstones+attachments+counters+TS)"
+      ravendb_diagnostic:
+        kind: stats_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ sink_id | default(2) }}a", "{{ sink_id | default(2) }}b", "{{ sink_id | default(2) }}c"]
+        assert_mode: true
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # I-6 "no stuck task" -- informational dump of replication connections on the sink leader.
+    - name: "Dump replication connections on sink leader (no-stuck-task check)"
+      ravendb_diagnostic:
+        kind: replication
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ sink_id | default(2) }}a"
+        db_name: db1
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ----- step 8: local edit on a sink node propagates to its peers ------------------------------
+# Pick a single doc on sink node 2b, edit it directly, and confirm the change shows up on the
+# other two sink nodes (2a, 2c).
+- name: RP-1 step 8 -- local update on SB, verify internal-replication path
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    # Write directly to {{ sink_id | default(2) }}b (not via hub).  Then a marker propagation
+    # confirms replication SB -> SA + SC.
+    - name: "Write local-update marker doc on sink 2b/db1"
+      ravendb_writes:
+        kind: docs
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ sink_id | default(2) }}b"
+        db_name: db1
+        id_prefix: "users/sink1/family/local-update"
+        count: 1
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Wait for local-update marker to propagate sink-b -> sink-a + sink-c"
+      ravendb_wait:
+        kind: marker_propagation
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        source: "{{ sink_id | default(2) }}b"
+        targets: ["{{ sink_id | default(2) }}a", "{{ sink_id | default(2) }}c"]
+        marker_id_prefix: "users/sink1/family/local-update/"
+        timeout: 120
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+- name: RP-1 done
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ansible.builtin.debug:
+        msg: >-
+          RP-1 PASS  hub=[{{ hub_id | default(1) }}a..c]  sink=[{{ sink_id | default(2) }}a..c]  db=db1
+          CV-boundary regression guard, per-family inventory walk, sink internal-replication
+          verification all held.
