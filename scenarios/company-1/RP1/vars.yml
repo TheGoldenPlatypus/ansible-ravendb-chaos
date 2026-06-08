@@ -1,0 +1,70 @@
+# scenarios/company-1/RP1/vars.yml -- shared config for RP-1 (CV-boundary regression guard).
+# T2 topology: 1 hub (1a/1b/1c, RF=3) + 1 filtered-pull sink (2a/2b/2c, RF=3), all v_new.
+
+# ---------- Topology ---------------------------------------------------------
+db_name: db1
+
+# Default cluster ids -- hub at 1, sink at 2.  For parallel runs on the same docker host,
+# override -e hub_id=4 -e sink_id=5 (and matching -e cluster_id_start=4 on provision_nodes +
+# -e docker_network_name=<unique-net>).  Hub and sink ids must be DISJOINT (sink runs in its
+# own cluster) and not collide with any other concurrent run's range.
+hub_id: 1
+sink_id: 2
+
+# Derived (these defaults are also inlined at every import_playbook call site in rp1.yml
+# because vars.yml is not reachable from that scope).
+hub_cluster_leader: "{{ hub_id | default(1) }}a"
+hub_cluster_nodes:
+  - "{{ hub_id | default(1) }}a"
+  - "{{ hub_id | default(1) }}b"
+  - "{{ hub_id | default(1) }}c"
+sink_cluster_leader: "{{ sink_id | default(2) }}a"
+sink_cluster_nodes:
+  - "{{ sink_id | default(2) }}a"
+  - "{{ sink_id | default(2) }}b"
+  - "{{ sink_id | default(2) }}c"
+
+# ---------- Filter spec ------------------------------------------------------
+# Per the RP-1 spec: "sink-1 filter `users/sink1/*`".  Plus hub-only `orders/hub/*` that
+# MUST NOT leak to the sink (I-7 filter compliance).
+sink_allowed_prefixes: ["users/sink1/*"]
+
+# ---------- W-0 bulk seed (per the RP-1 spec) -------------------------------
+# 10k users/sink1/* + 10k orders/hub/*  (the spec's RP-1 Initial State).
+# Override -e bulk_users_sink1=N etc. for shakedown runs.
+bulk_users_sink1: 10000
+bulk_orders_hub:  10000
+
+# ---------- Per-family inventory --------------------------------------------
+# Per the RP-1 spec: "one item of each replication-item type under users/sink1/family/*".
+# the spec lists 12 item types.  We implement the 10 reachable via existing toolbox tools:
+#   doc, doc-tombstone, revision-doc, revision-tombstone, attachment (meta+stream),
+#   attachment-tombstone, counter, time-series segment, deleted time-series range.
+# Skipped (with notes in rp1.yml):
+#   * conflict document   -- needs concurrent-write + partition-induced conflict (chaos
+#                            step; deeper conflict coverage lives in RP-2 phase (a)).
+#   * legacy counter      -- v_old counter binary format; cannot be created on an all-v_new
+#                            cluster.  RV-1 covers legacy form via the v_62 -> v_new migration.
+family_id_prefix: "users/sink1/family"
+
+# ---------- Burst workload --------------------------------------------------
+# Per the RP-1 spec: "10k users/sink1/active/{i} writes + 2k delete/restore ops on the
+# seeded set."  Finite, deterministic.
+burst_active_count: 10000
+burst_active_prefix: "users/sink1/active"
+burst_restore_iterations: 2000
+burst_restore_prefix: "users/sink1"       # picks from the bulk-seeded pool
+burst_restore_pool_size: "{{ bulk_users_sink1| default(10000) | int }}"
+
+# ---------- Sample sizes for parity probes ----------------------------------
+parity_probe_count: 50
+
+# ---------- Budgets (seconds) -----------------------------------------------
+drain_budget_secs: 180
+filter_drain_budget_secs: 600
+tombstone_settle_timeout_secs: 300
+
+# Controller-side TCP cooldown after the delete/restore burst (~4k+ short-lived
+# curl connections; each lingers ~60s in TIME_WAIT on the controller, exhausting
+# ephemeral ports for the next /stats probe).
+burst_cooldown_secs: 45

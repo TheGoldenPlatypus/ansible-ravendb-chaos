@@ -1,0 +1,898 @@
+##################################################################################################
+# scenarios/company-1/RV1/rv1.yml
+#
+# One 3-node cluster (1a/1b/1c).  Starts on RavenDB 6.2.15 and gets rolled, one node at a time,
+# onto the build under test.  After the upgrade the same cluster has to survive heavy churn and
+# one ridiculously revisioned document.
+#
+# What this scenario does:
+#   pre.  Sanity-check inputs.  Kill any background workloads still hanging around from a
+#         previous run.
+#   1.    Create the database with revisions set to keep everything, then seed it with 10k
+#         docs x 5 revisions each (= 50k revisions written by the old build).
+#   2.    Capture a baseline while the cluster is still quiet on the old build: schema version
+#         on every node, plus a /stats parity check across the three nodes.
+#   3.    Launch four background writers (W-1).  They keep writing all the way through the
+#         upgrade window so the rolling upgrade has to cope with live traffic.
+#   4.    Upgrade node 1a to the new build.  Run light mid-roll checks that are safe with
+#         mixed-version peers (a marker doc has to propagate, schema versions are dumped),
+#         then pause before the next node.
+#   5.    Upgrade node 1b.  Same light mid-roll checks + pause.
+#   6.    Upgrade node 1c.  Stop the background writers.  Wait for replication to drain and
+#         for tombstone counts across all three nodes to converge.
+#   7.    Cluster is fully on the new build and quiet -- run the phase-1 assertions:
+#         /stats parity, per-doc revision-count parity for the seed pool, no orphan revisions,
+#         schema versions identical across all nodes, and a size envelope baseline snapshot.
+#   8.    Seed a hot pool of 1000 docs x 30 revisions each (written by the new build), then
+#         wait for the cluster to settle.
+#   9.    Run W-3: 8 concurrent writers spend 5 minutes doing
+#         delete -> revert -> put -> add attachment -> remove attachment loops on the hot pool.
+#         Stop, drain, wait for tombstone counts to converge.
+#   10.   Phase-2 checkpoint on the hot pool: /stats parity, revision-count parity, no orphans.
+#   11.   Launch W-7 -- a single writer hammering one document (users/hot) plus a paired reader
+#         that samples latency and Voron stats.  Block until both finish naturally, then drain.
+#   12.   Phase-3 checkpoint focused on that one mega-doc: /stats parity, revision count for
+#         users/hot lines up across all nodes, no orphans, size envelope vs baseline.
+#   13.   Phase-4 sweep: revision-count parity across all three pools (seed, hot, the mega-doc).
+#   14.   Final size envelope snapshot, then done.
+#
+# The "light checks" in steps 4 and 5 are deliberately the only ones safe to run while peers
+# are on different binaries: dumping schema versions (a mix is expected) and watching a marker
+# doc propagate.  Stricter checks (full drain waits, doc-count parity) are saved for the quiet
+# checkpoints in steps 7, 10, 12 and 13 where every node is on the new build.
+#
+# Deep version (invariants, risks, validators) -> company-1_TESTING_PLAN/scenarios.md (RV-1).
+#
+# PREREQ -- bring up a clean 3-node cluster on RavenDB 6.2.15.
+#
+#   1. ansible-playbook playbooks/teardown_containers.yml -K
+#   2. ansible-playbook playbooks/provision_nodes.yml -K -e clusters_count=1 -e nodes_per_cluster=3
+#   3. ansible-playbook playbooks/install_ravendb.yml -K -e rdb_version=6.2.15
+#   4. ansible-playbook playbooks/form_clusters.yml -K -e clusters_count=1 -e nodes_per_cluster=3
+#
+# RUN:
+#   ansible-playbook scenarios/company-1/RV1/rv1.yml -K \
+#       -e v_old=6.2.15 -e v_new_build=$PWD/builds/raven-prNNN.deb
+##################################################################################################
+
+
+# ----- pre: orphan-kill + validate ------------------------------------------------------------
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars: { pidfile: "/tmp/w1-{{ cluster_id | default(1) }}a-db1-w1.pid" }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars: { pidfile: "/tmp/w1-{{ cluster_id | default(1) }}a-db1-w2.pid" }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars: { pidfile: "/tmp/w1-{{ cluster_id | default(1) }}a-db1-w3.pid" }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars: { pidfile: "/tmp/w1-{{ cluster_id | default(1) }}a-db1-w4.pid" }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars: { pidfile: "/tmp/w3-{{ cluster_id | default(1) }}a-db1.pid" }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars: { pidfile: "/tmp/w7-{{ cluster_id | default(1) }}a-db1.pid" }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars: { pidfile: "/tmp/w7r-{{ cluster_id | default(1) }}a-db1.pid" }
+
+- name: RV-1 pre -- validate inputs + show plan
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - v_old is defined
+          - v_new_build is defined
+        fail_msg: "Required: -e v_old=<6.2.x version> -e v_new_build=<path to v_new .deb>"
+
+    - ansible.builtin.debug:
+        msg: >-
+          RV-1  v_old={{ v_old }}  v_new_build={{ v_new_build }}  order={{ upgrade_order }}
+          phase1_seed={{ phase1_seed_count }}x{{ phase1_seed_revs_per_doc }}
+          phase2_hot={{ phase2_hot_count }}x{{ phase2_hot_revs_per_doc }} writers={{ phase2_writers }} dur={{ phase2_churn_duration_secs }}s
+          phase3_doc={{ phase3_doc_id }} dur={{ phase3_duration_secs }}s
+
+
+# ----- step 1: create the database (keep every revision) and seed 50k old-build revisions -----
+
+- ansible.builtin.import_playbook: ../../../toolbox/db/create_database.yml
+  vars: { cluster_leader: "{{ cluster_id | default(1) }}a", db_name: db1, replication_factor: 3 }
+
+- name: RV-1 step 1 -- configure keep-all revisions + seed 50k v_62 revs
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    # Keep every revision forever -- phase 3 hammers a single doc with ~1M revisions and we
+    # need the full history to stay around.
+    - name: "Configure keep-all revisions on 1a/db1 (minimum_revisions=1e8)"
+      ravendb_revisions:
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ cluster_id | default(1) }}a"
+        db_name: db1
+        minimum_revisions: 100000000
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # 10k docs x 5 distinct revisions each = 50k revisions, all written by the old build on 1a.
+    - name: "Phase 1 seed: write seed/* on 1a/db1 (10k x 5 v_62 raw-CV revisions)"
+      ravendb_writes:
+        kind: docs_revisions
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ cluster_id | default(1) }}a"
+        db_name: db1
+        id_prefix: "{{ phase1_seed_prefix | default('seed') }}"
+        collection: "{{ phase1_seed_collection | default('MicroDocs') }}"
+        count: "{{ phase1_seed_count | default(10000) | int }}"
+        revs_per_doc: "{{ phase1_seed_revs_per_doc | default(5) | int }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Let the cluster settle before moving on.
+    - name: "Wait for etag parity across cluster a/b/c (post-seed quiescence)"
+      ravendb_wait:
+        kind: etag_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+        timeout: "{{ quiesce_budget_secs | default(1200) | int }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ----- step 2: baseline snapshot while the cluster is still quiet on the old build ------------
+
+- name: RV-1 step 2 -- T0 baseline (3 nodes on v_62, quiet)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: "T0 baseline: dump schema version on a/b/c (expect all v_old)"
+      ravendb_diagnostic:
+        kind: schema_version
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "T0 baseline: assert /stats parity across a/b/c (quiet v_old)"
+      ravendb_diagnostic:
+        kind: stats_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+        assert_mode: true
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ----- step 3: start the four background writers that keep traffic flowing during the upgrade -
+
+- name: RV-1 step 3 -- launch W-1 x {{ phase1_writers | default(4) }} writers in background
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Launch W-1 writer {{ item }} (background, async)
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w1/workload_w1.sh"
+      environment:
+        TARGET:        "{{ cluster_id | default(1) }}a"
+        DB_NAME:       "{{ db_name }}"
+        ID_PREFIX:     "{{ phase1_seed_prefix }}"
+        POOL_SIZE:     "{{ phase1_seed_count }}"
+        WRITER_ID:     "{{ item }}"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: 14400  # 4h backstop; stopped explicitly via stop_workload
+      poll: 0
+      loop: "{{ range(1, (phase1_writers | int) + 1) | list }}"
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars: { pidfile: "/tmp/w1-{{ cluster_id | default(1) }}a-db1-w1.pid", timeout: 30 }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars: { pidfile: "/tmp/w1-{{ cluster_id | default(1) }}a-db1-w2.pid", timeout: 30 }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars: { pidfile: "/tmp/w1-{{ cluster_id | default(1) }}a-db1-w3.pid", timeout: 30 }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars: { pidfile: "/tmp/w1-{{ cluster_id | default(1) }}a-db1-w4.pid", timeout: 30 }
+
+
+# ----- step 4: upgrade node 1a and run the light mid-roll checkpoint --------------------------
+
+- name: RV-1 step 4 -- upgrade {{ cluster_id | default(1) }}a (full schema chain) + mixed checkpoint
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Upgrade {{ cluster_id | default(1) }}a + wait_for_member
+      ansible.builtin.shell: |
+        set -e
+        ansible-playbook toolbox/service/upgrade_node.yml \
+          -e target={{ cluster_id | default(1) }}a -e custom_build={{ v_new_build }} --skip-tags download \
+          > /tmp/rv1-upgrade-{{ cluster_id | default(1) }}a.log 2>&1
+        ansible-playbook toolbox/wait/wait_for_member.yml \
+          -e cluster_leader={{ peer_map[((cluster_id | default(1)) | string) ~ 'a'] }} -e db_name={{ db_name }} \
+          -e target={{ cluster_id | default(1) }}a -e timeout_secs={{ member_budget_secs | default(300) | int }} \
+          > /tmp/rv1-member-{{ cluster_id | default(1) }}a.log 2>&1
+      args: { chdir: "{{ playbook_dir }}/../../.." }
+      environment:
+        ANSIBLE_BECOME_PASS: "{{ ansible_become_pass | default('') }}"
+      async: 2400
+      poll: 30
+
+- name: RV-1 step 4 -- mid-roll light checkpoint + delay
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    # Send a marker doc from 1a and confirm it reaches 1b and 1c -- proves replication still
+    # moves between the new build and the old build.
+    - name: "Mid-roll: wait for rv1/marker-post1a-* propagation 1a -> 1b/1c"
+      ravendb_wait:
+        kind: marker_propagation
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        source: "{{ cluster_id | default(1) }}a"
+        targets: ["{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+        marker_id_prefix: "rv1/marker-post1a-"
+        timeout: 120
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Dump the schema version on each node.  At this point 1a is on the new build while
+    # 1b and 1c are still on the old build -- the dump is just for visibility, no assert.
+    - name: "Mid-roll: dump schema version on a/b/c (1a v_new, 1b/1c v_old expected)"
+      ravendb_diagnostic:
+        kind: schema_version
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: Pause before upgrading {{ cluster_id | default(1) }}b
+      ansible.builtin.pause:
+        seconds: "{{ upgrade_delay_secs | default(60) | int }}"
+      when: (upgrade_delay_secs | default(60) | int) > 0
+
+
+# ----- step 5: upgrade node 1b and run the light mid-roll checkpoint --------------------------
+
+- name: RV-1 step 5 -- upgrade {{ cluster_id | default(1) }}b + mixed checkpoint
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Upgrade {{ cluster_id | default(1) }}b + wait_for_member
+      ansible.builtin.shell: |
+        set -e
+        ansible-playbook toolbox/service/upgrade_node.yml \
+          -e target={{ cluster_id | default(1) }}b -e custom_build={{ v_new_build }} --skip-tags download \
+          > /tmp/rv1-upgrade-{{ cluster_id | default(1) }}b.log 2>&1
+        ansible-playbook toolbox/wait/wait_for_member.yml \
+          -e cluster_leader={{ peer_map[((cluster_id | default(1)) | string) ~ 'b'] }} -e db_name={{ db_name }} \
+          -e target={{ cluster_id | default(1) }}b -e timeout_secs={{ member_budget_secs | default(300) | int }} \
+          > /tmp/rv1-member-{{ cluster_id | default(1) }}b.log 2>&1
+      args: { chdir: "{{ playbook_dir }}/../../.." }
+      environment:
+        ANSIBLE_BECOME_PASS: "{{ ansible_become_pass | default('') }}"
+      async: 2400
+      poll: 30
+
+- name: RV-1 step 5 -- mid-roll light checkpoint + delay
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Mid-roll: wait for rv1/marker-post1b-* propagation 1a -> 1b/1c"
+      ravendb_wait:
+        kind: marker_propagation
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        source: "{{ cluster_id | default(1) }}a"
+        targets: ["{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+        marker_id_prefix: "rv1/marker-post1b-"
+        timeout: 120
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Mid-roll: dump schema version on a/b/c (1a/1b v_new, 1c v_old expected)"
+      ravendb_diagnostic:
+        kind: schema_version
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: Pause before upgrading {{ cluster_id | default(1) }}c
+      ansible.builtin.pause:
+        seconds: "{{ upgrade_delay_secs | default(60) | int }}"
+      when: (upgrade_delay_secs | default(60) | int) > 0
+
+
+# ----- step 6: upgrade node 1c, stop the writers, let the cluster go quiet --------------------
+
+- name: RV-1 step 6 -- upgrade {{ cluster_id | default(1) }}c + stop W-1 + quiet
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Upgrade {{ cluster_id | default(1) }}c + wait_for_member
+      ansible.builtin.shell: |
+        set -e
+        ansible-playbook toolbox/service/upgrade_node.yml \
+          -e target={{ cluster_id | default(1) }}c -e custom_build={{ v_new_build }} --skip-tags download \
+          > /tmp/rv1-upgrade-{{ cluster_id | default(1) }}c.log 2>&1
+        ansible-playbook toolbox/wait/wait_for_member.yml \
+          -e cluster_leader={{ peer_map[((cluster_id | default(1)) | string) ~ 'c'] }} -e db_name={{ db_name }} \
+          -e target={{ cluster_id | default(1) }}c -e timeout_secs={{ member_budget_secs | default(300) | int }} \
+          > /tmp/rv1-member-{{ cluster_id | default(1) }}c.log 2>&1
+      args: { chdir: "{{ playbook_dir }}/../../.." }
+      environment:
+        ANSIBLE_BECOME_PASS: "{{ ansible_become_pass | default('') }}"
+      async: 2400
+      poll: 30
+
+    - name: "Post-upgrade: dump schema version on a/b/c (all v_new expected)"
+      ravendb_diagnostic:
+        kind: schema_version
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/assert_workload_alive.yml
+  vars: { pidfile: "/tmp/w1-{{ cluster_id | default(1) }}a-db1-w1.pid" }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/assert_workload_alive.yml
+  vars: { pidfile: "/tmp/w1-{{ cluster_id | default(1) }}a-db1-w2.pid" }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/assert_workload_alive.yml
+  vars: { pidfile: "/tmp/w1-{{ cluster_id | default(1) }}a-db1-w3.pid" }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/assert_workload_alive.yml
+  vars: { pidfile: "/tmp/w1-{{ cluster_id | default(1) }}a-db1-w4.pid" }
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars: { pidfile: "/tmp/w1-{{ cluster_id | default(1) }}a-db1-w1.pid" }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars: { pidfile: "/tmp/w1-{{ cluster_id | default(1) }}a-db1-w2.pid" }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars: { pidfile: "/tmp/w1-{{ cluster_id | default(1) }}a-db1-w3.pid" }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars: { pidfile: "/tmp/w1-{{ cluster_id | default(1) }}a-db1-w4.pid" }
+
+- name: RV-1 step 6 -- post-W-1-stop drain + tombstone settle
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Post-W-1-stop: wait for docs drain across a/b/c"
+      ravendb_wait:
+        kind: docs_drain
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+        timeout: "{{ drain_budget_secs | default(180) | int }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Post-W-1-stop: wait for etag parity across a/b/c"
+      ravendb_wait:
+        kind: etag_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+        timeout: "{{ quiesce_budget_secs | default(1200) | int }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Post-W-1-stop: wait for tombstone-count convergence across a/b/c"
+      ravendb_wait:
+        kind: stats_field_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+        fields: ["CountOfTombstones"]
+        timeout: "{{ tombstone_settle_timeout_secs | default(300) | int }}"
+        poll_interval: 3
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ----- step 7: phase-1 assertions on the quiet cluster, now fully on the new build ------------
+
+- name: RV-1 step 7 -- phase-1 final asserts (I-1, I-2, I-3, I-4, I-8 + schema parity)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Phase 1 final: assert /stats parity across a/b/c"
+      ravendb_diagnostic:
+        kind: stats_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+        assert_mode: true
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Phase 1 final: assert revision-count parity for seed/* across a/b/c"
+      ravendb_diagnostic:
+        kind: revision_count_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+        id_prefix: "{{ phase1_seed_prefix | default('seed') }}"
+        count: "{{ phase4_probe_count | default(50) | int }}"
+        assert_mode: true
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Phase 1 final: assert no orphan revisions on a/b/c"
+      ravendb_diagnostic:
+        kind: orphan_revisions
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+        assert_mode: true
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Every node should now report the same full version string -- the rolling upgrade is done.
+    - name: "Phase 1 final: assert schema version parity across a/b/c (I-10, all v_new)"
+      ravendb_diagnostic:
+        kind: schema_version
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+        require_parity: true
+        db_name: db1
+        cluster_leader: "{{ cluster_id | default(1) }}a"
+        assert_mode: true
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Save a size-envelope baseline.  The first run just writes the file; later runs compare
+    # against it to catch unexpected growth.  Informational only.
+    - name: "Phase 1 final: capture/compare size envelope baseline on a/b/c"
+      ravendb_diagnostic:
+        kind: size_envelope
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+        baseline_file: "{{ playbook_dir }}/../../../captures/size-baseline-rv1.json"
+        max_growth_pct: 300
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ----- step 8: seed the hot pool (1000 docs x 30 revisions, written by the new build) ---------
+
+- name: RV-1 step 8 -- pre-seed hot pool ({{ phase2_hot_count | default(1000) }} x {{ phase2_hot_revs_per_doc | default(30) }} revs)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Phase 2 pre-seed: write hot/* on 1a/db1 (phase2_hot_count x phase2_hot_revs_per_doc revs)"
+      ravendb_writes:
+        kind: docs_revisions
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ cluster_id | default(1) }}a"
+        db_name: db1
+        id_prefix: "{{ phase2_hot_prefix | default('hot') }}"
+        collection: "{{ phase2_hot_collection | default('HotDocs') }}"
+        count: "{{ phase2_hot_count | default(1000) | int }}"
+        revs_per_doc: "{{ phase2_hot_revs_per_doc | default(30) | int }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Phase 2 pre-seed: wait for etag parity across a/b/c (post hot pre-seed)"
+      ravendb_wait:
+        kind: etag_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+        timeout: "{{ quiesce_budget_secs | default(1200) | int }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ----- step 9: W-3 churn races -- 8 writers for 5 minutes, then drain -------------------------
+
+# W-3 runs in the foreground -- it's a bounded 5-minute burst, not a continuous backdrop.
+- ansible.builtin.import_playbook: ../../../scenarios/company-1/workloads/w3/workload_w3.yml
+  vars:
+    target: "{{ cluster_id | default(1) }}a"
+    db_name: db1
+    duration_secs: "{{ phase2_churn_duration_secs | default(300) | int }}"
+    id_prefix: "{{ phase2_hot_prefix | default('hot') }}"
+    pool_size: "{{ phase2_hot_count | default(1000) | int }}"
+    writers: "{{ phase2_writers | default(8) | int }}"
+    collection: "{{ phase2_hot_collection | default('HotDocs') }}"
+
+- name: RV-1 step 9 -- post-W-3 cooldown + drain + tombstone settle
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Pause so the controller's TCP sockets can recycle
+      ansible.builtin.pause:
+        seconds: "{{ w3_cooldown_secs | default(45) | int }}"
+      when: (w3_cooldown_secs | default(45) | int) > 0
+
+    - name: "Post-W-3: wait for docs drain across a/b/c"
+      ravendb_wait:
+        kind: docs_drain
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+        timeout: "{{ drain_budget_secs | default(180) | int }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Post-W-3: wait for tombstone-count convergence across a/b/c"
+      ravendb_wait:
+        kind: stats_field_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+        fields: ["CountOfTombstones"]
+        timeout: "{{ tombstone_settle_timeout_secs | default(300) | int }}"
+        poll_interval: 3
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ----- step 10: phase-2 checkpoint -- hot-pool parity and an orphan probe ---------------------
+
+- name: RV-1 step 10 -- phase-2 checkpoint (no duplicates, no orphans)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Phase 2 checkpoint: assert /stats parity across a/b/c"
+      ravendb_diagnostic:
+        kind: stats_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+        assert_mode: true
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Phase 2 checkpoint: assert revision-count parity for hot/* across a/b/c"
+      ravendb_diagnostic:
+        kind: revision_count_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+        id_prefix: "{{ phase2_hot_prefix | default('hot') }}"
+        count: "{{ phase4_probe_count | default(50) | int }}"
+        assert_mode: true
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Phase 2 checkpoint: assert no orphan revisions on a/b/c"
+      ravendb_diagnostic:
+        kind: orphan_revisions
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+        assert_mode: true
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ----- step 11: W-7 -- a single-doc firehose writer plus a paired reader on users/hot ---------
+
+- name: RV-1 step 11 -- launch W-7 writer + reader (background)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Launch W-7 writer (single loop, background async)
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w7/workload_w7.sh"
+      environment:
+        TARGET:        "{{ cluster_id | default(1) }}a"
+        DB_NAME:       "{{ db_name }}"
+        DURATION_SECS: "{{ phase3_duration_secs }}"
+        DOC_ID:        "{{ phase3_doc_id }}"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: "{{ phase3_duration_secs | int + 600 }}"
+      poll: 0
+
+    - name: Launch W-7 reader (latency + voron sampler, background async)
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w7/workload_w7_reader.sh"
+      environment:
+        TARGET:          "{{ cluster_id | default(1) }}a"
+        DB_NAME:         "{{ db_name }}"
+        DURATION_SECS:   "{{ phase3_duration_secs }}"
+        DOC_ID:          "{{ phase3_doc_id }}"
+        SAMPLE_INTERVAL: "{{ phase3_reader_sample_interval }}"
+        STATS_INTERVAL:  "{{ phase3_reader_stats_interval }}"
+        RAVEN_DOMAIN:    "{{ ravendb_domain }}"
+        CERT_PEM:        "{{ cert_dir }}/client.pem"
+        CA_CRT:          "{{ cert_ca_crt }}"
+      async: "{{ phase3_duration_secs | int + 600 }}"
+      poll: 0
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars: { pidfile: "/tmp/w7-{{ cluster_id | default(1) }}a-db1.pid", timeout: 30 }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars: { pidfile: "/tmp/w7r-{{ cluster_id | default(1) }}a-db1.pid", timeout: 30 }
+
+# Block until both processes finish on their own -- writer and reader both stop at duration_secs.
+- name: RV-1 step 11 -- wait for W-7 writer + reader to finish
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Wait for W-7 writer to finish (internal loop, no retry spam)
+      ansible.builtin.shell: |
+        set -u
+        pidfile=/tmp/w7-{{ cluster_id | default(1) }}a-db1.pid
+        deadline=$(( $(date +%s) + {{ phase3_duration_secs | int + 300 }} ))
+        while [ $(date +%s) -lt $deadline ]; do
+          if [ ! -f "$pidfile" ]; then echo "FINISHED"; exit 0; fi
+          PID=$(cat "$pidfile" 2>/dev/null || true)
+          if [ -z "$PID" ]; then echo "FINISHED (empty pidfile)"; exit 0; fi
+          if ! kill -0 "$PID" 2>/dev/null; then echo "CRASHED pid=$PID (stale pidfile, process gone)"; exit 99; fi
+          sleep 5
+        done
+        echo "TIMEOUT after {{ phase3_duration_secs | int + 300 }}s"; exit 124
+      register: w7_writer_poll
+      changed_when: false
+
+    - name: Wait for W-7 reader to finish (internal loop, no retry spam)
+      ansible.builtin.shell: |
+        set -u
+        pidfile=/tmp/w7r-{{ cluster_id | default(1) }}a-db1.pid
+        deadline=$(( $(date +%s) + {{ phase3_duration_secs | int + 300 }} ))
+        while [ $(date +%s) -lt $deadline ]; do
+          if [ ! -f "$pidfile" ]; then echo "FINISHED"; exit 0; fi
+          PID=$(cat "$pidfile" 2>/dev/null || true)
+          if [ -z "$PID" ]; then echo "FINISHED (empty pidfile)"; exit 0; fi
+          if ! kill -0 "$PID" 2>/dev/null; then echo "CRASHED pid=$PID (stale pidfile, process gone)"; exit 99; fi
+          sleep 5
+        done
+        echo "TIMEOUT after {{ phase3_duration_secs | int + 300 }}s"; exit 124
+      register: w7_reader_poll
+      changed_when: false
+
+    - name: Show W-7 reader log tail
+      ansible.builtin.shell: tail -n 30 /tmp/w7-reader-{{ cluster_id | default(1) }}a-db1.log || true
+      register: w7r_tail
+      changed_when: false
+
+    - ansible.builtin.debug:
+        msg: "{{ ['W-7 reader log tail:'] + w7r_tail.stdout_lines }}"
+
+    - name: "Post-W-7: wait for etag parity across a/b/c"
+      ravendb_wait:
+        kind: etag_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+        timeout: "{{ quiesce_budget_secs | default(1200) | int }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Post-W-7: wait for tombstone-count convergence across a/b/c"
+      ravendb_wait:
+        kind: stats_field_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+        fields: ["CountOfTombstones"]
+        timeout: "{{ tombstone_settle_timeout_secs | default(300) | int }}"
+        poll_interval: 3
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ----- step 12: phase-3 checkpoint -- mega-doc revision count, orphans, size envelope ---------
+
+- name: RV-1 step 12 -- phase-3 checkpoint
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Phase 3 checkpoint: assert /stats parity across a/b/c"
+      ravendb_diagnostic:
+        kind: stats_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+        assert_mode: true
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Phase 3 checkpoint: assert revision-count parity for phase3_doc_id (single hot doc, 1M revs)"
+      ravendb_diagnostic:
+        kind: revision_count_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+        ids: ["{{ phase3_doc_id | default('users/hot') }}"]
+        page_size: 2000000
+        assert_mode: true
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Phase 3 checkpoint: assert no orphan revisions on a/b/c"
+      ravendb_diagnostic:
+        kind: orphan_revisions
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+        assert_mode: true
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Phase 3 checkpoint: compare size envelope vs baseline on a/b/c"
+      ravendb_diagnostic:
+        kind: size_envelope
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+        baseline_file: "{{ playbook_dir }}/../../../captures/size-baseline-rv1.json"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ----- step 13: phase-4 sweep -- revision-count parity across every pool we wrote -------------
+
+- name: RV-1 step 13 -- phase-4 count-parity sweep (seed + hot + single hot doc)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Phase 4 sweep: assert revision-count parity for seed/* across a/b/c"
+      ravendb_diagnostic:
+        kind: revision_count_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+        id_prefix: "{{ phase1_seed_prefix | default('seed') }}"
+        count: "{{ phase4_probe_count | default(50) | int }}"
+        assert_mode: true
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Phase 4 sweep: assert revision-count parity for hot/* across a/b/c"
+      ravendb_diagnostic:
+        kind: revision_count_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+        id_prefix: "{{ phase2_hot_prefix | default('hot') }}"
+        count: "{{ phase4_probe_count | default(50) | int }}"
+        assert_mode: true
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Phase 4 sweep: assert revision-count parity for phase3_doc_id across a/b/c"
+      ravendb_diagnostic:
+        kind: revision_count_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+        ids: ["{{ phase3_doc_id | default('users/hot') }}"]
+        page_size: 2000000
+        assert_mode: true
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ----- step 14: final size-envelope snapshot and we're done -----------------------------------
+
+- name: RV-1 step 14 -- final size envelope (informational) + DONE
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: "Final: capture size envelope snapshot on a/b/c (informational)"
+      ravendb_diagnostic:
+        kind: size_envelope
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+        baseline_file: "{{ playbook_dir }}/../../../captures/size-baseline-rv1.json"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - ansible.builtin.debug:
+        msg: >-
+          RV-1 PASS  cluster=[{{ cluster_id | default(1) }}a,{{ cluster_id | default(1) }}b,{{ cluster_id | default(1) }}c]  db=db1
+          phase 1 (rolling upgrade + W-1) + phase 2 (W-3 churn races) + phase 3 (W-7 1M-rev
+          single doc) + phase 4 (count-parity sweep) all held.  W-7 reader log:
+          /tmp/w7-reader-{{ cluster_id | default(1) }}a-db1.log

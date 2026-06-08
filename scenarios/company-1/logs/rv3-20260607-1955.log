@@ -1,0 +1,596 @@
+TASK [Print the final cluster layout (tag / container / url per cluster)] ******
+ok: [localhost] => {
+    "msg": [
+        "================================================================",
+        "  Formed 5 cluster(s) with 21 node(s) (on hubsinknet)",
+        "================================================================",
+        "",
+        "  Cluster 1",
+        "    tag   container   url",
+        "    A     1a          https://1a.hubsink.test:443",
+        "    B     1b          https://1b.hubsink.test:443",
+        "    C     1c          https://1c.hubsink.test:443",
+        "    D     1d          https://1d.hubsink.test:443",
+        "    E     1e          https://1e.hubsink.test:443",
+        "    F     1f          https://1f.hubsink.test:443",
+        "    G     1g          https://1g.hubsink.test:443",
+        "    H     1h          https://1h.hubsink.test:443",
+        "    I     1i          https://1i.hubsink.test:443",
+        "",
+        "  Cluster 2",
+        "    tag   container   url",
+        "    A     2a          https://2a.hubsink.test:443",
+        "",
+        "  Cluster 3",
+        "    tag   container   url",
+        "    A     3a          https://3a.hubsink.test:443",
+        "    B     3b          https://3b.hubsink.test:443",
+        "    C     3c          https://3c.hubsink.test:443",
+        "    D     3d          https://3d.hubsink.test:443",
+        "    E     3e          https://3e.hubsink.test:443",
+        "    F     3f          https://3f.hubsink.test:443",
+        "    G     3g          https://3g.hubsink.test:443",
+        "    H     3h          https://3h.hubsink.test:443",
+        "    I     3i          https://3i.hubsink.test:443",
+        "",
+        "  Cluster 4",
+        "    tag   container   url",
+        "    A     4a          https://4a.hubsink.test:443",
+        "",
+        "  Cluster 5",
+        "    tag   container   url",
+        "    A     5a          https://5a.hubsink.test:443",
+        "",
+        "================================================================"
+    ]
+}
+
+PLAY RECAP *********************************************************************
+1a                         : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+1b                         : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+1c                         : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+1d                         : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+1e                         : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+1f                         : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+1g                         : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+1h                         : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+1i                         : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+2a                         : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+3a                         : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+3b                         : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+3c                         : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+3d                         : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+3e                         : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+3f                         : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+3g                         : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+3h                         : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+3i                         : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+4a                         : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+5a                         : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+localhost                  : ok=16   changed=0    unreachable=0    failed=0    skipped=2    rescued=0    ignored=0   
+
+
+[1;36m[20:04:59] rv3[0m
+
+PLAY [RV-3 pre -- validate inputs + show plan] *********************************
+
+TASK [ansible.builtin.assert] **************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "RV-3  v_new=/mnt/c/dev/hub-sink/ansible-ravendb-chaos/builds/raven-pr22899.deb shd-src=[1a,1b,1c,1d,1e,1f,1g,1h,1i] non-src=2a shd-tgt=[3a,3b,3c,3d,3e,3f,3g,3h,3i] etl-tgt=4a  bkp-cmp=5a phase_a_seed=300x2 phase_b_seed=300x2 phase_b_w1_duration=60s"
+}
+
+PLAY [Ensure ravendb python client is available on the controller] *************
+
+TASK [Gathering Facts] *********************************************************
+ok: [localhost]
+
+TASK [Probe existing venv for ravendb module] **********************************
+ok: [localhost]
+
+TASK [Reuse existing venv -- skip the prereqs role] ****************************
+ok: [localhost]
+
+TASK [Install ravendb python client prerequisites (one-time / forced)] *********
+skipping: [localhost]
+
+PLAY [Create a database via the ravendb.ravendb.database module] ***************
+
+TASK [Validate inputs] *********************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Create database] *********************************************************
+changed: [localhost]
+
+TASK [Done] ********************************************************************
+ok: [localhost] => {
+    "msg": "CREATED  db1 on cluster reachable via 2a (replication_factor=1)"
+}
+
+PLAY [RV-3 step 1 -- revisions config + mixed-form seed on non-sharded source] ***
+
+TASK [ravendb_revisions] *******************************************************
+changed: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "REVISIONS configured on 2a/db1 -- MinimumRevisionsToKeep=100"
+}
+
+TASK [Assert legacy-form fixture exists] ***************************************
+ok: [localhost]
+
+TASK [ansible.builtin.assert] **************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [ravendb_smuggler] ********************************************************
+changed: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "IMPORTED legacy-revs.ravendbdump -> 2a/db1 (511869 bytes, HTTP 200)"
+}
+
+TASK [ravendb_writes] **********************************************************
+changed: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "WROTE 600/600 PUTs to 2a/db1 (300 docs x 2 revisions each, id prefix 'users', collection 'Users')"
+}
+
+PLAY [RV-3 step 2 -- smuggler_export non-sharded source -> phase_a_dump] *******
+
+TASK [ravendb_smuggler] ********************************************************
+changed: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "EXPORTED 2a/db1 -> /mnt/c/dev/hub-sink/ansible-ravendb-chaos/scenarios/company-1/RV3/../../../captures/rv3-phase-a.ravendbdump (639629 bytes, HTTP 200)"
+}
+
+PLAY [RV-3 step 3 -- create sharded db1 on import target + import phase_a_dump] ***
+
+TASK [ravendb_sharding] ********************************************************
+changed: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "SHARDED DB created  db1 on 3a  shards=['0', '1', '2']  orchestrator=['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I']"
+}
+
+TASK [ravendb_revisions] *******************************************************
+changed: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "REVISIONS configured on 3a/db1 -- MinimumRevisionsToKeep=100"
+}
+
+TASK [ravendb_smuggler] ********************************************************
+changed: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "IMPORTED rv3-phase-a.ravendbdump -> 3a/db1 (639629 bytes, HTTP 200)"
+}
+
+PLAY [RV-3 step 4 -- phase (a) checkpoint (I-1 doc count, I-2 per-doc revs, PK form hashed)] ***
+
+TASK [Drain sharded target Sx] *************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "STABLE -- LastDatabaseEtag unchanged across 3 node(s) (skipped=[], took 0.1s)",
+        "  sample 1 (20:05:36):",
+        "    3a  23157",
+        "    3b  6788",
+        "    3c  6788",
+        "  sample 2 (20:05:36):",
+        "    3a  23157",
+        "    3b  6788",
+        "    3c  6788"
+    ]
+}
+
+TASK [Drain sharded target Sy] *************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "STABLE -- LastDatabaseEtag unchanged across 3 node(s) (skipped=[], took 0.1s)",
+        "  sample 1 (20:05:37):",
+        "    3d  24334",
+        "    3e  12280",
+        "    3f  8273",
+        "  sample 2 (20:05:37):",
+        "    3d  24334",
+        "    3e  12280",
+        "    3f  8273"
+    ]
+}
+
+TASK [Drain sharded target Sz] *************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "STABLE -- LastDatabaseEtag unchanged across 3 node(s) (skipped=[], took 0.1s)",
+        "  sample 1 (20:05:37):",
+        "    3g  23109",
+        "    3h  19836",
+        "    3i  14255",
+        "  sample 2 (20:05:37):",
+        "    3g  23109",
+        "    3h  19836",
+        "    3i  14255"
+    ]
+}
+
+TASK [Source (non-sharded) doc count] ******************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "2a/db1  ->  10000 docs"
+}
+
+TASK [Target (sharded aggregate) doc count] ************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "3a/db1  ->  10000 docs"
+}
+
+TASK [Assert phase (a) doc count parity (smuggler routes every doc -- exact match)] ***
+ok: [localhost] => {
+    "changed": false,
+    "msg": "PHASE A I-1 PASS  src and sharded tgt agree on doc count"
+}
+
+TASK [Sharded target per-doc revision count parity] ****************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "revision-count parity: 10 id(s) across ['3a']",
+        "  per-id counts (first 10):",
+        "    users/0               [7]",
+        "    users/1               [7]",
+        "    users/2               [7]",
+        "    users/3               [7]",
+        "    users/4               [7]",
+        "    users/5               [7]",
+        "    users/6               [7]",
+        "    users/7               [7]",
+        "    users/8               [7]",
+        "    users/9               [7]",
+        "  mismatched: 0",
+        "PASS  per-id revision counts agree across nodes"
+    ]
+}
+
+TASK [Sharded target revision PK form is hashed] *******************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "stored-item CV shape check on 3a/db1 (expect=split, delimiter='|'):",
+        "  users/0  LEGACY raw CV (no '|')",
+        "  users/1  LEGACY raw CV (no '|')",
+        "  users/2  LEGACY raw CV (no '|')",
+        "  users/3  LEGACY raw CV (no '|')",
+        "  users/4  LEGACY raw CV (no '|')",
+        "  users/5  LEGACY raw CV (no '|')",
+        "  users/6  LEGACY raw CV (no '|')",
+        "  users/7  LEGACY raw CV (no '|')",
+        "  users/8  LEGACY raw CV (no '|')",
+        "  users/9  LEGACY raw CV (no '|')",
+        "N/A  legacy raw-CV form across all probes -- composite-CV lane not active on this build"
+    ]
+}
+
+PLAY [RV-3 step 5 -- create sharded db1 on the phase (b) source + mixed-form seed] ***
+
+TASK [ravendb_sharding] ********************************************************
+changed: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "SHARDED DB created  db1 on 1a  shards=['0', '1', '2']  orchestrator=['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I']"
+}
+
+TASK [ravendb_revisions] *******************************************************
+changed: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "REVISIONS configured on 1a/db1 -- MinimumRevisionsToKeep=100"
+}
+
+TASK [ravendb_smuggler] ********************************************************
+changed: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "IMPORTED legacy-revs.ravendbdump -> 1a/db1 (511869 bytes, HTTP 200)"
+}
+
+TASK [ravendb_writes] **********************************************************
+changed: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "WROTE 600/600 PUTs to 1a/db1 (300 docs x 2 revisions each, id prefix 'users', collection 'Users')"
+}
+
+PLAY [RV-3 step 6 -- create ETL target db1 + configure Raven ETL on sharded source] ***
+
+TASK [Create ETL target db1] ***************************************************
+changed: [localhost]
+
+TASK [ravendb_revisions] *******************************************************
+changed: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "REVISIONS configured on 4a/db1 -- MinimumRevisionsToKeep=100"
+}
+
+TASK [ravendb_tasks] ***********************************************************
+changed: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "ETL configured -- task 'rv3-shd-to-etl' on 1a/db1 pushes all collections -> https://4a.hubsink.test:443/db1 via rv3-etl-conn"
+}
+
+PLAY [RV-3 step 7 -- launch W-1 on sharded source; ETL drains live] ************
+
+TASK [Launch W-1 (background, async)] ******************************************
+[WARNING]: Found variable using reserved name: timeout
+changed: [localhost]
+
+PLAY [Wait for a background workload's pidfile to appear] **********************
+
+TASK [Validate inputs] *********************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Wait for /tmp/w1-1a-db1.pid to appear] ***********************************
+ok: [localhost]
+
+TASK [Done] ********************************************************************
+ok: [localhost] => {
+    "msg": "WORKLOAD STARTED  pidfile present at /tmp/w1-1a-db1.pid"
+}
+
+PLAY [Assert a background workload is still alive (pidfile + kill -0)] *********
+
+TASK [Validate inputs] *********************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Probe pidfile + recorded PID] ********************************************
+ok: [localhost]
+
+TASK [Dump worker debug log on failure (if present)] ***************************
+skipping: [localhost]
+
+TASK [Show worker debug log] ***************************************************
+skipping: [localhost]
+
+TASK [Assert workload is alive] ************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "WORKLOAD ALIVE  pidfile=/tmp/w1-1a-db1.pid  ALIVE pid=2077877"
+}
+
+PLAY [RV-3 step 8 -- wait for W-1 to finish; drain ETL until tgt == src] *******
+
+TASK [Wait for W-1 to finish (internal loop, no retry spam)] *******************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "W-1 status: FINISHED"
+}
+
+TASK [ravendb_wait] ************************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "DOC COUNT MATCHED -- 1a/db1 == 4a/db1 (took 0.4s, src=10000 == tgt=10000)"
+}
+
+PLAY [RV-3 step 9 -- per-shard source drain + tombstone settle + smuggler_export + restore] ***
+
+TASK [Drain source shard Sx] ***************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "STABLE -- LastDatabaseEtag unchanged across 3 node(s) (skipped=[], took 0.1s)",
+        "  sample 1 (20:07:23):",
+        "    1a  20073",
+        "    1b  16791",
+        "    1c  16791",
+        "  sample 2 (20:07:23):",
+        "    1a  20073",
+        "    1b  16791",
+        "    1c  16791"
+    ]
+}
+
+TASK [Drain source shard Sy] ***************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "STABLE -- LastDatabaseEtag unchanged across 3 node(s) (skipped=[], took 0.1s)",
+        "  sample 1 (20:07:23):",
+        "    1d  21109",
+        "    1e  17662",
+        "    1f  17662",
+        "  sample 2 (20:07:23):",
+        "    1d  21109",
+        "    1e  17662",
+        "    1f  17662"
+    ]
+}
+
+TASK [Drain source shard Sz] ***************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "STABLE -- LastDatabaseEtag unchanged across 3 node(s) (skipped=[], took 0.1s)",
+        "  sample 1 (20:07:24):",
+        "    1g  20044",
+        "    1h  16767",
+        "    1i  16767",
+        "  sample 2 (20:07:24):",
+        "    1g  20044",
+        "    1h  16767",
+        "    1i  16767"
+    ]
+}
+
+TASK [ravendb_smuggler] ********************************************************
+changed: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "EXPORTED 1a/db1 -> /mnt/c/dev/hub-sink/ansible-ravendb-chaos/scenarios/company-1/RV3/../../../captures/rv3-phase-b.ravendbdump (748635 bytes, HTTP 200)"
+}
+
+TASK [Create backup-comparison target db1] *************************************
+changed: [localhost]
+
+TASK [ravendb_smuggler] ********************************************************
+changed: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "IMPORTED rv3-phase-b.ravendbdump -> 5a/db1 (748635 bytes, HTTP 200)"
+}
+
+PLAY [RV-3 step 10 -- 3-way EXACT equality (ETL tgt == bkp-cmp tgt == sharded src aggregate)] ***
+
+TASK [Sharded source aggregate doc count] **************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "1a/db1  ->  10000 docs"
+}
+
+TASK [ETL target doc count] ****************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "4a/db1  ->  10000 docs"
+}
+
+TASK [Backup-restored comparison target doc count] *****************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "5a/db1  ->  10000 docs"
+}
+
+TASK [Extract integer counts from the three msgs] ******************************
+ok: [localhost]
+
+TASK [3-way EXACT equality] ****************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "3-WAY CROSS-CHECK PASS  src=etl=bkp=10000"
+}
+
+TASK [Per-doc revision count parity on the ETL target (sampled)] ***************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "revision-count parity: 10 id(s) across ['4a']",
+        "  per-id counts (first 10):",
+        "    users/0               [0]",
+        "    users/1               [0]",
+        "    users/2               [0]",
+        "    users/3               [0]",
+        "    users/4               [0]",
+        "    users/5               [0]",
+        "    users/6               [0]",
+        "    users/7               [0]",
+        "    users/8               [0]",
+        "    users/9               [0]",
+        "  mismatched: 0",
+        "PASS  per-id revision counts agree across nodes"
+    ]
+}
+
+TASK [Per-doc revision count parity on the bkp-cmp target (sampled)] ***********
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "revision-count parity: 10 id(s) across ['5a']",
+        "  per-id counts (first 10):",
+        "    users/0               [7]",
+        "    users/1               [7]",
+        "    users/2               [7]",
+        "    users/3               [7]",
+        "    users/4               [7]",
+        "    users/5               [7]",
+        "    users/6               [7]",
+        "    users/7               [7]",
+        "    users/8               [7]",
+        "    users/9               [7]",
+        "  mismatched: 0",
+        "PASS  per-id revision counts agree across nodes"
+    ]
+}
+
+PLAY [RV-3 -- DONE] ************************************************************
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "RV-3 PASS  shd-src=[1a,1b,1c,1d,1e,1f,1g,1h,1i]  non-src=2a shd-tgt=[3a,3b,3c,3d,3e,3f,3g,3h,3i] etl-tgt=4a  bkp-cmp=5a  db=db1 phase (a) non-sharded -> sharded smuggler reverse (mixed-form + PK form hashed) + phase (b) ETL drain + parallel backup 3-way EXACT cross-check all held."
+}
+
+PLAY RECAP *********************************************************************
+localhost                  : ok=87   changed=19   unreachable=0    failed=0    skipped=3    rescued=0    ignored=0   
+
+
+[1;36m[20:07:39] RV-3 done[0m

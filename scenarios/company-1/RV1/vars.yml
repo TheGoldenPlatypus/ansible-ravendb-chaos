@@ -1,0 +1,110 @@
+# scenarios/company-1/RV1/vars.yml -- shared config for RV-1
+# (single-cluster v_62 -> v_new full chain + churn races + 1M-rev single-doc + count-parity sweep)
+
+# ---------- Topology -- T1: single 3-node cluster ---------------------------
+db_name: db1
+
+# Default cluster id (== `1` in single-lab mode -> containers 1a/1b/1c).  For parallel
+# runs on the same docker host, override with -e cluster_id=4 (and matching
+# -e cluster_id_start=4 on provision_nodes + -e docker_network_name=<unique-net>).
+cluster_id: 1
+
+# Derived (these defaults are also inlined at every import_playbook call site in rv1.yml
+# because vars.yml is not reachable from that scope).
+cluster_leader: "{{ cluster_id | default(1) }}a"
+cluster_nodes:
+  - "{{ cluster_id | default(1) }}a"
+  - "{{ cluster_id | default(1) }}b"
+  - "{{ cluster_id | default(1) }}c"
+
+# Rolling-upgrade order through the v_62 -> v_new schema chain.  RV-1 has no
+# variants here (one fixed order).
+upgrade_order:
+  - "{{ cluster_id | default(1) }}a"
+  - "{{ cluster_id | default(1) }}b"
+  - "{{ cluster_id | default(1) }}c"
+
+# Peer-query map for wait_for_member -- next-letter wrap inside the cluster.
+# Built as a single Jinja expression so the templated KEYS resolve before the dict is
+# constructed; YAML dict literals with templated keys don't render in import_playbook /
+# vars_files scope, leaving peer_map['1a'] lookups failing with "no attribute '1a'".
+peer_map: >-
+  {{
+    {
+      ((cluster_id | default(1)) | string) ~ 'a': ((cluster_id | default(1)) | string) ~ 'b',
+      ((cluster_id | default(1)) | string) ~ 'b': ((cluster_id | default(1)) | string) ~ 'c',
+      ((cluster_id | default(1)) | string) ~ 'c': ((cluster_id | default(1)) | string) ~ 'a'
+    }
+  }}
+
+# ---------- Phase 1 -- v_62 -> v_new full chain -----------------------------
+# Per the RV-1 spec: "10k docs x 5 revs = 50k revisions seeded in v_62 raw-CV form."
+phase1_seed_count: 10000
+phase1_seed_revs_per_doc: 5
+phase1_seed_prefix: "seed"
+phase1_seed_collection: "MicroDocs"
+
+# Per the RV-1 spec: "Start W-1 at 4 writers."  4 parallel W-1 instances (distinct WRITER_ID).
+phase1_writers: 4
+# Wall-clock budget for W-1 (sized to outlast 3 sequential upgrades + per-node wait_for_member;
+# stopped explicitly after the third upgrade -- duration is just a backstop).
+# phase1_workload_duration_secs is no longer used -- W-1 runs indefinitely now (until
+# Section 7's explicit stop_workload).  Per the RV-1 spec: "continuous through phase 1."
+
+# ---------- Phase 2 -- concurrent churn races -------------------------------
+# Per the RV-1 spec: "Pre-seed 1000 hot docs x 30 revs ... 8-writer concurrent loop ... for 5 min."
+phase2_hot_count: 1000
+phase2_hot_revs_per_doc: 30
+phase2_hot_prefix: "hot"
+phase2_hot_collection: "HotDocs"
+phase2_writers: 8
+phase2_churn_duration_secs: 300   # RV-1 spec: 5 min
+
+# ---------- Phase 3 -- 1M-revision single doc -------------------------------
+# Per the RV-1 spec: "Single-writer W-7 on users/hot: 16k revs/min target for 60 min -> 1M revisions."
+# W-7 is a literal single-writer loop; final PUT count printed by the script.
+phase3_doc_id: "users/hot"
+phase3_duration_secs: 3600        # RV-1 spec: 60 min
+phase3_reader_sample_interval: 30 # RV-1 spec: "every 30 s" history fetch
+phase3_reader_stats_interval: 300 # RV-1 spec: "every 5 min" voron snapshot
+
+# ---------- Phase 4 -- count-parity sweep -----------------------------------
+# Sparse-sample probe count -- per-doc revision-count parity across the migrated seed set
+# + the 1M-revision hot doc.  Per the RV-1 spec: "per-doc count parity has no scalable
+# enumeration surface -- sampling is the only viable form."
+phase4_probe_count: 50
+
+# ---------- Revisions config -- KEEP-ALL (RV-1 spec: "override of the plan's default") ----
+# No purge limits anywhere -- Phase 3 must accumulate the full 1M-revision history.
+# Simple mode (no per-collection block) sets only MinimumRevisionsToKeep; no
+# MinimumRevisionAgeToKeep means no age purge either.
+keep_all_minimum_revisions: 100000000
+
+# ---------- Budgets (seconds) -----------------------------------------------
+member_budget_secs: 300
+drain_budget_secs: 180
+quiesce_budget_secs: 1200
+
+# Delay between node upgrades in Phase 1 -- inserted at the end of sections 5 and 6
+# (after the just-upgraded node's mid-roll checkpoint, before the next node's upgrade).
+# Lets the cluster settle a bit and makes the rolling cadence observable.  Override
+# -e upgrade_delay_secs=0 for fast shakedowns.
+upgrade_delay_secs: 60
+
+# Budget for post-upgrade tombstone-count convergence.  After the 3rd node upgrade + W-1 stop
+# + etag-stable, RavenDB's background tombstone cleanup still needs idle time to bring
+# per-node counts into parity.  Polled via wait_for_stats_field_parity (exits fast when
+# convergence is fast).  300s = 5min is a generous ceiling -- bump if you genuinely see
+# longer convergence times on slower labs.
+tombstone_settle_timeout_secs: 300
+
+# Controller-side TCP cooldown after W-3 finishes.  W-3 spawns thousands of short-lived
+# curl connections; each lingers ~60s in TIME_WAIT on the controller side, exhausting
+# ephemeral ports for the next probe (EADDRNOTAVAIL on /stats).  Sleep before the next
+# tool fires.  Override -e w3_cooldown_secs=0 if you've widened the local port range or
+# enabled tcp_tw_reuse via sysctl.
+w3_cooldown_secs: 45
+
+# NOTE: size envelope baseline path + growth cap are inlined in rv1.yml at the
+# import_playbook call sites (vars defined here can't be passed through import_playbook
+# vars blocks, which evaluate outside any play context).

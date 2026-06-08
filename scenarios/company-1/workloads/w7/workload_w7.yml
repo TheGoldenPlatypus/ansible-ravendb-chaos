@@ -1,0 +1,28 @@
+# Wrapper around workload_w7.sh -- see the .sh for the workload logic.
+# Required: target, db_name, duration_secs, doc_id
+# Optional: collection (default HotDocs)
+#
+# Example (RV-1 Phase 3 -- 1M revisions on users/hot):
+#   ansible-playbook scenarios/company-1/workloads/w7/workload_w7.yml \
+#     -e target=1a -e db_name=db1 -e duration_secs=3600 -e doc_id=users/hot
+
+- name: W-7 single-writer revision firehose
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Run workload_w7.sh
+      ansible.builtin.command: "bash {{ playbook_dir }}/workload_w7.sh"
+      environment:
+        TARGET:        "{{ target }}"
+        DB_NAME:       "{{ db_name }}"
+        DURATION_SECS: "{{ duration_secs }}"
+        DOC_ID:        "{{ doc_id }}"
+        COLLECTION:    "{{ collection | default('HotDocs') }}"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      register: out
+
+    - ansible.builtin.debug:
+        msg: "{{ out.stdout_lines }}"

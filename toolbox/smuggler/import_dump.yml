@@ -26,11 +26,11 @@
 # RUN EXAMPLES:
 #   ansible-playbook toolbox/smuggler/import_dump.yml \
 #       -e target=1a -e db_name=db1 \
-#       -e dump_path=$PWD/scenarios/EMR/RP1/fixtures/legacy-counter.ravendbdump
+#       -e dump_path=$PWD/scenarios/company-1/RP1/fixtures/legacy-counter.ravendbdump
 #
 #   ansible-playbook toolbox/smuggler/import_dump.yml \
 #       -e target=1a -e db_name=db1 \
-#       -e dump_path=$PWD/scenarios/EMR/RP1/fixtures/legacy-counter.ravendbdump \
+#       -e dump_path=$PWD/scenarios/company-1/RP1/fixtures/legacy-counter.ravendbdump \
 #       -e skip_if_missing=true
 ##################################################################################################
 
