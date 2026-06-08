@@ -1,0 +1,95 @@
+# scenarios/EMR/RV3/vars.yml -- shared config for RV-3
+# (sharded extended: non-sharded -> sharded smuggler reverse + ETL/backup 3-way cross-check).
+
+# ---------- Topology -- T4-extended: 5 clusters, 21 containers total ------------------------
+#   * Cluster 1 (9 nodes 1a..1i) -- sharded source for phase (b)
+#   * Cluster 2 (1 node  2a)     -- non-sharded source for phase (a)
+#   * Cluster 3 (9 nodes 3a..3i) -- sharded import target for phase (a)
+#   * Cluster 4 (1 node  4a)     -- ETL target for phase (b)
+#   * Cluster 5 (1 node  5a)     -- backup-restored comparison target for phase (b)
+
+db_name: db1
+
+# Cluster ids.  Override via -e to shift the whole block (parallel runs / different host).
+src_sharded_cluster_id:  1
+nonshd_src_cluster_id:   2
+sharded_tgt_cluster_id:  3
+etl_tgt_cluster_id:      4
+bkp_cmp_cluster_id:      5
+
+# Source sharded cluster nodes (9; 3 shards x 3 replicas).
+src_sharded_nodes:   ["1a", "1b", "1c", "1d", "1e", "1f", "1g", "1h", "1i"]
+src_sharded_leader:  "1a"
+
+# Non-sharded source (1 node).
+nonshd_src_node:    "2a"
+nonshd_src_leader:  "2a"
+
+# Sharded import target (9; 3 shards x 3 replicas).
+sharded_tgt_nodes:   ["3a", "3b", "3c", "3d", "3e", "3f", "3g", "3h", "3i"]
+sharded_tgt_leader:  "3a"
+
+# ETL target (1 node).
+etl_tgt_node:    "4a"
+etl_tgt_leader:  "4a"
+
+# Backup-restored comparison target (1 node).
+bkp_cmp_node:    "5a"
+bkp_cmp_leader:  "5a"
+
+# Per-shard topology -- letters A..I map to nodes 1a..1i / 3a..3i.  Shard 0 holds Sx,
+# shard 1 Sy, shard 2 Sz.  Each shard has 3 replicas per the spec.
+shard_topology:
+  "0": ["A", "B", "C"]
+  "1": ["D", "E", "F"]
+  "2": ["G", "H", "I"]
+
+# Per-shard container names on the SHARDED SOURCE (parallel to shard_topology, used for
+# per-shard checkpoints).
+shard_nodes_src:
+  "0": ["1a", "1b", "1c"]
+  "1": ["1d", "1e", "1f"]
+  "2": ["1g", "1h", "1i"]
+
+# Per-shard container names on the SHARDED IMPORT TARGET.
+shard_nodes_tgt:
+  "0": ["3a", "3b", "3c"]
+  "1": ["3d", "3e", "3f"]
+  "2": ["3g", "3h", "3i"]
+
+# ---------- Phase (a) -- non-sharded -> sharded smuggler reverse ----------------------------
+# Per the RV-3 spec: "20k docs x 3 revs = 60k revs mixed-form" on the non-sharded source.
+# Note: "mixed-form" requires a legacy-form revision seed primitive we don't have yet --
+# this scenario uses plain v_new hashed-form seed.  Update once the legacy-seed primitive
+# lands (mark TODO in the comment block).
+phase_a_seed_count:        20000
+phase_a_seed_revs_per_doc: 3
+phase_a_seed_prefix:       "users"
+phase_a_seed_collection:   "Users"
+
+# ---------- Phase (b) -- ETL + parallel backup + 3-way cross-check --------------------------
+# Per the spec: re-seed sharded source with another 20k x 3, configure ETL, run W-1 for 5 min,
+# stop and 3-way compare.
+phase_b_seed_count:        20000
+phase_b_seed_revs_per_doc: 3
+phase_b_seed_prefix:       "users"
+phase_b_seed_collection:   "Users"
+phase_b_w1_duration_secs:  300   # 5 min per the spec
+
+# ETL configuration.
+etl_task_name:             "rv3-shd-to-etl"
+etl_connection_string:     "rv3-etl-conn"
+
+# ---------- Dump paths (controller-side; captures/ is gitignored) ---------------------------
+phase_a_dump_path: "{{ playbook_dir }}/../../../captures/rv3-phase-a.ravendbdump"
+phase_b_dump_path: "{{ playbook_dir }}/../../../captures/rv3-phase-b.ravendbdump"
+
+# ---------- Probe sizes for parity checks ---------------------------------------------------
+parity_probe_count: 50
+
+# ---------- Budgets (seconds) ---------------------------------------------------------------
+member_budget_secs:        300
+drain_budget_secs:         180
+etl_drain_budget_secs:     600   # ETL drain after workload stop; larger because async
+quiesce_budget_secs:       1200
+tombstone_settle_timeout:  300

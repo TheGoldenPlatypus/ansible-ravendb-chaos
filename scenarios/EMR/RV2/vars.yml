@@ -1,0 +1,83 @@
+# scenarios/EMR/RV2/vars.yml -- shared config for RV-2
+# (sharded internal rolling upgrade + sharded -> non-sharded smuggler).
+
+# ---------- Topology -- T4: 1 sharded source cluster (9 nodes) + 1 non-sharded target ------
+db_name: db1
+
+# Source cluster holds the sharded DB (3 shards x 3 replicas = 9 nodes).
+# Target cluster holds the empty non-sharded DB that receives the smuggler dump.
+src_cluster_id:  1
+tgt_cluster_id:  2
+
+# 9 source nodes, letters a..i.  The 3 shards map to disjoint trios of these nodes.
+src_nodes:   ["1a", "1b", "1c", "1d", "1e", "1f", "1g", "1h", "1i"]
+src_leader:  "1a"
+
+# Per-shard node assignment (matches src_nodes letters A..I).  Each shard has 3 replicas;
+# scenario rolls each shard's replicas one at a time in phase (a).
+shard_topology:
+  "0": ["A", "B", "C"]    # Sx -> 1a, 1b, 1c
+  "1": ["D", "E", "F"]    # Sy -> 1d, 1e, 1f
+  "2": ["G", "H", "I"]    # Sz -> 1g, 1h, 1i
+
+# Per-shard container names (parallel to shard_topology, used by upgrade loops).
+shard_nodes:
+  "0": ["1a", "1b", "1c"]
+  "1": ["1d", "1e", "1f"]
+  "2": ["1g", "1h", "1i"]
+
+# Target: a single v_new node holding a fresh non-sharded DB.  Cluster 2 has 9 nodes
+# provisioned but we only form a 1-node cluster and use 2a for the target -- the other 8
+# stay idle (overprovisioning kept to one knob in run.sh).
+tgt_node:    "2a"
+tgt_leader:  "2a"
+
+# Peer-query map for wait_for_member during the rolling upgrade.  Next-letter wrap within
+# the source cluster.  Build via a single Jinja expression so templated keys actually
+# resolve through vars_files scoping.
+peer_map: >-
+  {{
+    {
+      ((src_cluster_id | int) | string) ~ 'a': ((src_cluster_id | int) | string) ~ 'b',
+      ((src_cluster_id | int) | string) ~ 'b': ((src_cluster_id | int) | string) ~ 'c',
+      ((src_cluster_id | int) | string) ~ 'c': ((src_cluster_id | int) | string) ~ 'a',
+      ((src_cluster_id | int) | string) ~ 'd': ((src_cluster_id | int) | string) ~ 'e',
+      ((src_cluster_id | int) | string) ~ 'e': ((src_cluster_id | int) | string) ~ 'f',
+      ((src_cluster_id | int) | string) ~ 'f': ((src_cluster_id | int) | string) ~ 'd',
+      ((src_cluster_id | int) | string) ~ 'g': ((src_cluster_id | int) | string) ~ 'h',
+      ((src_cluster_id | int) | string) ~ 'h': ((src_cluster_id | int) | string) ~ 'i',
+      ((src_cluster_id | int) | string) ~ 'i': ((src_cluster_id | int) | string) ~ 'g'
+    }
+  }}
+
+# ---------- Seed -- 30k docs x 3 revs in v_62 raw-CV form on the sharded source ------------
+# Per the RV-2 spec: 10k docs per shard x 3 revs = 90k revs total.  Sharding routes each
+# docId to one of the 3 shards via the orchestrator; we just write to the source leader and
+# let the routing happen server-side.
+seed_count:        30000      # 10k per shard via auto-routing
+seed_revs_per_doc: 3
+seed_prefix:       "seed"
+seed_collection:   "MicroDocs"
+
+# ---------- Phase (a) -- W-1 distributed across shards during rolling upgrade --------------
+# Per the spec: "W-1 during the rolling upgrade phase (a)".  Single W-1 instance writing to
+# the source leader is enough -- sharding's orchestrator distributes across shards.
+phase_a_writers: 1
+
+# ---------- Phase (b) -- smuggler dump path ------------------------------------------------
+# Controller-side path for the .ravendbdump produced by smuggler_export and consumed by
+# smuggler_import.  Captures dir is gitignored.
+smuggler_dump_path: "{{ playbook_dir }}/../../../captures/rv2-smuggler.ravendbdump"
+
+# ---------- Probe sizes for diagnostic checks ----------------------------------------------
+parity_probe_count: 50
+
+# ---------- Budgets (seconds) --------------------------------------------------------------
+member_budget_secs: 300
+drain_budget_secs: 180
+quiesce_budget_secs: 1200
+tombstone_settle_timeout_secs: 300
+
+# Delay between node upgrades in phase (a) so the cluster settles a bit and the rolling
+# cadence is observable.  Override -e upgrade_delay_secs=0 for fast shakedowns.
+upgrade_delay_secs: 30
