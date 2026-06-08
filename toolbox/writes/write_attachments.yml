@@ -6,52 +6,32 @@
 # The parent doc must already exist -- run write_docs.yml first if needed.
 #
 # INPUTS:
-#   target            REQUIRED.  Container/host name (e.g. 1a).
-#   db_name           REQUIRED.  Database name.
-#   count             REQUIRED.  How many attachments to write.
-#   doc_id_prefix     OPTIONAL.  Default "micro/doc".  Ids become <doc_id_prefix>/0..count-1.
-#   attachment_name   OPTIONAL.  Default "data".  Names become <attachment_name>/0..count-1.
-#   payload           OPTIONAL.  Default "blob-<n>".  Body of each attachment.
+#   target            REQUIRED.
+#   db_name           REQUIRED.
+#   count             REQUIRED.
+#   doc_id_prefix     OPTIONAL.  Default "micro/doc".
+#   attachment_name   OPTIONAL.  Default "data".
+#   payload           OPTIONAL.  Default "blob-<n>".
 #
-# RUN EXAMPLES:
-#   ansible-playbook toolbox/writes/write_attachments.yml \
-#       -e target=1a -e db_name=Tenants -e count=10
-#
-#   ansible-playbook toolbox/writes/write_attachments.yml \
-#       -e target=1a -e db_name=Tenants -e count=3 -e doc_id_prefix=files/hub -e attachment_name=data
+# RUN EXAMPLE:
+#   ansible-playbook toolbox/writes/write_attachments.yml -e target=1a -e db_name=Tenants -e count=10
 ##################################################################################################
 
 - name: PUT N attachments on existing docs
   hosts: localhost
   connection: local
   gather_facts: false
-
   tasks:
-    - name: Validate inputs
-      ansible.builtin.assert:
-        that:
-          - target is defined
-          - db_name is defined
-          - count is defined
-          - (count | int) > 0
-        fail_msg: "Required: -e target=<node> -e db_name=<db> -e count=<positive int>"
-
-    - name: PUT {{ count }} attachments to {{ target }}/{{ db_name }}
-      ansible.builtin.uri:
-        url: "https://{{ target }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/attachments?id={{ (doc_id_prefix | default('micro/doc')) ~ '/' ~ n | urlencode }}&name={{ (attachment_name | default('data')) ~ '/' ~ n | urlencode }}"
-        method: PUT
+    - ravendb_writes:
+        kind: attachments
+        target: "{{ target }}"
+        db_name: "{{ db_name }}"
+        ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
-        ca_path: "{{ cert_ca_crt }}"
-        body_format: raw
-        body: "{{ payload | default('blob-' ~ n) }}"
-        headers:
-          Content-Type: "application/octet-stream"
-        status_code: [200, 201, 204]
-      loop: "{{ range(count | int) | list }}"
-      loop_control:
-        loop_var: n
-        label: "{{ doc_id_prefix | default('micro/doc') }}/{{ n }}::{{ attachment_name | default('data') }}/{{ n }}"
-
-    - name: Done
-      ansible.builtin.debug:
-        msg: "ATTACHED  {{ count }} attachments on {{ target }}/{{ db_name }} (doc_prefix={{ doc_id_prefix | default('micro/doc') }}, attachment={{ attachment_name | default('data') }})"
+        ca_cert: "{{ cert_ca_crt }}"
+        count: "{{ count | int }}"
+        doc_id_prefix: "{{ doc_id_prefix | default(omit) }}"
+        attachment_name: "{{ attachment_name | default(omit) }}"
+        payload: "{{ payload | default(omit) }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }

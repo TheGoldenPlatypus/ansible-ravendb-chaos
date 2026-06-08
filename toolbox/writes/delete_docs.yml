@@ -2,72 +2,34 @@
 # toolbox/writes/delete_docs.yml
 #
 # Deletes docs on a target node either by an explicit list of ids or by an id prefix + count.
-# Use this when a scenario needs to exercise delete-propagation paths -- e.g. the
-# filtered-replication redesign has a class of bugs around "sender thinks doc was deleted,
-# receiver thinks it wasn't" that we couldn't currently exercise because the harness only
-# writes docs.
+# Use this when a scenario needs to exercise delete-propagation paths.
 #
 # INPUTS (provide EITHER ids OR id_prefix+count):
-#   target       REQUIRED.  Container name (e.g. 1a).
-#   db_name      REQUIRED.  Database name.
+#   target       REQUIRED.
+#   db_name      REQUIRED.
 #   ids          OPTIONAL.  Explicit list of doc ids to delete (JSON list on the CLI).
-#   id_prefix    OPTIONAL.  Prefix used to construct ids <id_prefix>/0..count-1 (same shape
-#                           as write_docs.yml's output).
-#   count        OPTIONAL.  Required iff id_prefix is set.  How many sequential ids to delete.
+#   id_prefix    OPTIONAL.  Builds ids <id_prefix>/0..count-1.
+#   count        OPTIONAL.  Required iff id_prefix is set.
 #
 # RUN EXAMPLES:
-#   # delete every doc that write_docs.yml wrote with default prefix + count=50
-#   ansible-playbook toolbox/writes/delete_docs.yml -K \
-#       -e target=1a -e db_name=Tenants -e id_prefix=micro/doc -e count=50
-#
-#   # delete the seed docs from the chaos_failover scenario
-#   ansible-playbook toolbox/writes/delete_docs.yml -K \
-#       -e target=1a -e db_name=Tenants -e id_prefix=other/seed -e count=10
-#
-#   # delete an explicit list of ids
-#   ansible-playbook toolbox/writes/delete_docs.yml -K \
-#       -e target=1a -e db_name=Tenants \
-#       -e '{"ids":["users/1","users/42","tenants/cluster2/foo"]}'
+#   ansible-playbook toolbox/writes/delete_docs.yml -e target=1a -e db_name=Tenants -e id_prefix=micro/doc -e count=50
+#   ansible-playbook toolbox/writes/delete_docs.yml -e target=1a -e db_name=Tenants -e '{"ids":["users/1","users/42"]}'
 ##################################################################################################
 
 - name: Delete docs on a target node
   hosts: localhost
   connection: local
   gather_facts: false
-
   tasks:
-    - name: Validate inputs
-      ansible.builtin.assert:
-        that:
-          - target is defined
-          - db_name is defined
-          - (ids is defined) or (id_prefix is defined and count is defined)
-        fail_msg: >-
-          Required: -e target=<node> -e db_name=<db>
-          AND either -e '{"ids":[...]}' or both -e id_prefix=<p> -e count=<N>
-
-    - name: Build effective id list (prefix+count form)
-      ansible.builtin.set_fact:
-        effective_ids: "{{ range(count | int) | map('regex_replace', '^(.*)$', id_prefix ~ '/\\1') | list }}"
-      when: ids is not defined
-
-    - name: Use the explicit ids list as-is
-      ansible.builtin.set_fact:
-        effective_ids: "{{ ids }}"
-      when: ids is defined
-
-    - name: DELETE each doc on {{ target }}/{{ db_name }}
-      ansible.builtin.uri:
-        url: "https://{{ target }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/docs?id={{ doc_id | urlencode }}"
-        method: DELETE
+    - ravendb_writes:
+        kind: delete
+        target: "{{ target }}"
+        db_name: "{{ db_name }}"
+        ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
-        ca_path: "{{ cert_ca_crt }}"
-        status_code: [204, 404]
-      loop: "{{ effective_ids }}"
-      loop_control:
-        loop_var: doc_id
-        label: "{{ doc_id }}"
-
-    - name: Done
-      ansible.builtin.debug:
-        msg: "DELETED  {{ effective_ids | length }} doc(s) on {{ target }}/{{ db_name }} (404s tolerated -- some ids may not have existed)"
+        ca_cert: "{{ cert_ca_crt }}"
+        ids: "{{ ids | default(omit) }}"
+        id_prefix: "{{ id_prefix | default(omit) }}"
+        count: "{{ count | default(0) | int }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }

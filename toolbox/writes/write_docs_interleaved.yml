@@ -7,69 +7,34 @@
 # mixed in the same write burst.
 #
 # DOC IDS:
-#   For n in 0..count-1:
-#       <prefixes[ n % len(prefixes) ]>-<n // len(prefixes)>
-#
-#   With prefixes=["A", "B"] and count=4 you get:  A-0, B-0, A-1, B-1
-#   With prefixes=["X", "Y", "Z"] and count=6 you get:  X-0, Y-0, Z-0, X-1, Y-1, Z-1
-#
-#   (Dash between the prefix and the index so it's obvious where the prefix ends,
-#    even when the prefix itself contains slashes.)
+#   For n in 0..count-1:  <prefixes[ n % len(prefixes) ]>-<n // len(prefixes)>
+#   With prefixes=["A","B"] and count=4 you get:  A-0, B-0, A-1, B-1
 #
 # INPUTS:
-#   target    REQUIRED.  Container name to write to (e.g. 1a).
-#   db_name   REQUIRED.  Database name.
-#   count     REQUIRED.  Total number of docs to write.
-#   prefixes  REQUIRED.  List of id prefixes; the tool rotates through them in order.
+#   target    REQUIRED.
+#   db_name   REQUIRED.
+#   count     REQUIRED.
+#   prefixes  REQUIRED.  List of id prefixes; rotates in order.
 #
-# RUN EXAMPLE (from a scenario via import_playbook):
-#   - ansible.builtin.import_playbook: toolbox/writes/write_docs_interleaved.yml
-#     vars:
-#       target: 1a
-#       db_name: Tenants
-#       count: 20
-#       prefixes:
-#         - "tenants/cluster2/written-on-1a/r1"
-#         - "other/written-on-1a/r1"
-#
-# RUN EXAMPLE (from the CLI, list passed as JSON):
+# RUN EXAMPLE:
 #   ansible-playbook toolbox/writes/write_docs_interleaved.yml \
 #       -e target=1a -e db_name=Tenants -e count=20 \
 #       -e '{"prefixes":["tenants/cluster2/x","other/x"]}'
 ##################################################################################################
 
-- name: Write N docs to a target node, round-robin across prefixes
+- name: Write N docs round-robin across prefixes
   hosts: localhost
   connection: local
   gather_facts: false
-
   tasks:
-    - name: Validate inputs
-      ansible.builtin.assert:
-        that:
-          - target is defined
-          - db_name is defined
-          - count is defined
-          - (count | int) > 0
-          - prefixes is defined
-          - prefixes is iterable
-          - (prefixes | length) > 0
-        fail_msg: "Required: -e target=<node> -e db_name=<db> -e count=<positive int> -e prefixes=<non-empty list>"
-
-    - name: PUT {{ count }} docs to {{ target }}/{{ db_name }} (round-robin across {{ prefixes | length }} prefix(es))
-      ansible.builtin.uri:
-        url: "https://{{ target }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/docs?id={{ prefixes[ n | int % (prefixes | length) ] }}-{{ n | int // (prefixes | length) }}"
-        method: PUT
+    - ravendb_writes:
+        kind: docs_interleaved
+        target: "{{ target }}"
+        db_name: "{{ db_name }}"
+        ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
-        ca_path: "{{ cert_ca_crt }}"
-        body_format: json
-        body: { "@metadata": { "@collection": "MicroDocs" } }
-        status_code: [200, 201]
-      loop: "{{ range(count | int) | list }}"
-      loop_control:
-        loop_var: n
-        label: "{{ prefixes[ n | int % (prefixes | length) ] }}-{{ n | int // (prefixes | length) }}"
-
-    - name: Done
-      ansible.builtin.debug:
-        msg: "WROTE  {{ count }} docs to {{ target }}/{{ db_name }} interleaved across [{{ prefixes | join(', ') }}]"
+        ca_cert: "{{ cert_ca_crt }}"
+        count: "{{ count | int }}"
+        prefixes: "{{ prefixes }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }

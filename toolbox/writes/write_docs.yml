@@ -10,47 +10,32 @@
 #   db_name    REQUIRED.  Database name.
 #   count      REQUIRED.  Integer.  How many docs to write.
 #   id_prefix  OPTIONAL.  Default "micro/doc".  Doc ids become <id_prefix>/0..N-1.
+#   body_tag   OPTIONAL.  When set, body includes a "tag" field.  Useful for the conflict-
+#                         generation pattern -- two writers on the same id pool with distinct
+#                         body_tag values produce content RavenDB resolves as conflicts.
+#                         RavenDB dedupes identical-content PUTs into one revision; body_tag
+#                         is the cheapest way to keep each side's writes distinct.
 #
 # RUN EXAMPLES:
-#   # write 50 docs with id pattern micro/doc/0 .. micro/doc/49
-#   ansible-playbook toolbox/writes/write_docs.yml \
-#       -e target=1a -e db_name=Tenants -e count=50
-#
-#   # custom id prefix
-#   ansible-playbook toolbox/writes/write_docs.yml \
-#       -e target=1a -e db_name=Tenants -e count=20 -e id_prefix=probe/burst1
+#   ansible-playbook toolbox/writes/write_docs.yml -e target=1a -e db_name=Tenants -e count=50
+#   ansible-playbook toolbox/writes/write_docs.yml -e target=1a -e db_name=db1 -e count=20 -e id_prefix=probe/burst1
+#   ansible-playbook toolbox/writes/write_docs.yml -e target=1a -e db_name=db1 -e count=100 -e id_prefix=users/conflict -e body_tag=hub
 ##################################################################################################
 
 - name: Write N docs to a target node
   hosts: localhost
   connection: local
   gather_facts: false
-
   tasks:
-    - name: Validate inputs
-      ansible.builtin.assert:
-        that:
-          - target is defined
-          - db_name is defined
-          - count is defined
-          - (count | int) > 0
-        fail_msg: "Required: -e target=<node> -e db_name=<db> -e count=<positive int>"
-
-    - name: PUT {{ count }} docs to {{ target }}/{{ db_name }}
-      ansible.builtin.uri:
-        url: "https://{{ target }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/docs?id={{ id_prefix | default('micro/doc') }}/{{ n }}"
-        method: PUT
+    - ravendb_writes:
+        kind: docs
+        target: "{{ target }}"
+        db_name: "{{ db_name }}"
+        ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
-        ca_path: "{{ cert_ca_crt }}"
-        body_format: json
-        body: { "@metadata": { "@collection": "MicroDocs" } }
-        status_code: [200, 201]
-      loop: "{{ range(count | int) | list }}"
-      loop_control:
-        loop_var: n
-        label: "{{ id_prefix | default('micro/doc') }}/{{ n }}"
-      no_log: "{{ quiet | default(true) | bool }}"
-
-    - name: Done
-      ansible.builtin.debug:
-        msg: "WROTE  {{ count }} docs to {{ target }}/{{ db_name }} (prefix: {{ id_prefix | default('micro/doc') }})"
+        ca_cert: "{{ cert_ca_crt }}"
+        count: "{{ count | int }}"
+        id_prefix: "{{ id_prefix | default(omit) }}"
+        body_tag: "{{ body_tag | default(omit) }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }

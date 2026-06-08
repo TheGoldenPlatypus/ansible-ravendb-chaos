@@ -2,78 +2,44 @@
 # toolbox/writes/restore_revision.yml
 #
 # Restores an older revision of a single doc as the new live doc.
-#
-# Implementation: GET the revision's content via /revisions?id=...&changeVector=..., then PUT
-# the same body back as the live doc (which becomes the new top revision).  The change-vector
-# identifying the source revision is required -- get it from diagnostic_capture_doc_cv output
-# or via Studio Revisions tab Metadata.
+# Implementation: GET the revision's content via /revisions?changeVector=..., then PUT the same
+# body back as the live doc (which becomes the new top revision).
 #
 # INPUTS:
-#   target       REQUIRED.  Container/host to talk to.
-#   db_name      REQUIRED.  Database name.
-#   doc_id       REQUIRED.  Doc to restore.
+#   target       REQUIRED.
+#   db_name      REQUIRED.
+#   doc_id       REQUIRED.
 #   revision_cv  REQUIRED.  Change-vector of the revision to restore (opaque string).
+#                           Get it from diagnostic_capture_doc_cv output or Studio Metadata.
+#
+# GOTCHA: change-vectors with multiple entries contain spaces (e.g. "A:3-..., B:2-...").
+# Ansible's `-e key=value` parser truncates values at the first space -- pass the CV via JSON
+# extra-vars instead: `-e '{"revision_cv":"A:3-..., B:2-..."}'`.
 #
 # RUN EXAMPLES:
-#   ansible-playbook toolbox/writes/restore_revision.yml -K \
-#       -e target=1a -e db_name=Tenants -e doc_id=files/1 \
-#       -e revision_cv='A:3-uQvp4csQpESZNSbifH8hxQ'
+#   # single-entry CV (no spaces) -- key=value form works:
+#   ansible-playbook toolbox/writes/restore_revision.yml -e target=1a -e db_name=Tenants \
+#       -e doc_id=files/1 -e revision_cv='A:3-uQvp4csQpESZNSbifH8hxQ'
+#
+#   # multi-entry CV (replicated revision) -- must use JSON form:
+#   ansible-playbook toolbox/writes/restore_revision.yml -e target=1a -e db_name=Tenants \
+#       -e doc_id=files/1 \
+#       -e '{"revision_cv":"A:107-Er00LwYa5UyketmLwIqMlA, C:106-STkzWe2uHEqjayzYRRc4Vg"}'
 ##################################################################################################
 
 - name: Restore an older revision as the live doc
   hosts: localhost
   connection: local
   gather_facts: false
-
   tasks:
-    - name: Validate inputs
-      ansible.builtin.assert:
-        that:
-          - target is defined
-          - db_name is defined
-          - doc_id is defined
-          - revision_cv is defined
-        fail_msg: "Required: -e target=<node> -e db_name=<db> -e doc_id=<id> -e revision_cv=<cv>"
-
-
-    - name: Encode revision_cv for the URL (spaces -> %20, not +)
-      ansible.builtin.set_fact:
-        revision_cv_enc: "{{ revision_cv | replace('+', '%2B') | replace(' ', '%20') | replace(',', '%2C') | replace(':', '%3A') }}"
-
-    - name: DEBUG -- show exactly what URL Ansible will hit
-      ansible.builtin.debug:
-        msg:
-          - "raw revision_cv:   {{ revision_cv }}"
-          - "encoded:           {{ revision_cv_enc }}"
-          - "full URL:          https://{{ target }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/revisions?changeVector={{ revision_cv_enc }}"
-
-    - name: GET the revision content
-      ansible.builtin.uri:
-        url: "https://{{ target }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/revisions?changeVector={{ revision_cv_enc }}"
-        method: GET
+    - ravendb_writes:
+        kind: restore_revision
+        target: "{{ target }}"
+        db_name: "{{ db_name }}"
+        ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
-        ca_path: "{{ cert_ca_crt }}"
-        return_content: true
-        status_code: [200]
-      register: rev_get
-
-    - name: Sanity check the revision was found
-      ansible.builtin.assert:
-        that:
-          - rev_get.json.Results | length > 0
-        fail_msg: "No revision found for cv={{ revision_cv }} on {{ doc_id }}"
-
-    - name: PUT the revision body back as the live doc
-      ansible.builtin.uri:
-        url: "https://{{ target }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/docs?id={{ doc_id | urlencode }}"
-        method: PUT
-        client_cert: "{{ cert_dir }}/client.pem"
-        ca_path: "{{ cert_ca_crt }}"
-        body_format: json
-        body: "{{ rev_get.json.Results[0] }}"
-        status_code: [200, 201]
-      register: put_result
-
-    - name: Done
-      ansible.builtin.debug:
-        msg: "RESTORED  revision {{ revision_cv }} -> live doc {{ doc_id }} on {{ target }}/{{ db_name }}"
+        ca_cert: "{{ cert_ca_crt }}"
+        doc_id: "{{ doc_id }}"
+        revision_cv: "{{ revision_cv }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }

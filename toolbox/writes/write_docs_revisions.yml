@@ -2,89 +2,36 @@
 # toolbox/writes/write_docs_revisions.yml
 #
 # PUTs `count` docs `revs_per_doc` times each, with a DISTINCT body on every PUT so RavenDB
-# actually records each one as a new revision (write_docs.yml uses a fixed body which RavenDB
-# dedups into a single revision -- not what you want when seeding mixed-form revision history
-# or when a scenario needs N revisions per doc).
-#
+# actually records each one as a new revision.
 #
 # INPUTS:
-#   target         REQUIRED.  Container/host to write to.
-#   db_name        REQUIRED.  Database name (revisions config must already be enabled).
+#   target         REQUIRED.
+#   db_name        REQUIRED.  (revisions config must already be enabled)
 #   count          REQUIRED.  Number of distinct doc ids.
 #   revs_per_doc   REQUIRED.  Number of distinct revisions to PUT per doc.
-#   id_prefix      OPTIONAL.  Default "seed".  Doc ids become <id_prefix>/0..count-1.
-#   collection     OPTIONAL.  Default "MicroDocs".  RavenDB collection to PUT into
-#                             (controls which per-collection revisions config applies).
+#   id_prefix      OPTIONAL.  Default "seed".
+#   collection     OPTIONAL.  Default "MicroDocs".
 #
 # RUN EXAMPLES:
-#   # 10k docs x 5 revs = 50k revisions
-#   ansible-playbook toolbox/writes/write_docs_revisions.yml \
-#       -e target=1a -e db_name=db1 -e count=10000 -e revs_per_doc=5
-#
-#   # custom prefix
-#   ansible-playbook toolbox/writes/write_docs_revisions.yml \
-#       -e target=1a -e db_name=db1 -e count=100 -e revs_per_doc=3 -e id_prefix=probe/r1
+#   ansible-playbook toolbox/writes/write_docs_revisions.yml -e target=1a -e db_name=db1 -e count=10000 -e revs_per_doc=5
+#   ansible-playbook toolbox/writes/write_docs_revisions.yml -e target=1a -e db_name=db1 -e count=100 -e revs_per_doc=3 -e id_prefix=probe/r1
 ##################################################################################################
 
 - name: Write N docs x M distinct revisions each
   hosts: localhost
   connection: local
   gather_facts: false
-
   tasks:
-    - name: Validate inputs
-      ansible.builtin.assert:
-        that:
-          - target is defined
-          - db_name is defined
-          - count is defined and (count | int) > 0
-          - revs_per_doc is defined and (revs_per_doc | int) > 0
-        fail_msg: "Required: -e target=<node> -e db_name=<db> -e count=<N> -e revs_per_doc=<M>"
-
-    - name: PUT {{ count }} docs x {{ revs_per_doc }} distinct revisions on {{ target }}/{{ db_name }}
-      ansible.builtin.shell: |
-        set -eu
-        URL="https://{{ target }}.{{ ravendb_domain }}:443/databases/{{ db_name }}"
-        PEM="{{ cert_dir }}/client.pem"
-        CA="{{ cert_ca_crt }}"
-        TOTAL=$(( {{ count | int }} * {{ revs_per_doc | int }} ))
-        # Progress tick: TOTAL/20 -- at most 500, at least 1 -- so we get ~20 lines for
-        # any size run.  Lines also go to a side log; `tail -f /tmp/write_docs_revisions-*.log`
-        # from another shell to watch live.
-        TICK=$(( TOTAL / 20 ))
-        [ $TICK -lt 1 ]   && TICK=1
-        [ $TICK -gt 500 ] && TICK=500
-        OK=0; ERR=0; DONE=0
-        START=$(date +%s)
-        LOG=/tmp/write_docs_revisions-{{ target }}-{{ db_name }}.log
-        : > "$LOG"
-        echo "writing $TOTAL PUTs to $URL ({{ count | int }} docs x {{ revs_per_doc | int }} revs) -- tick every $TICK" | tee -a "$LOG" >&2
-        for v in $(seq 1 {{ revs_per_doc | int }}); do
-          for n in $(seq 0 {{ (count | int) - 1 }}); do
-            id="{{ id_prefix | default('seed') }}/$n"
-            body="{\"v\":$v,\"src\":\"write_docs_revisions\",\"@metadata\":{\"@collection\":\"{{ collection | default('MicroDocs') }}\"}}"
-            code=$(curl -sk -o /dev/null -w '%{http_code}' --cert "$PEM" --cacert "$CA" \
-              -X PUT "$URL/docs?id=$id" \
-              -H "Content-Type: application/json" -d "$body")
-            if [ "$code" = "200" ] || [ "$code" = "201" ]; then OK=$((OK+1)); else ERR=$((ERR+1)); fi
-            DONE=$((DONE+1))
-            if [ $((DONE % TICK)) -eq 0 ] || [ $DONE -eq $TOTAL ]; then
-              ELAPSED=$(( $(date +%s) - START ))
-              [ $ELAPSED -lt 1 ] && ELAPSED=1
-              RATE=$(( DONE / ELAPSED ))
-              PCT=$(( DONE * 100 / TOTAL ))
-              echo "  [$PCT%] done=$DONE/$TOTAL  ok=$OK  err=$ERR  ${RATE} PUT/s  ${ELAPSED}s" | tee -a "$LOG" >&2
-            fi
-          done
-        done
-        echo "WROTE  ok=$OK  errors=$ERR  expected=$TOTAL"
-      register: out
-
-    - name: Done
-      ansible.builtin.debug:
-        msg: >-
-          Wrote {{ count | int }} docs ({{ id_prefix | default('seed') }}/0..{{ (count | int) - 1 }})
-          with {{ revs_per_doc | int }} revisions each
-          into {{ collection | default('MicroDocs') }} on {{ target }}/{{ db_name }}.
-          {{ (out.stdout | regex_search('ok=(\d+)', '\1') | first) }}/{{ (count | int) * (revs_per_doc | int) }} writes succeeded
-          ({{ (out.stdout | regex_search('errors=(\d+)', '\1') | first) }} errors).
+    - ravendb_writes:
+        kind: docs_revisions
+        target: "{{ target }}"
+        db_name: "{{ db_name }}"
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        count: "{{ count | int }}"
+        revs_per_doc: "{{ revs_per_doc | int }}"
+        id_prefix: "{{ id_prefix | default(omit) }}"
+        collection: "{{ collection | default(omit) }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
