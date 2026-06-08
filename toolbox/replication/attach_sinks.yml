@@ -2,168 +2,49 @@
 # toolbox/replication/attach_sinks.yml
 #
 # Sink-side setup for filtered pull-replication.  For each sink cluster: creates a Raven
-# connection string pointing at the hub topology, then creates a sink-pull task that pulls
-# from the hub using the per-sink PFX previously minted by toolbox/replication/define_hub.yml.
-#
-# Generic -- all config is explicit input.  No vars_files; no hardcoded prefix template.
+# connection string pointing at the hub topology, then creates a sink-pull-replication task
+# that pulls from the hub using the per-sink PFX previously minted by
+# toolbox/replication/define_hub.yml.
 #
 # INPUTS:
-#   hub_topology_urls       REQUIRED.  JSON list of hub node URLs (e.g.
-#                                      ["https://1a.hubsink.test:443","https://1b.hubsink.test:443"]).
-#   db_name                 REQUIRED.  Database name shared across hub + sinks.
-#   hub_task_name           REQUIRED.  Must match the hub task name passed to define_hub.yml.
-#   sink_cluster_ids        REQUIRED.  JSON list of sink cluster ids to attach (e.g. [2, 3]).
-#   sink_allowed_paths      REQUIRED.  Dict: sink_cluster_id -> list of allowed HubToSink path
-#                                      prefixes.  Must match define_hub's spec.
+#   hub_topology_urls       REQUIRED.  JSON list of hub node URLs.
+#   db_name                 REQUIRED.
+#   hub_task_name           REQUIRED.  Must match the name passed to define_hub.yml.
+#   sink_cluster_ids        REQUIRED.  JSON list of sink cluster ids.
+#   sink_allowed_paths      REQUIRED.  Dict: sink_cluster_id -> list of allowed HubToSink paths.
+#                                      Must match define_hub.yml's spec.
 #   replication_mode        OPTIONAL.  Default "HubToSink, SinkToHub".
 #   sink_to_hub_paths       OPTIONAL.  Dict per sink id -> list of allowed SinkToHub prefixes.
-#                                      Default ["*"] for every sink.
+#                                      Default ["*"] per sink.
 #   connection_string_name  OPTIONAL.  Default "hub-connection".
-#   replication_certs_dir   OPTIONAL.  Where define_hub.yml wrote per-sink PFX files.  Default
-#                                      <repo_root>/replication-certs/.
+#   replication_certs_dir   OPTIONAL.  Where define_hub.yml wrote per-sink PFX files.
 #
 # RUN EXAMPLE:
-#   ansible-playbook toolbox/replication/attach_sinks.yml -K \
+#   ansible-playbook toolbox/replication/attach_sinks.yml \
 #       -e db_name=Tenants -e hub_task_name=hub-sink1 \
 #       -e '{"hub_topology_urls":["https://1a.hubsink.test:443","https://1b.hubsink.test:443","https://1c.hubsink.test:443"],
 #            "sink_cluster_ids":[2],
 #            "sink_allowed_paths":{"2":["users/sink1/*"]}}'
 ##################################################################################################
 
-- name: Ensure ravendb python client is available on the controller
-  hosts: localhost
-  connection: local
-  gather_facts: true
-
-  vars:
-    ravendb_venv_path: "{{ ansible_env.HOME }}/.ravendb_ansible"
-
-  tasks:
-    - name: Probe existing venv for ravendb module
-      ansible.builtin.command:
-        cmd: "{{ ravendb_venv_path }}/bin/python -c 'import ravendb'"
-      register: venv_probe
-      failed_when: false
-      changed_when: false
-
-    - name: Reuse existing venv -- skip the prereqs role
-      ansible.builtin.set_fact:
-        ansible_python_interpreter: "{{ ravendb_venv_path }}/bin/python"
-      when:
-        - venv_probe.rc == 0
-        - not (force_prereqs | default(false) | bool)
-
-    - name: Install ravendb python client prerequisites (one-time / forced)
-      ansible.builtin.include_role:
-        name: ravendb.ravendb.ravendb_python_client_prerequisites
-      when: (venv_probe.rc != 0) or (force_prereqs | default(false) | bool)
-
-
-- name: Attach every sink to the hub (generic)
+- name: Attach every sink to the hub
   hosts: localhost
   connection: local
   gather_facts: false
-
   tasks:
-    - name: Validate inputs
-      ansible.builtin.assert:
-        that:
-          - hub_topology_urls is defined
-          - hub_topology_urls is iterable
-          - (hub_topology_urls | length) > 0
-          - db_name is defined
-          - hub_task_name is defined
-          - sink_cluster_ids is defined
-          - sink_cluster_ids is iterable
-          - (sink_cluster_ids | length) > 0
-          - sink_allowed_paths is defined
-          - sink_allowed_paths is mapping
-        fail_msg: >-
-          Required: -e db_name=<db> -e hub_task_name=<name>
-          -e '{"hub_topology_urls":[...], "sink_cluster_ids":[...], "sink_allowed_paths":{<id>:[<path>,...]}}'
-
-    - name: Resolve defaults
-      ansible.builtin.set_fact:
-        eff_mode: "{{ replication_mode | default('HubToSink, SinkToHub') }}"
-        eff_conn_string_name: "{{ connection_string_name | default('hub-connection') }}"
-        eff_certs_dir: "{{ replication_certs_dir | default(playbook_dir.split('/toolbox')[0] ~ '/replication-certs') }}"
-
-    - name: Compute sink leader URLs (cluster id -> https://<id>a.<domain>:443)
-      # Build a {cluster_id: leader_url} map using the repo-wide convention <cluster_id>a as
-      # the leader name (1a, 2a, 3a, ...).  No regex backreferences -- just wrap the cluster
-      # id string with prefix and suffix via two anchor-based replaces.  Avoids the YAML ->
-      # Jinja -> Python re escape pyramid that bites \\1 backref forms in folded scalars.
-      ansible.builtin.set_fact:
-        sink_leader_urls: >-
-          {{ dict(sink_cluster_ids
-                  | zip(sink_cluster_ids
-                          | map('string')
-                          | map('regex_replace', '^', 'https://')
-                          | map('regex_replace', '$', 'a.' ~ ravendb_domain ~ ':443')
-                          | list)) }}
-
-    - name: Create the Raven connection string on each sink's leader
-      ravendb.ravendb.connection_string:
-        url: "{{ sink_leader_urls[item] }}"
-        database_name: "{{ db_name }}"
-        certificate_path: "{{ cert_dir }}/client.pem"
-        ca_cert_path: "{{ cert_ca_crt }}"
-        name: "{{ eff_conn_string_name }}"
-        cs_type: RAVEN
-        properties:
-          database: "{{ db_name }}"
-          urls: "{{ hub_topology_urls }}"
-        state: present
-      loop: "{{ sink_cluster_ids }}"
-      loop_control:
-        label: "cluster {{ item }} -> {{ sink_leader_urls[item] }}"
-
-    - name: Check whether each sink already has its pull-replication task
-      ansible.builtin.uri:
-        url: "{{ sink_leader_urls[item] }}/databases/{{ db_name }}/tasks"
-        method: GET
+    - ravendb_tasks:
+        kind: attach_sinks
+        ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
-        ca_path: "{{ cert_ca_crt }}"
-        return_content: true
-      register: sink_tasks_before
-      loop: "{{ sink_cluster_ids }}"
-      loop_control:
-        label: "cluster {{ item }}"
-
-    - name: Read each sink's PFX (base64) from replication_certs_dir
-      ansible.builtin.set_fact:
-        sink_pfx_b64_map: "{{ sink_pfx_b64_map | default({}) | combine({ item: lookup('file', eff_certs_dir ~ '/cluster' ~ item ~ '.replication.pfx.b64') }) }}"
-      loop: "{{ sink_cluster_ids }}"
-      loop_control:
-        label: "cluster {{ item }}"
-
-    - name: Create the sink-pull task on each sink (skipped if it already exists)
-      ansible.builtin.uri:
-        url: "{{ sink_leader_urls[item.item] }}/databases/{{ db_name }}/admin/tasks/sink-pull-replication"
-        method: POST
-        client_cert: "{{ cert_dir }}/client.pem"
-        ca_path: "{{ cert_ca_crt }}"
-        body_format: json
-        body:
-          PullReplicationAsSink:
-            TaskId: null
-            Name: "cluster{{ item.item }}-to-hub"
-            ConnectionStringName: "{{ eff_conn_string_name }}"
-            HubName: "{{ hub_task_name }}"
-            Mode: "{{ eff_mode }}"
-            Disabled: false
-            AccessName: "access-cluster{{ item.item }}"
-            CertificateWithPrivateKey: "{{ sink_pfx_b64_map[item.item] }}"
-            AllowedHubToSinkPaths: "{{ sink_allowed_paths[item.item | string] | default(sink_allowed_paths[item.item] | default(['*'])) }}"
-            AllowedSinkToHubPaths: "{{ (sink_to_hub_paths | default({}))[item.item | string] | default((sink_to_hub_paths | default({}))[item.item] | default(['*'])) }}"
-        status_code: [200, 201]
-      when: item.json.OngoingTasks | default([]) | selectattr('TaskType', 'eq', 'PullReplicationAsSink') | selectattr('TaskName', 'eq', 'cluster' ~ item.item ~ '-to-hub') | list | length == 0
-      loop: "{{ sink_tasks_before.results }}"
-      loop_control:
-        label: "cluster {{ item.item }}"
-
-    - name: Done
-      ansible.builtin.debug:
-        msg: >-
-          ATTACHED  {{ sink_cluster_ids | length }} sink(s) to hub task '{{ hub_task_name }}'
-          on database '{{ db_name }}'.  Sink leaders: {{ sink_leader_urls }}
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: "{{ db_name }}"
+        hub_task_name: "{{ hub_task_name }}"
+        hub_topology_urls: "{{ hub_topology_urls }}"
+        sink_cluster_ids: "{{ sink_cluster_ids }}"
+        sink_allowed_paths: "{{ sink_allowed_paths }}"
+        sink_to_hub_paths: "{{ sink_to_hub_paths | default(omit) }}"
+        replication_mode: "{{ replication_mode | default(omit) }}"
+        connection_string_name: "{{ connection_string_name | default(omit) }}"
+        replication_certs_dir: "{{ replication_certs_dir | default(playbook_dir.split('/toolbox')[0] ~ '/replication-certs') }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
