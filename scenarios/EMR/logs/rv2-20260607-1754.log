@@ -1,0 +1,920 @@
+TASK [Print the final cluster layout (tag / container / url per cluster)] ******
+ok: [localhost] => {
+    "msg": [
+        "================================================================",
+        "  Formed 2 cluster(s) with 10 node(s) (on hubsinknet)",
+        "================================================================",
+        "",
+        "  Cluster 1",
+        "    tag   container   url",
+        "    A     1a          https://1a.hubsink.test:443",
+        "    B     1b          https://1b.hubsink.test:443",
+        "    C     1c          https://1c.hubsink.test:443",
+        "    D     1d          https://1d.hubsink.test:443",
+        "    E     1e          https://1e.hubsink.test:443",
+        "    F     1f          https://1f.hubsink.test:443",
+        "    G     1g          https://1g.hubsink.test:443",
+        "    H     1h          https://1h.hubsink.test:443",
+        "    I     1i          https://1i.hubsink.test:443",
+        "",
+        "  Cluster 2",
+        "    tag   container   url",
+        "    A     2a          https://2a.hubsink.test:443",
+        "",
+        "================================================================"
+    ]
+}
+
+PLAY RECAP *********************************************************************
+1a                         : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+1b                         : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+1c                         : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+1d                         : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+1e                         : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+1f                         : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+1g                         : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+1h                         : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+1i                         : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+2a                         : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+localhost                  : ok=16   changed=0    unreachable=0    failed=0    skipped=2    rescued=0    ignored=0   
+
+
+[1;36m[17:58:01] upgrade tgt[0m
+
+PLAY [Register target for docker mode (no-op in ssh mode)] *********************
+
+TASK [Validate inputs] *********************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [(docker) Add target to ravendb_nodes group] ******************************
+ok: [localhost]
+
+TASK [(ssh) Verify target is in inventory] *************************************
+skipping: [localhost]
+
+PLAY [Pre-stage custom build on target (only when custom_build is provided)] ***
+
+TASK [Download remote custom build to /tmp/ravendb.deb] ************************
+skipping: [2a]
+
+TASK [Copy local custom build to /tmp/ravendb.deb] *****************************
+changed: [2a]
+
+PLAY [Capture "before" version and run the upgrade] ****************************
+
+TASK [Gathering Facts] *********************************************************
+ok: [2a]
+
+TASK [Record current RavenDB version (before)] *********************************
+ok: [2a]
+
+TASK [Include ravendb_node role (state=present triggers in-place upgrade)] *****
+included: ravendb.ravendb.ravendb_node for 2a
+
+TASK [ravendb.ravendb.ravendb_node : Validating arguments against arg spec 'main' - The main entry point for the ravendb_node role.] ***
+ok: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Install prerequisites for RHEL] ***********
+skipping: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Debian-family path (Ubuntu -> DEB, others -> tarball)] ***
+included: /home/omer/.ansible/collections/ansible_collections/ravendb/ravendb/roles/ravendb_node/tasks/debian.yml for 2a
+
+TASK [ravendb.ravendb.ravendb_node : Install prerequisites [Debian]] ***********
+ok: [2a] => (item=bzip2)
+ok: [2a] => (item=jq)
+ok: [2a] => (item=unzip)
+ok: [2a] => (item=openssl)
+ok: [2a] => (item=ca-certificates)
+
+TASK [ravendb.ravendb.ravendb_node : Install ICU for tarball path [Debian non-Ubuntu]] ***
+skipping: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Determine architecture] *******************
+ok: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Fail if architecture is unsupported] ******
+skipping: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Determine Ubuntu version (Ubuntu only)] ***
+ok: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Message] **********************************
+ok: [2a] => {
+    "msg": "Downloading RavenDB 7.2.2 via deb..."
+}
+
+TASK [ravendb.ravendb.ravendb_node : Install RavenDB] **************************
+included: /home/omer/.ansible/collections/ansible_collections/ravendb/ravendb/roles/ravendb_node/tasks/install.yml for 2a
+
+TASK [ravendb.ravendb.ravendb_node : Populate service facts] *******************
+ok: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Check if RavenDB is already installed] ****
+ok: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Stop RavenDB service] *********************
+changed: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Set vm.swappiness] ************************
+ok: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Create ravendb group] *********************
+ok: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Create ravendb user] **********************
+ok: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Prepare directory structure] **************
+changed: [2a] => (item=/usr/lib/ravendb/server)
+changed: [2a] => (item=/usr/lib/ravendb/server/libmscordaccore)
+changed: [2a] => (item=/var/lib/ravendb)
+changed: [2a] => (item=/etc/ravendb)
+changed: [2a] => (item=/etc/ravendb/security)
+
+TASK [ravendb.ravendb.ravendb_node : Prepare directory structure] **************
+changed: [2a] => (item=/var/lib/ravendb)
+changed: [2a] => (item=/var/lib/ravendb/nuget)
+changed: [2a] => (item=/var/lib/ravendb/data)
+changed: [2a] => (item=/var/log/ravendb/audit)
+changed: [2a] => (item=/var/log/ravendb/logs)
+
+TASK [ravendb.ravendb.ravendb_node : Message] **********************************
+ok: [2a] => {
+    "msg": "Installing RavenDB 7.2.2..."
+}
+
+TASK [ravendb.ravendb.ravendb_node : Determine whether to update or install RavenDB] ***
+ok: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Check if RavenDB is already installed] ****
+ok: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Install or Upgrade RavenDB from DEB package] ***
+changed: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Determine current RavenDB version] ********
+changed: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Determine whether that's an update or a new deployment] ***
+ok: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Unpack RavenDB server binaries (tarball path)] ***
+skipping: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Determine settings.json template] *********
+ok: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Template settings.json preset out] ********
+ok: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Settings override to temp file] ***********
+skipping: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Apply settings overrides] *****************
+skipping: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Adjust permissions for settings file] *****
+skipping: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Copy license file] ************************
+ok: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Include secure setup tasks] ***************
+skipping: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Include self-signed setup tasks] **********
+included: /home/omer/.ansible/collections/ansible_collections/ravendb/ravendb/roles/ravendb_node/tasks/ravendb_secure_self_sign_setup.yml for 2a
+
+TASK [ravendb.ravendb.ravendb_node : Resolve certificate/key source paths] *****
+ok: [2a -> localhost]
+
+TASK [ravendb.ravendb.ravendb_node : Ensure RavenDB server certificate file is present] ***
+ok: [2a] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [ravendb.ravendb.ravendb_node : Check if RavenDB server certificate file exists] ***
+ok: [2a -> localhost]
+
+TASK [ravendb.ravendb.ravendb_node : Fail if RavenDB server certificate file is missing] ***
+skipping: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Ensure RavenDB CA cert file is present] ***
+ok: [2a] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [ravendb.ravendb.ravendb_node : Check if RavenDB CA cert file exists] *****
+ok: [2a -> localhost]
+
+TASK [ravendb.ravendb.ravendb_node : Fail if RavenDB CA cert file is missing] ***
+skipping: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Ensure RavenDB CA key for system CA certificates is present] ***
+ok: [2a] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [ravendb.ravendb.ravendb_node : Check if RavenDB CA key file exists] ******
+ok: [2a -> localhost]
+
+TASK [ravendb.ravendb.ravendb_node : Fail if RavenDB CA key file is missing] ***
+skipping: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Copy RavenDB server certificate file] *****
+changed: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Copy RavenDB CA certificate file] *********
+changed: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Copy RavenDB CA certificate to system CA certificates] ***
+ok: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Update CA certificates] *******************
+changed: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Copy RavenDB CA key file] *****************
+changed: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Copy settings file] ***********************
+skipping: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Clear default settings json] **************
+changed: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Set ravendb_arch_so] **********************
+skipping: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Copy arch specific files] *****************
+skipping: [2a] => (item=librvnpal) 
+skipping: [2a] => (item=libsodium) 
+skipping: [2a] => (item=libzstd) 
+skipping: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Remove redundant sos] *********************
+skipping: [2a] => (item=librvnpal) 
+skipping: [2a] => (item=libsodium) 
+skipping: [2a] => (item=libzstd) 
+skipping: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Adjust binaries permissions] **************
+skipping: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Adjust executables permissions] ***********
+skipping: [2a] => (item=/usr/lib/ravendb/server/Raven.Server) 
+skipping: [2a] => (item=/usr/lib/ravendb/server/rvn) 
+skipping: [2a] => (item=/usr/lib/ravendb/server/Raven.Debug) 
+skipping: [2a] => (item=/usr/lib/ravendb/server) 
+skipping: [2a] => (item=/usr/lib/ravendb/server/createdump) 
+skipping: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Adjust directories permissions] ***********
+changed: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Adjust ownership and permissions for RavenDB server directory] ***
+changed: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Check OS uses capabilities] ***************
+ok: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Set capabilities] *************************
+changed: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Template ravendb.service out] *************
+ok: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Restart RavenDB service] ******************
+changed: [2a]
+
+TASK [ravendb.ravendb.ravendb_node : Uninstall RavenDB] ************************
+skipping: [2a]
+
+TASK [Record new RavenDB version (after)] **************************************
+ok: [2a]
+
+PLAY [Wait for the upgraded node to come back, then print summary] *************
+
+TASK [Wait for 2a HTTPS to respond (accept 200/401/403)] ***********************
+FAILED - RETRYING: [localhost]: Wait for 2a HTTPS to respond (accept 200/401/403) (60 retries left).
+ok: [localhost]
+
+TASK [Done] ********************************************************************
+ok: [localhost] => {
+    "msg": "UPGRADED  2a  6.2.15  ->  7.2.3-custom-72"
+}
+
+PLAY RECAP *********************************************************************
+2a                         : ok=49   changed=15   unreachable=0    failed=0    skipped=19   rescued=0    ignored=0   
+localhost                  : ok=4    changed=0    unreachable=0    failed=0    skipped=1    rescued=0    ignored=0   
+
+
+[1;36m[17:59:12] rv2[0m
+
+PLAY [Stop a background workload via its pidfile] ******************************
+
+TASK [Validate inputs] *********************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [TERM (then KILL after grace) the pid in /tmp/w1-1a-db1.pid] **************
+changed: [localhost]
+
+TASK [Done] ********************************************************************
+ok: [localhost] => {
+    "msg": "WORKLOAD ALREADY EXITED  no pidfile at /tmp/w1-1a-db1.pid"
+}
+
+PLAY [RV-2 pre -- validate inputs + show plan] *********************************
+
+TASK [ansible.builtin.assert] **************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "RV-2  v_old=6.2.15  v_new_build=/mnt/c/dev/hub-sink/ansible-ravendb-chaos/builds/raven-pr22875.deb src=[1a,1b,1c,1d,1e,1f,1g,1h,1i]  tgt=2a seed=300x2 revs"
+}
+
+PLAY [RV-2 step 1 -- create sharded source db1 + non-sharded target db1] *******
+
+TASK [ravendb_sharding] ********************************************************
+changed: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "SHARDED DB created  db1 on 1a  shards=['0', '1', '2']  orchestrator=['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I']"
+}
+
+TASK [ravendb_revisions] *******************************************************
+changed: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "REVISIONS configured on 1a/db1 -- MinimumRevisionsToKeep=100"
+}
+
+PLAY [Ensure ravendb python client is available on the controller] *************
+
+TASK [Gathering Facts] *********************************************************
+ok: [localhost]
+
+TASK [Probe existing venv for ravendb module] **********************************
+ok: [localhost]
+
+TASK [Reuse existing venv -- skip the prereqs role] ****************************
+ok: [localhost]
+
+TASK [Install ravendb python client prerequisites (one-time / forced)] *********
+skipping: [localhost]
+
+PLAY [Create a database via the ravendb.ravendb.database module] ***************
+
+TASK [Validate inputs] *********************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Create database] *********************************************************
+changed: [localhost]
+
+TASK [Done] ********************************************************************
+ok: [localhost] => {
+    "msg": "CREATED  db1 on cluster reachable via 2a (replication_factor=1)"
+}
+
+PLAY [RV-2 step 1 -- configure target revisions + seed source with v_62 raw-CV revisions] ***
+
+TASK [ravendb_revisions] *******************************************************
+changed: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "REVISIONS configured on 2a/db1 -- MinimumRevisionsToKeep=100"
+}
+
+TASK [ravendb_writes] **********************************************************
+changed: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "WROTE 600/600 PUTs to 1a/db1 (300 docs x 2 revisions each, id prefix 'seed', collection 'MicroDocs')"
+}
+
+PLAY [RV-2 step 2 -- launch W-1 on source leader (sharding distributes per docId)] ***
+
+TASK [Launch W-1 (background, async)] ******************************************
+[WARNING]: Found variable using reserved name: timeout
+changed: [localhost]
+
+PLAY [Wait for a background workload's pidfile to appear] **********************
+
+TASK [Validate inputs] *********************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Wait for /tmp/w1-1a-db1.pid to appear] ***********************************
+ok: [localhost]
+
+TASK [Done] ********************************************************************
+ok: [localhost] => {
+    "msg": "WORKLOAD STARTED  pidfile present at /tmp/w1-1a-db1.pid"
+}
+
+PLAY [RV-2 step 3 -- upgrade shard Sx (3 replicas one at a time) + per-shard checkpoint] ***
+
+TASK [Upgrade each Sx replica + wait_for_member] *******************************
+ASYNC POLL on localhost: jid=j100287892159.412866 started=1 finished=0
+ASYNC POLL on localhost: jid=j100287892159.412866 started=1 finished=0
+ASYNC OK on localhost: jid=j100287892159.412866
+changed: [localhost] => (item=1a)
+ASYNC POLL on localhost: jid=j48283817689.425283 started=1 finished=0
+ASYNC POLL on localhost: jid=j48283817689.425283 started=1 finished=0
+ASYNC OK on localhost: jid=j48283817689.425283
+changed: [localhost] => (item=1b)
+ASYNC POLL on localhost: jid=j878742395763.437623 started=1 finished=0
+ASYNC POLL on localhost: jid=j878742395763.437623 started=1 finished=0
+ASYNC OK on localhost: jid=j878742395763.437623
+changed: [localhost] => (item=1c)
+
+TASK [Shard Sx checkpoint -- replicas (1a/b/c) all schema 72001] ***************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "schema/build version per node:",
+        "  1a  7.2.3-custom-72",
+        "  1b  7.2.3-custom-72",
+        "  1c  7.2.3-custom-72"
+    ]
+}
+
+TASK [ansible.builtin.pause] ***************************************************
+skipping: [localhost]
+
+PLAY [RV-2 step 4 -- upgrade shard Sy (3 replicas one at a time) + per-shard checkpoint] ***
+
+TASK [Upgrade each Sy replica + wait_for_member] *******************************
+ASYNC POLL on localhost: jid=j181434810757.450023 started=1 finished=0
+ASYNC POLL on localhost: jid=j181434810757.450023 started=1 finished=0
+ASYNC OK on localhost: jid=j181434810757.450023
+changed: [localhost] => (item=1d)
+ASYNC POLL on localhost: jid=j194800960657.462460 started=1 finished=0
+ASYNC POLL on localhost: jid=j194800960657.462460 started=1 finished=0
+ASYNC OK on localhost: jid=j194800960657.462460
+changed: [localhost] => (item=1e)
+ASYNC POLL on localhost: jid=j958286716634.474806 started=1 finished=0
+ASYNC POLL on localhost: jid=j958286716634.474806 started=1 finished=0
+ASYNC OK on localhost: jid=j958286716634.474806
+changed: [localhost] => (item=1f)
+
+TASK [Shard Sy checkpoint] *****************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "schema/build version per node:",
+        "  1d  7.2.3-custom-72",
+        "  1e  7.2.3-custom-72",
+        "  1f  7.2.3-custom-72"
+    ]
+}
+
+TASK [ansible.builtin.pause] ***************************************************
+skipping: [localhost]
+
+PLAY [RV-2 step 5 -- upgrade shard Sz (3 replicas one at a time) + per-shard checkpoint] ***
+
+TASK [Upgrade each Sz replica + wait_for_member] *******************************
+ASYNC POLL on localhost: jid=j860496254778.487201 started=1 finished=0
+ASYNC POLL on localhost: jid=j860496254778.487201 started=1 finished=0
+ASYNC OK on localhost: jid=j860496254778.487201
+changed: [localhost] => (item=1g)
+ASYNC POLL on localhost: jid=j343455225075.499561 started=1 finished=0
+ASYNC POLL on localhost: jid=j343455225075.499561 started=1 finished=0
+ASYNC OK on localhost: jid=j343455225075.499561
+changed: [localhost] => (item=1h)
+ASYNC POLL on localhost: jid=j123773242286.511858 started=1 finished=0
+ASYNC POLL on localhost: jid=j123773242286.511858 started=1 finished=0
+ASYNC OK on localhost: jid=j123773242286.511858
+changed: [localhost] => (item=1i)
+
+TASK [Shard Sz checkpoint] *****************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "schema/build version per node:",
+        "  1g  7.2.3-custom-72",
+        "  1h  7.2.3-custom-72",
+        "  1i  7.2.3-custom-72"
+    ]
+}
+
+PLAY [Assert a background workload is still alive (pidfile + kill -0)] *********
+
+TASK [Validate inputs] *********************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Probe pidfile + recorded PID] ********************************************
+ok: [localhost]
+
+TASK [Dump worker debug log on failure (if present)] ***************************
+skipping: [localhost]
+
+TASK [Show worker debug log] ***************************************************
+skipping: [localhost]
+
+TASK [Assert workload is alive] ************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "WORKLOAD ALIVE  pidfile=/tmp/w1-1a-db1.pid  ALIVE pid=412821"
+}
+
+PLAY [Stop a background workload via its pidfile] ******************************
+
+TASK [Validate inputs] *********************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [TERM (then KILL after grace) the pid in /tmp/w1-1a-db1.pid] **************
+changed: [localhost]
+
+TASK [Done] ********************************************************************
+ok: [localhost] => {
+    "msg": "WORKLOAD STOPPED  pid=412821  pidfile=/tmp/w1-1a-db1.pid"
+}
+
+PLAY [RV-2 step 6 -- drain + tombstone settle + per-shard final asserts] *******
+
+TASK [Drain shard Sx] **********************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "STABLE -- LastDatabaseEtag unchanged across 3 node(s) (skipped=[], took 0.1s)",
+        "  sample 1 (18:12:58):",
+        "    1a  746",
+        "    1b  746",
+        "    1c  746",
+        "  sample 2 (18:12:58):",
+        "    1a  746",
+        "    1b  746",
+        "    1c  746"
+    ]
+}
+
+TASK [Drain shard Sy] **********************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "STABLE -- LastDatabaseEtag unchanged across 3 node(s) (skipped=[], took 0.1s)",
+        "  sample 1 (18:12:59):",
+        "    1d  558",
+        "    1e  558",
+        "    1f  558",
+        "  sample 2 (18:12:59):",
+        "    1d  558",
+        "    1e  558",
+        "    1f  558"
+    ]
+}
+
+TASK [Drain shard Sz] **********************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "STABLE -- LastDatabaseEtag unchanged across 3 node(s) (skipped=[], took 0.1s)",
+        "  sample 1 (18:12:59):",
+        "    1g  531",
+        "    1h  531",
+        "    1i  515",
+        "  sample 2 (18:12:59):",
+        "    1g  531",
+        "    1h  531",
+        "    1i  515"
+    ]
+}
+
+TASK [Trigger tombstone cleanup per (shard, replica)] **************************
+ok: [localhost] => (item=shard 0 via nodeTag=A)
+ok: [localhost] => (item=shard 0 via nodeTag=B)
+ok: [localhost] => (item=shard 0 via nodeTag=C)
+ok: [localhost] => (item=shard 1 via nodeTag=D)
+ok: [localhost] => (item=shard 1 via nodeTag=E)
+ok: [localhost] => (item=shard 1 via nodeTag=F)
+ok: [localhost] => (item=shard 2 via nodeTag=G)
+ok: [localhost] => (item=shard 2 via nodeTag=H)
+ok: [localhost] => (item=shard 2 via nodeTag=I)
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => (item=shard 0 nodeTag=A) => {
+    "msg": "tombstones/cleanup shard 0 nodeTag=A -> HTTP 200  cleaned=2"
+}
+ok: [localhost] => (item=shard 0 nodeTag=B) => {
+    "msg": "tombstones/cleanup shard 0 nodeTag=B -> HTTP 200  cleaned=1"
+}
+ok: [localhost] => (item=shard 0 nodeTag=C) => {
+    "msg": "tombstones/cleanup shard 0 nodeTag=C -> HTTP 200  cleaned=6"
+}
+ok: [localhost] => (item=shard 1 nodeTag=D) => {
+    "msg": "tombstones/cleanup shard 1 nodeTag=D -> HTTP 200  cleaned=1"
+}
+ok: [localhost] => (item=shard 1 nodeTag=E) => {
+    "msg": "tombstones/cleanup shard 1 nodeTag=E -> HTTP 200  cleaned=1"
+}
+ok: [localhost] => (item=shard 1 nodeTag=F) => {
+    "msg": "tombstones/cleanup shard 1 nodeTag=F -> HTTP 200  cleaned=6"
+}
+ok: [localhost] => (item=shard 2 nodeTag=G) => {
+    "msg": "tombstones/cleanup shard 2 nodeTag=G -> HTTP 200  cleaned=1"
+}
+ok: [localhost] => (item=shard 2 nodeTag=H) => {
+    "msg": "tombstones/cleanup shard 2 nodeTag=H -> HTTP 200  cleaned=1"
+}
+ok: [localhost] => (item=shard 2 nodeTag=I) => {
+    "msg": "tombstones/cleanup shard 2 nodeTag=I -> HTTP 200  cleaned=1"
+}
+
+TASK [Sx tombstone settle] *****************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "PARITY -- fields ['CountOfTombstones'] match across 3 node(s) (skipped=[], took 0.1s):",
+        "  CountOfTombstones = 0"
+    ]
+}
+
+TASK [Sy tombstone settle] *****************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "PARITY -- fields ['CountOfTombstones'] match across 3 node(s) (skipped=[], took 0.1s):",
+        "  CountOfTombstones = 0"
+    ]
+}
+
+TASK [Sz tombstone settle] *****************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "PARITY -- fields ['CountOfTombstones'] match across 3 node(s) (skipped=[], took 6.3s):",
+        "  CountOfTombstones = 1"
+    ]
+}
+
+TASK [Sx stats parity] *********************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "/stats parity  db=db1  nodes=['1a', '1b', '1c']",
+        "field                                 1a ,       1b ,       1c  status",
+        "CountOfAttachments                     0 ,        0 ,        0  OK",
+        "CountOfConflicts                       0 ,        0 ,        0  OK",
+        "CountOfCounterEntries                  0 ,        0 ,        0  OK (info)",
+        "CountOfDocuments                     143 ,      143 ,      143  OK",
+        "CountOfDocumentsConflicts              0 ,        0 ,        0  OK",
+        "CountOfRemoteAttachments               0 ,        0 ,        0  OK",
+        "CountOfRevisionDocuments             373 ,      373 ,      373  OK",
+        "CountOfTimeSeriesDeletedRanges         0 ,        0 ,        0  OK",
+        "CountOfTimeSeriesSegments              0 ,        0 ,        0  OK (info)",
+        "CountOfTombstones                      0 ,        0 ,        0  OK",
+        "CountOfUniqueAttachments               0 ,        0 ,        0  OK",
+        "SizeOnDisk                      67239936 , 67239936 , 67239936  info",
+        "PASS  every asserted field is parity-equal across ['1a', '1b', '1c']"
+    ]
+}
+
+TASK [Sy stats parity] *********************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "/stats parity  db=db1  nodes=['1d', '1e', '1f']",
+        "field                                 1d ,       1e ,       1f  status",
+        "CountOfAttachments                     0 ,        0 ,        0  OK",
+        "CountOfConflicts                       0 ,        0 ,        0  OK",
+        "CountOfCounterEntries                  0 ,        0 ,        0  OK (info)",
+        "CountOfDocuments                     105 ,      105 ,      105  OK",
+        "CountOfDocumentsConflicts              0 ,        0 ,        0  OK",
+        "CountOfRemoteAttachments               0 ,        0 ,        0  OK",
+        "CountOfRevisionDocuments             279 ,      279 ,      279  OK",
+        "CountOfTimeSeriesDeletedRanges         0 ,        0 ,        0  OK",
+        "CountOfTimeSeriesSegments              0 ,        0 ,        0  OK (info)",
+        "CountOfTombstones                      0 ,        0 ,        0  OK",
+        "CountOfUniqueAttachments               0 ,        0 ,        0  OK",
+        "SizeOnDisk                      67239936 , 67239936 , 67239936  info",
+        "PASS  every asserted field is parity-equal across ['1d', '1e', '1f']"
+    ]
+}
+
+TASK [Sz stats parity] *********************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "/stats parity  db=db1  nodes=['1g', '1h', '1i']",
+        "field                                 1g ,       1h ,       1i  status",
+        "CountOfAttachments                     0 ,        0 ,        0  OK",
+        "CountOfConflicts                       0 ,        0 ,        0  OK",
+        "CountOfCounterEntries                  0 ,        0 ,        0  OK (info)",
+        "CountOfDocuments                      99 ,       99 ,       99  OK",
+        "CountOfDocumentsConflicts              0 ,        0 ,        0  OK",
+        "CountOfRemoteAttachments               0 ,        0 ,        0  OK",
+        "CountOfRevisionDocuments             265 ,      265 ,      265  OK",
+        "CountOfTimeSeriesDeletedRanges         0 ,        0 ,        0  OK",
+        "CountOfTimeSeriesSegments              0 ,        0 ,        0  OK (info)",
+        "CountOfTombstones                      1 ,        1 ,        1  OK",
+        "CountOfUniqueAttachments               0 ,        0 ,        0  OK",
+        "SizeOnDisk                      67239936 , 67239936 , 67239936  info",
+        "PASS  every asserted field is parity-equal across ['1g', '1h', '1i']"
+    ]
+}
+
+TASK [Sx revision count parity] ************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "revision-count parity: 10 id(s) across ['1a', '1b', '1c']",
+        "  per-id counts (first 10):",
+        "    seed/0                [2, 2, 2]",
+        "    seed/1                [2, 2, 2]",
+        "    seed/2                [4, 4, 4]",
+        "    seed/3                [2, 2, 2]",
+        "    seed/4                [2, 2, 2]",
+        "    seed/5                [2, 2, 2]",
+        "    seed/6                [2, 2, 2]",
+        "    seed/7                [2, 2, 2]",
+        "    seed/8                [4, 4, 4]",
+        "    seed/9                [3, 3, 3]",
+        "  mismatched: 0",
+        "PASS  per-id revision counts agree across nodes"
+    ]
+}
+
+TASK [Sx orphan revisions] *****************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "orphan revisions adopted per node:",
+        "  1a  0",
+        "  1b  0",
+        "  1c  0",
+        "PASS  no orphan revisions on any node"
+    ]
+}
+
+TASK [All 9 source nodes on v_new (schema parity)] *****************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "schema/build version per node:",
+        "  1a  7.2.3-custom-72",
+        "  1b  7.2.3-custom-72",
+        "  1c  7.2.3-custom-72",
+        "  1d  7.2.3-custom-72",
+        "  1e  7.2.3-custom-72",
+        "  1f  7.2.3-custom-72",
+        "  1g  7.2.3-custom-72",
+        "  1h  7.2.3-custom-72",
+        "  1i  7.2.3-custom-72",
+        "DatabaseRecord.SupportedFeatures (via 1a): ['ThrowRevisionKeyTooBigFix']"
+    ]
+}
+
+PLAY [RV-2 step 7 -- smuggler_export source db1 -> .ravendbdump on controller] ***
+
+TASK [ravendb_smuggler] ********************************************************
+changed: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "EXPORTED 1a/db1 -> /mnt/c/dev/hub-sink/ansible-ravendb-chaos/scenarios/EMR/RV2/../../../captures/rv2-smuggler.ravendbdump (21768 bytes, HTTP 200)"
+}
+
+PLAY [RV-2 step 8 -- smuggler_import dump -> target db1] ***********************
+
+TASK [ravendb_smuggler] ********************************************************
+changed: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "IMPORTED rv2-smuggler.ravendbdump -> 2a/db1 (21768 bytes, HTTP 200)"
+}
+
+PLAY [RV-2 step 9 -- phase (b) checkpoint (source-union vs target parity, PK form hashed)] ***
+
+TASK [Source aggregate doc count] **********************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "1a/db1  ->  347 docs"
+}
+
+TASK [Target doc count] ********************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "2a/db1  ->  347 docs"
+}
+
+TASK [Target per-doc revision count exists (every probe id has >=1 revision)] ***
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "revision-count parity: 10 id(s) across ['2a']",
+        "  per-id counts (first 10):",
+        "    seed/0                [3]",
+        "    seed/1                [3]",
+        "    seed/2                [5]",
+        "    seed/3                [3]",
+        "    seed/4                [3]",
+        "    seed/5                [3]",
+        "    seed/6                [3]",
+        "    seed/7                [3]",
+        "    seed/8                [5]",
+        "    seed/9                [4]",
+        "  mismatched: 0",
+        "PASS  per-id revision counts agree across nodes"
+    ]
+}
+
+TASK [Target revision PK form is hashed (smuggler re-keyed via public API)] ****
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "stored-item CV shape check on 2a/db1 (expect=split, delimiter='|'):",
+        "  seed/0  LEGACY raw CV (no '|')",
+        "  seed/1  LEGACY raw CV (no '|')",
+        "  seed/2  LEGACY raw CV (no '|')",
+        "  seed/3  LEGACY raw CV (no '|')",
+        "  seed/4  LEGACY raw CV (no '|')",
+        "  seed/5  LEGACY raw CV (no '|')",
+        "  seed/6  LEGACY raw CV (no '|')",
+        "  seed/7  LEGACY raw CV (no '|')",
+        "  seed/8  LEGACY raw CV (no '|')",
+        "  seed/9  LEGACY raw CV (no '|')",
+        "N/A  legacy raw-CV form across all probes -- composite-CV lane not active on this build"
+    ]
+}
+
+PLAY [RV-2 -- DONE] ************************************************************
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "RV-2 PASS  src=[1a,1b,1c,1d,1e,1f,1g,1h,1i] tgt=2a db=db1 phase (a) sharded internal rolling upgrade + phase (b) sharded -> non-sharded smuggler (PK re-write to hashed) all held."
+}
+
+PLAY RECAP *********************************************************************
+localhost                  : ok=77   changed=13   unreachable=0    failed=0    skipped=5    rescued=0    ignored=0   
+
+
+[1;36m[18:13:17] RV-2 done[0m

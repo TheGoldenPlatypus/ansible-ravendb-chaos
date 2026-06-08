@@ -1,0 +1,724 @@
+TASK [Print the final cluster layout (tag / container / url per cluster)] ******
+ok: [localhost] => {
+    "msg": [
+        "================================================================",
+        "  Formed 2 cluster(s) with 6 node(s) (on hubsinknet)",
+        "================================================================",
+        "",
+        "  Cluster 1",
+        "    tag   container   url",
+        "    A     1a          https://1a.hubsink.test:443",
+        "    B     1b          https://1b.hubsink.test:443",
+        "    C     1c          https://1c.hubsink.test:443",
+        "",
+        "  Cluster 2",
+        "    tag   container   url",
+        "    A     2a          https://2a.hubsink.test:443",
+        "    B     2b          https://2b.hubsink.test:443",
+        "    C     2c          https://2c.hubsink.test:443",
+        "",
+        "================================================================"
+    ]
+}
+
+PLAY RECAP *********************************************************************
+1a                         : ok=2    changed=1    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+1b                         : ok=2    changed=1    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+1c                         : ok=2    changed=1    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+2a                         : ok=2    changed=1    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+2b                         : ok=2    changed=1    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+2c                         : ok=2    changed=1    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+localhost                  : ok=16   changed=2    unreachable=0    failed=0    skipped=2    rescued=0    ignored=0   
+
+
+[1;36m[10:43:50] rp1[0m
+
+PLAY [RP-1 pre -- validate inputs + show plan] *********************************
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "RP-1  hub=[1a,1b,1c]  sink=[2a,2b,2c]  filter=users/sink1/* bulk_users_sink1=300  bulk_orders_hub=300 burst_active=300  burst_restore=50"
+}
+
+PLAY [Ensure ravendb python client is available on the controller] *************
+
+TASK [Gathering Facts] *********************************************************
+ok: [localhost]
+
+TASK [Probe existing venv for ravendb module] **********************************
+ok: [localhost]
+
+TASK [Reuse existing venv -- skip the prereqs role] ****************************
+ok: [localhost]
+
+TASK [Install ravendb python client prerequisites (one-time / forced)] *********
+skipping: [localhost]
+
+PLAY [Create a database via the ravendb.ravendb.database module] ***************
+
+TASK [Validate inputs] *********************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Create database] *********************************************************
+changed: [localhost]
+
+TASK [Done] ********************************************************************
+ok: [localhost] => {
+    "msg": "CREATED  db1 on cluster reachable via 1a (replication_factor=3)"
+}
+
+PLAY [Ensure ravendb python client is available on the controller] *************
+
+TASK [Gathering Facts] *********************************************************
+ok: [localhost]
+
+TASK [Probe existing venv for ravendb module] **********************************
+ok: [localhost]
+
+TASK [Reuse existing venv -- skip the prereqs role] ****************************
+ok: [localhost]
+
+TASK [Install ravendb python client prerequisites (one-time / forced)] *********
+skipping: [localhost]
+
+PLAY [Create a database via the ravendb.ravendb.database module] ***************
+
+TASK [Validate inputs] *********************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Create database] *********************************************************
+changed: [localhost]
+
+TASK [Done] ********************************************************************
+ok: [localhost] => {
+    "msg": "CREATED  db1 on cluster reachable via 2a (replication_factor=3)"
+}
+
+PLAY [RP-1 step 1 -- configure revisions + wire filtered pull hub -> sink] *****
+
+TASK [Configure revisions on hub 1a/db1] ***************************************
+changed: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "REVISIONS configured on 1a/db1 -- MinimumRevisionsToKeep=100"
+}
+
+TASK [Define hub pull task 'rp1-hub' + access entry for sink] ******************
+changed: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "DEFINED hub task 'rp1-hub' on 1a + access entries for sinks ['2'] (PFXs in /mnt/c/dev/hub-sink/ansible-ravendb-chaos/scenarios/EMR/RP1/../../../replication-certs)"
+}
+
+TASK [Attach sink pull task to hub topology (filter users/sink1/*)] ************
+changed: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "ATTACHED sinks ['2'] to hub task 'rp1-hub' on database 'db1' (leader URLs ['https://2a.hubsink.test:443'])"
+}
+
+PLAY [RP-1 step 3 -- baseline change-vector capture (hub + sink, pre-seed)] ****
+
+TASK [Reset capture dir for this run] ******************************************
+ok: [localhost]
+
+TASK [ansible.builtin.file] ****************************************************
+changed: [localhost]
+
+TASK [Capture baseline change vectors on hub + sink leaders] *******************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "captured DatabaseChangeVector for 2 node(s) -> /mnt/c/dev/hub-sink/ansible-ravendb-chaos/scenarios/EMR/RP1/capture/baseline/"
+}
+
+PLAY [RP-1 step 2a -- W-0 bulk seed on hub] ************************************
+
+TASK [Seed Users (users/sink1/*, count=bulk_users_sink1, 1 rev) on hub 1a/db1] ***
+changed: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "WROTE 300/300 PUTs to 1a/db1 (300 docs x 1 revisions each, id prefix 'users/sink1', collection 'Users')"
+}
+
+TASK [Seed Orders (orders/hub/*, count=bulk_orders_hub, 1 rev) on hub 1a/db1] ***
+changed: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "WROTE 300/300 PUTs to 1a/db1 (300 docs x 1 revisions each, id prefix 'orders/hub', collection 'Orders')"
+}
+
+PLAY [RP-1 step 2b -- per-family inventory (doc, tombstone, revision, attachment, counter, TS, ...)] ***
+
+TASK [Family inventory: write plain doc users/sink1/family/doc/0] **************
+changed: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "WROTE 1/1 docs to 1a/db1 (id prefix 'users/sink1/family/doc')"
+}
+
+TASK [Family inventory: write doc users/sink1/family/doctomb/0 (to be tombstoned)] ***
+changed: [localhost]
+
+TASK [Family inventory: delete users/sink1/family/doctomb/0 (create doc tombstone)] ***
+changed: [localhost]
+
+TASK [Family inventory: write revisioned doc users/sink1/family/rev/0 (3 revisions)] ***
+changed: [localhost]
+
+TASK [Family inventory: write revisioned doc users/sink1/family/revtomb/0 (3 revisions)] ***
+changed: [localhost]
+
+TASK [Family inventory: delete users/sink1/family/revtomb/0 (create revision tombstone)] ***
+changed: [localhost]
+
+TASK [Family inventory: write attachment-host doc users/sink1/family/att/0] ****
+changed: [localhost]
+
+TASK [Family inventory: attach 'data' stream to users/sink1/family/att/0] ******
+changed: [localhost]
+
+TASK [Family inventory: write attachment-host doc users/sink1/family/atttomb/0] ***
+changed: [localhost]
+
+TASK [Family inventory: attach 'data' stream to users/sink1/family/atttomb/0] ***
+changed: [localhost]
+
+TASK [DELETE attachment on users/sink1/family/atttomb/0] ***********************
+ok: [localhost]
+
+TASK [Family inventory: write counter-host doc users/sink1/family/cnt/0] *******
+changed: [localhost]
+
+TASK [Family inventory: increment 'likes' counter on users/sink1/family/cnt/0] ***
+changed: [localhost]
+
+TASK [Family inventory: write time-series host doc users/sink1/family/ts/0] ****
+changed: [localhost]
+
+TASK [Family inventory: append 5 Heartrate samples to users/sink1/family/ts/0] ***
+changed: [localhost]
+
+TASK [Family inventory: write time-series host doc users/sink1/family/tsdel/0] ***
+changed: [localhost]
+
+TASK [Family inventory: append 10 Heartrate samples to users/sink1/family/tsdel/0] ***
+changed: [localhost]
+
+TASK [Family inventory: delete Heartrate range 00:02-00:05 on users/sink1/family/tsdel/0] ***
+changed: [localhost]
+
+PLAY [Partition a set of nodes from another set (mode-aware wrapper)] **********
+
+TASK [Validate inputs] *********************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Resolve target_mode (default docker)] ************************************
+ok: [localhost]
+
+TASK [Pick the underlying cut_link tool for this mode] *************************
+ok: [localhost]
+
+TASK [Initialize pair list] ****************************************************
+ok: [localhost]
+
+TASK [Cross set_a x set_b, skipping self-pairs] ********************************
+ok: [localhost] => (item=1a x 2a)
+ok: [localhost] => (item=1a x 2b)
+ok: [localhost] => (item=1a x 2c)
+ok: [localhost] => (item=1b x 2a)
+ok: [localhost] => (item=1b x 2b)
+ok: [localhost] => (item=1b x 2c)
+ok: [localhost] => (item=1c x 2a)
+ok: [localhost] => (item=1c x 2b)
+ok: [localhost] => (item=1c x 2c)
+
+TASK [Sanity check at least one pair to partition] *****************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Print the plan] **********************************************************
+ok: [localhost] => {
+    "msg": "Will cut 9 pair(s) via toolbox/network/cut_link.yml (mode=docker)"
+}
+
+TASK [Run cut_link per pair] ***************************************************
+changed: [localhost] => (item=1a <-X-> 2a)
+changed: [localhost] => (item=1a <-X-> 2b)
+changed: [localhost] => (item=1a <-X-> 2c)
+changed: [localhost] => (item=1b <-X-> 2a)
+changed: [localhost] => (item=1b <-X-> 2b)
+changed: [localhost] => (item=1b <-X-> 2c)
+changed: [localhost] => (item=1c <-X-> 2a)
+changed: [localhost] => (item=1c <-X-> 2b)
+changed: [localhost] => (item=1c <-X-> 2c)
+
+TASK [Inspect docker network] **************************************************
+ok: [localhost]
+
+TASK [Build name -> ip map from docker network] ********************************
+ok: [localhost] => (item={'Name': '1a', 'EndpointID': '3f34366df359062aa1ccb0b492f2437d2c04713352941b633409d835ab293c89', 'MacAddress': '22:a9:d2:6a:e8:54', 'IPv4Address': '172.24.0.2/16', 'IPv6Address': ''})
+ok: [localhost] => (item={'Name': '1b', 'EndpointID': 'd80fc7c42dfd7c64123c060f069f2020f76c07c2d8bd61c86a09aa605af3b4f4', 'MacAddress': '06:3e:6c:84:74:31', 'IPv4Address': '172.24.0.3/16', 'IPv6Address': ''})
+ok: [localhost] => (item={'Name': '2c', 'EndpointID': '95c79e1a03d211a6ef82daab80ab824384a9b059ada37aa25c39828e2e5ba974', 'MacAddress': '12:8c:11:0b:1a:b0', 'IPv4Address': '172.24.0.7/16', 'IPv6Address': ''})
+ok: [localhost] => (item={'Name': '2a', 'EndpointID': '5b7d30a3584332368d01c91139da1c58637979d8310bb5f6ff859048396d7a9e', 'MacAddress': '26:35:1f:63:d8:27', 'IPv4Address': '172.24.0.5/16', 'IPv6Address': ''})
+ok: [localhost] => (item={'Name': '1c', 'EndpointID': '44196a76143aa7509cbd7597ba37f1d7bf626346fbe4098ffdba4be6fafd5a54', 'MacAddress': 'c6:8f:df:0c:38:6e', 'IPv4Address': '172.24.0.4/16', 'IPv6Address': ''})
+ok: [localhost] => (item={'Name': '2b', 'EndpointID': 'ce1eb81df703d05502bfd13624440569be01ea9a5eba531de3e10bf64ce428b3', 'MacAddress': '32:20:09:0a:48:66', 'IPv4Address': '172.24.0.6/16', 'IPv6Address': ''})
+
+TASK [Validate a -> b is blocked (docker mode)] ********************************
+ok: [localhost] => (item=1a -> 2a:443 should be BLOCKED)
+ok: [localhost] => (item=1a -> 2b:443 should be BLOCKED)
+ok: [localhost] => (item=1a -> 2c:443 should be BLOCKED)
+ok: [localhost] => (item=1b -> 2a:443 should be BLOCKED)
+ok: [localhost] => (item=1b -> 2b:443 should be BLOCKED)
+ok: [localhost] => (item=1b -> 2c:443 should be BLOCKED)
+ok: [localhost] => (item=1c -> 2a:443 should be BLOCKED)
+ok: [localhost] => (item=1c -> 2b:443 should be BLOCKED)
+ok: [localhost] => (item=1c -> 2c:443 should be BLOCKED)
+
+TASK [Validate b -> a is blocked (docker mode)] ********************************
+ok: [localhost] => (item=2a -> 1a:443 should be BLOCKED)
+ok: [localhost] => (item=2b -> 1a:443 should be BLOCKED)
+ok: [localhost] => (item=2c -> 1a:443 should be BLOCKED)
+ok: [localhost] => (item=2a -> 1b:443 should be BLOCKED)
+ok: [localhost] => (item=2b -> 1b:443 should be BLOCKED)
+ok: [localhost] => (item=2c -> 1b:443 should be BLOCKED)
+ok: [localhost] => (item=2a -> 1c:443 should be BLOCKED)
+ok: [localhost] => (item=2b -> 1c:443 should be BLOCKED)
+ok: [localhost] => (item=2c -> 1c:443 should be BLOCKED)
+
+TASK [Build name -> ip map (ssh mode)] *****************************************
+skipping: [localhost]
+
+TASK [Validate a -> b is blocked (ssh mode)] ***********************************
+skipping: [localhost] => (item=1a -> 2a:443 should be BLOCKED) 
+skipping: [localhost] => (item=1a -> 2b:443 should be BLOCKED) 
+skipping: [localhost] => (item=1a -> 2c:443 should be BLOCKED) 
+skipping: [localhost] => (item=1b -> 2a:443 should be BLOCKED) 
+skipping: [localhost] => (item=1b -> 2b:443 should be BLOCKED) 
+skipping: [localhost] => (item=1b -> 2c:443 should be BLOCKED) 
+skipping: [localhost] => (item=1c -> 2a:443 should be BLOCKED) 
+skipping: [localhost] => (item=1c -> 2b:443 should be BLOCKED) 
+skipping: [localhost] => (item=1c -> 2c:443 should be BLOCKED) 
+skipping: [localhost]
+
+TASK [Validate b -> a is blocked (ssh mode)] ***********************************
+skipping: [localhost] => (item=2a -> 1a:443 should be BLOCKED) 
+skipping: [localhost] => (item=2b -> 1a:443 should be BLOCKED) 
+skipping: [localhost] => (item=2c -> 1a:443 should be BLOCKED) 
+skipping: [localhost] => (item=2a -> 1b:443 should be BLOCKED) 
+skipping: [localhost] => (item=2b -> 1b:443 should be BLOCKED) 
+skipping: [localhost] => (item=2c -> 1b:443 should be BLOCKED) 
+skipping: [localhost] => (item=2a -> 1c:443 should be BLOCKED) 
+skipping: [localhost] => (item=2b -> 1c:443 should be BLOCKED) 
+skipping: [localhost] => (item=2c -> 1c:443 should be BLOCKED) 
+skipping: [localhost]
+
+TASK [Done] ********************************************************************
+ok: [localhost] => {
+    "msg": "PARTITIONED  set_a=['1a', '1b', '1c']  <-X->  set_b=['2a', '2b', '2c'] (9 pair(s), mode=docker, validated bidirectionally on :443)"
+}
+
+PLAY [RP-1 step 2c -- create conflict document under partition] ****************
+
+TASK [PUT users/sink1/family/conflict/0 on hub with body version=hub] **********
+ok: [localhost]
+
+TASK [PUT users/sink1/family/conflict/0 on sink with body version=sink (different content)] ***
+ok: [localhost]
+
+PLAY [Flush every chaos iptables rule from every node] *************************
+
+TASK [Resolve target_mode (default docker)] ************************************
+ok: [localhost]
+
+TASK [Inspect docker network] **************************************************
+ok: [localhost]
+
+TASK [Set discovered_targets from docker network] ******************************
+ok: [localhost]
+
+TASK [Auto-discover ssh hosts from inventory] **********************************
+skipping: [localhost]
+
+TASK [Use override targets if provided, else auto-discovered] ******************
+ok: [localhost]
+
+TASK [Sanity check at least one target] ****************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Print the plan] **********************************************************
+ok: [localhost] => {
+    "msg": "Will flush chaos rules on 6 node(s) (mode=docker): 1a, 1b, 2c, 2a, 1c, 2b"
+}
+
+TASK [Flush chaos rules (docker mode)] *****************************************
+changed: [localhost] => (item=flush 1a)
+changed: [localhost] => (item=flush 1b)
+changed: [localhost] => (item=flush 2c)
+changed: [localhost] => (item=flush 2a)
+changed: [localhost] => (item=flush 1c)
+changed: [localhost] => (item=flush 2b)
+
+TASK [Flush chaos rules (ssh mode)] ********************************************
+skipping: [localhost] => (item=flush 1a) 
+skipping: [localhost] => (item=flush 1b) 
+skipping: [localhost] => (item=flush 2c) 
+skipping: [localhost] => (item=flush 2a) 
+skipping: [localhost] => (item=flush 1c) 
+skipping: [localhost] => (item=flush 2b) 
+skipping: [localhost]
+
+TASK [Verify zero chaos rules remain (docker mode)] ****************************
+ok: [localhost] => (item=1a should have 0 chaos rules)
+ok: [localhost] => (item=1b should have 0 chaos rules)
+ok: [localhost] => (item=2c should have 0 chaos rules)
+ok: [localhost] => (item=2a should have 0 chaos rules)
+ok: [localhost] => (item=1c should have 0 chaos rules)
+ok: [localhost] => (item=2b should have 0 chaos rules)
+
+TASK [Verify zero chaos rules remain (ssh mode)] *******************************
+skipping: [localhost] => (item=1a should have 0 chaos rules) 
+skipping: [localhost] => (item=1b should have 0 chaos rules) 
+skipping: [localhost] => (item=2c should have 0 chaos rules) 
+skipping: [localhost] => (item=2a should have 0 chaos rules) 
+skipping: [localhost] => (item=1c should have 0 chaos rules) 
+skipping: [localhost] => (item=2b should have 0 chaos rules) 
+skipping: [localhost]
+
+TASK [Done] ********************************************************************
+ok: [localhost] => {
+    "msg": "HEALED  6 node(s) (mode=docker). Every INPUT/OUTPUT REJECT and DROP rule has been removed."
+}
+
+PLAY [RP-1 step 2d -- smuggler-import the legacy-counter fixture] **************
+
+TASK [Smuggler-import legacy-counter fixture into hub 1a/db1] ******************
+changed: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "IMPORTED legacy-counter.ravendbdump -> 1a/db1 (675 bytes, HTTP 200)"
+}
+
+PLAY [RP-1 step 2e -- drain filtered pull + sink internal replication + baseline filter check] ***
+
+TASK [Wait for etag parity across hub a/b/c (post-seed drain)] *****************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "STABLE -- LastDatabaseEtag unchanged across 3 node(s) (skipped=[], took 0.1s)",
+        "  sample 1 (10:46:30):",
+        "    1a  1275",
+        "    1b  1271",
+        "    1c  1272",
+        "  sample 2 (10:46:31):",
+        "    1a  1275",
+        "    1b  1271",
+        "    1c  1272"
+    ]
+}
+
+TASK [Wait for etag parity across sink a/b/c (post-seed drain)] ****************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "STABLE -- LastDatabaseEtag unchanged across 3 node(s) (skipped=[], took 0.0s)",
+        "  sample 1 (10:46:31):",
+        "    2a  1290",
+        "    2b  652",
+        "    2c  652",
+        "  sample 2 (10:46:31):",
+        "    2a  1290",
+        "    2b  652",
+        "    2c  652"
+    ]
+}
+
+TASK [Baseline filter-compliance check on sink leader (allowed users/sink1/*)] ***
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "filter compliance on 2a/db1:",
+        "  allowed_prefixes: ['users/sink1/']",
+        "  total sink docs: 308",
+        "  leak ids (no allowed prefix matched): 0",
+        "PASS  every sink doc matches an allowed prefix"
+    ]
+}
+
+PLAY [RP-1 step 4a -- burst N users/sink1/active/* writes on hub] **************
+
+TASK [Burst write users/sink1/active/* (count=burst_active_count, 1 rev) on hub 1a/db1] ***
+changed: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "WROTE 300/300 PUTs to 1a/db1 (300 docs x 1 revisions each, id prefix 'users/sink1/active', collection 'Users')"
+}
+
+PLAY [RP-1 step 4b -- delete/restore-from-revision burst (2k iterations on seeded pool)] ***
+
+TASK [Delete-and-restore-from-revision burst] **********************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "RP-1 delete/restore burst DONE  iterations=50  restored=50  no_prior_rev=0"
+}
+
+PLAY [RP-1 step 5 -- drain + tombstone settle] *********************************
+
+TASK [Pause for controller TIME_WAIT sockets to recycle] ***********************
+Pausing for 10 seconds
+(ctrl+C then 'C' = continue early, ctrl+C then 'A' = abort)
+ok: [localhost]
+
+TASK [Wait for etag parity across hub a/b/c (post-burst drain)] ****************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "STABLE -- LastDatabaseEtag unchanged across 3 node(s) (skipped=[], took 0.1s)",
+        "  sample 1 (10:46:57):",
+        "    1a  2079",
+        "    1b  2075",
+        "    1c  2076",
+        "  sample 2 (10:46:57):",
+        "    1a  2079",
+        "    1b  2075",
+        "    1c  2076"
+    ]
+}
+
+TASK [Wait for etag parity across sink a/b/c (post-burst drain)] ***************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "STABLE -- LastDatabaseEtag unchanged across 3 node(s) (skipped=[], took 0.0s)",
+        "  sample 1 (10:46:58):",
+        "    2a  2854",
+        "    2b  1460",
+        "    2c  1460",
+        "  sample 2 (10:46:58):",
+        "    2a  2854",
+        "    2b  1460",
+        "    2c  1460"
+    ]
+}
+
+TASK [Wait for tombstone-count convergence across sink a/b/c] ******************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "PARITY -- fields ['CountOfTombstones'] match across 3 node(s) (skipped=[], took 0.1s):",
+        "  CountOfTombstones = 3"
+    ]
+}
+
+PLAY [RP-1 step 6 -- post-batch change-vector capture + delta vs baseline] *****
+
+TASK [ansible.builtin.file] ****************************************************
+changed: [localhost]
+
+TASK [Capture post-batch change vectors on hub + sink leaders] *****************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "captured DatabaseChangeVector for 2 node(s) -> /mnt/c/dev/hub-sink/ansible-ravendb-chaos/scenarios/EMR/RP1/capture/postbatch/"
+}
+
+TASK [Side-by-side diff of baseline vs post-batch DatabaseChangeVector] ********
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "=== 1a ===",
+        "baseline : <UNAVAILABLE>",
+        "postbatch: C:1265-4XnYaKsqN0KFUzayCLETgg, A:1291-6tVQ5MO+qUWOpINZsWE/SA, C:652-MFcp7936f0+ZYVA9WoK/kA, B:1265-PuR8zXHayE+/coEzPesnSQ, B:652-ZgLTBN3dlka9UQIQ2hGnTg, A:2079-ozryg/1i70ur2nnNUbTOmA",
+        "",
+        "=== 2a ===",
+        "baseline : <UNAVAILABLE>",
+        "postbatch: A:2854-6tVQ5MO+qUWOpINZsWE/SA, C:652-MFcp7936f0+ZYVA9WoK/kA, B:652-ZgLTBN3dlka9UQIQ2hGnTg"
+    ]
+}
+
+PLAY [RP-1 step 7 -- post-burst checkpoint] ************************************
+
+TASK [Assert filter compliance on sink leader (only users/sink1/* allowed)] ****
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "filter compliance on 2a/db1:",
+        "  allowed_prefixes: ['users/sink1/']",
+        "  total sink docs: 609",
+        "  leak ids (no allowed prefix matched): 0",
+        "PASS  every sink doc matches an allowed prefix"
+    ]
+}
+
+TASK [Assert doc-id-set parity across sink a/b/c for users/sink1/* pool] *******
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "doc-id-set parity: 50 id(s) probed across ['2a', '2b', '2c']",
+        "  mismatched: 0",
+        "PASS  every probe id is uniformly present or uniformly absent"
+    ]
+}
+
+TASK [Assert doc-id-set parity across sink a/b/c for users/sink1/active/* pool] ***
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "doc-id-set parity: 50 id(s) probed across ['2a', '2b', '2c']",
+        "  mismatched: 0",
+        "PASS  every probe id is uniformly present or uniformly absent"
+    ]
+}
+
+TASK [Assert per-family inventory item CV split shape on sink leader] **********
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "stored-item CV shape check on 2a/db1 (expect=split, delimiter='|'):",
+        "  users/sink1/family/doc/0  OK  cv=A:1201-6tVQ5MO+qUWOpINZsWE/SA|A:1201-ozryg/1i70ur2nnNUbTOmA",
+        "  users/sink1/family/rev/0  OK  cv=A:1218-6tVQ5MO+qUWOpINZsWE/SA|A:1211-ozryg/1i70ur2nnNUbTOmA",
+        "  users/sink1/family/att/0  OK  cv=A:1240-6tVQ5MO+qUWOpINZsWE/SA|A:1224-ozryg/1i70ur2nnNUbTOmA",
+        "  users/sink1/family/cnt/0  OK  cv=A:1266-6tVQ5MO+qUWOpINZsWE/SA|A:1241-ozryg/1i70ur2nnNUbTOmA",
+        "  users/sink1/family/ts/0  OK  cv=A:1273-6tVQ5MO+qUWOpINZsWE/SA|A:1246-ozryg/1i70ur2nnNUbTOmA",
+        "  users/sink1/family/tsdel/0  OK  cv=A:1282-6tVQ5MO+qUWOpINZsWE/SA|A:1255-ozryg/1i70ur2nnNUbTOmA",
+        "  users/sink1/family/conflict/0  OK  cv=A:1291-6tVQ5MO+qUWOpINZsWE/SA, C:652-MFcp7936f0+ZYVA9WoK/kA, B:652-ZgLTBN3dlka9UQIQ2hGnTg|C:1265-4XnYaKsqN0KFUzayCLETgg, A:1290-6tVQ5MO+qUWOpINZsWE/SA, C:651-MFcp7936f0+ZYVA9WoK/kA, B:1265-PuR8zXHayE+/coEzPesnSQ, B:651-ZgLTBN3dlka9UQIQ2hGnTg, A:1268-ozryg/1i70ur2nnNUbTOmA",
+        "  users/sink1/family/legacy-cnt/0  OK  cv=A:1302-6tVQ5MO+qUWOpINZsWE/SA, C:652-MFcp7936f0+ZYVA9WoK/kA, B:652-ZgLTBN3dlka9UQIQ2hGnTg|C:1265-4XnYaKsqN0KFUzayCLETgg, B:1265-PuR8zXHayE+/coEzPesnSQ, A:1275-ozryg/1i70ur2nnNUbTOmA",
+        "PASS  every probed doc matches expected 'split' shape"
+    ]
+}
+
+TASK [Assert CV order-side boundary by dbid (hub -> sink direction)] ***********
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "CV-boundary by dbid (db=db1):",
+        "  source dbids:   ['4XnYaKsqN0KFUzayCLETgg', 'PuR8zXHayE+/coEzPesnSQ', 'ozryg/1i70ur2nnNUbTOmA']",
+        "  receiver dbids: ['6tVQ5MO+qUWOpINZsWE/SA', 'MFcp7936f0+ZYVA9WoK/kA', 'ZgLTBN3dlka9UQIQ2hGnTg']",
+        "  2a  LEGACY raw CV (no '|') -- N/A on this CV form",
+        "  2b  LEGACY raw CV (no '|') -- N/A on this CV form",
+        "  2c  LEGACY raw CV (no '|') -- N/A on this CV form",
+        "PASS  no source dbids on any receiver's order side"
+    ]
+}
+
+TASK [Assert /stats parity across sink a/b/c (docs+tombstones+attachments+counters+TS)] ***
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "/stats parity  db=db1  nodes=['2a', '2b', '2c']",
+        "field                                 2a ,       2b ,       2c  status",
+        "CountOfAttachments                     4 ,        4 ,        4  OK",
+        "CountOfConflicts                       0 ,        0 ,        0  OK",
+        "CountOfCounterEntries                  2 ,        2 ,        2  OK (info)",
+        "CountOfDocuments                     609 ,      609 ,      609  OK",
+        "CountOfDocumentsConflicts              0 ,        0 ,        0  OK",
+        "CountOfRemoteAttachments               0 ,        0 ,        0  OK",
+        "CountOfRevisionDocuments             724 ,      724 ,      724  OK",
+        "CountOfTimeSeriesDeletedRanges         0 ,        0 ,        0  OK",
+        "CountOfTimeSeriesSegments              2 ,        2 ,        2  OK (info)",
+        "CountOfTombstones                      3 ,        3 ,        3  OK",
+        "CountOfUniqueAttachments               1 ,        1 ,        1  OK",
+        "SizeOnDisk                      67764224 , 67764224 , 67764224  info",
+        "PASS  every asserted field is parity-equal across ['2a', '2b', '2c']"
+    ]
+}
+
+TASK [Dump replication connections on sink leader (no-stuck-task check)] *******
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "replication on 2a/db1:",
+        "  INCOMING (3):",
+        "    https://1c.hubsink.test:443",
+        "    https://2c.hubsink.test:443",
+        "    https://2b.hubsink.test:443",
+        "  OUTGOING (2):",
+        "    {'Database': 'db1', 'Url': 'https://2b.hubsink.test:443', 'Disabled': False, 'Type': 'Internal', 'NodeTag': 'B'}",
+        "    {'Database': 'db1', 'Url': 'https://2c.hubsink.test:443', 'Disabled': False, 'Type': 'Internal', 'NodeTag': 'C'}"
+    ]
+}
+
+PLAY [RP-1 step 8 -- local update on SB, verify internal-replication path] *****
+
+TASK [Write local-update marker doc on sink 2b/db1] ****************************
+changed: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "WROTE 1/1 docs to 2b/db1 (id prefix 'users/sink1/family/local-update')"
+}
+
+TASK [Wait for local-update marker to propagate sink-b -> sink-a + sink-c] *****
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "MARKER PROPAGATED -- 'users/sink1/family/local-update/1780904827937481320-28525' reached every target ['2a', '2c'] from 2b (took 0.0s)"
+}
+
+PLAY [RP-1 done] ***************************************************************
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "RP-1 PASS  hub=[1a..c]  sink=[2a..c]  db=db1 CV-boundary regression guard, per-family inventory walk, sink internal-replication verification all held."
+}
+
+PLAY RECAP *********************************************************************
+localhost                  : ok=113  changed=31   unreachable=0    failed=0    skipped=8    rescued=0    ignored=0   
+
+
+[1;36m[10:47:08] RP-1 done[0m
