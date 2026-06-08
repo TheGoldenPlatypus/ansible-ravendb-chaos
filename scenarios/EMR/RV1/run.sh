@@ -1,103 +1,35 @@
 #!/usr/bin/env bash
-###################################################################################################
-# scenarios/EMR/RV1/run.sh -- run the full RV-1 test end-to-end.
-#
-# Teardown -> provision 1 cluster x 3 nodes @ v_old -> install_ravendb @ v_old ->
-# form_clusters -> scenarios/EMR/RV1/rv1.yml.
-#
-# USAGE:
-#   scenarios/EMR/RV1/run.sh <v_old_version> <v_new_deb_path> [cluster_id_start] [docker_network_name]
-#
-# EXAMPLES:
-#   # default single-lab run (cluster_id_start=1, network=hubsinknet)
-#   scenarios/EMR/RV1/run.sh 6.2.15 builds/raven-pr22875.deb
-#
-#   # parallel run on the same docker host -- clusters offset to 4, isolated network
-#   scenarios/EMR/RV1/run.sh 6.2.15 builds/raven-pr22875.deb 4 rv1net
-#
-# For parallel concurrent runs (different scenarios on same machine), each run.sh invocation
-# needs disjoint cluster_id_start ranges AND a unique docker_network_name so:
-#   * container names don't collide on the docker daemon (globally unique by name)
-#   * teardown nukes only that run's containers (scoped to docker_network_name)
-#
-# Build the v_new .deb first with:
-#   scripts/build_ravendb_pr.sh <pr-number>
-###################################################################################################
-
+# scenarios/EMR/RV1/run.sh -- teardown + T1 lab @ v_old + rv1.yml.
+# Usage: run.sh <v_old> <v_new_deb> [cluster_id_start=1] [docker_network=hubsinknet] [-e foo=bar ...]
 set -euo pipefail
+export PYTHONDONTWRITEBYTECODE=1  # CPython 3.12.0-3.12.3 marshal bug
 
-# Workaround for CPython 3.12.0-3.12.3 marshal bug -- compiling certain ansible
-# collection modules raises "ValueError: unmarshallable object" when Python tries
-# to write a .pyc cache.  Disabling bytecode-writing skips the buggy code path.
-# Fixed upstream in Python 3.12.4; safe to keep set regardless.
-export PYTHONDONTWRITEBYTECODE=1
+# Pull positionals up to the first -flag; everything from there on is forwarded -e overrides.
+POS=()
+while [ $# -gt 0 ]; do case "$1" in -*) break;; *) POS+=("$1"); shift;; esac; done
+EXTRA=("$@")
 
-V_OLD="${1:-}"
-V_NEW_BUILD="${2:-}"
-CLUSTER_ID_START="${3:-1}"
-DOCKER_NETWORK_NAME="${4:-hubsinknet}"
-# Consume the 4 positional args; whatever's left in "$@" is extra `-e foo=bar` overrides
-# the caller wants to pass through to the scenario playbook (e.g. smoke-mode sizing).
-shift 4 2>/dev/null || true
-EXTRA_VARS=("$@")
+V_OLD="${POS[0]:-}"; V_NEW="${POS[1]:-}"; CID="${POS[2]:-1}"; NET="${POS[3]:-hubsinknet}"
 
-if [ -z "$V_OLD" ] || [ -z "$V_NEW_BUILD" ]; then
-  echo "Usage: $0 <v_old_version> <v_new_deb_path> [cluster_id_start] [docker_network_name]" >&2
-  echo "       e.g.  $0 6.2.15 builds/raven-pr22875.deb" >&2
-  echo "       e.g.  $0 6.2.15 builds/raven-pr22875.deb 4 rv1net    # parallel-friendly" >&2
-  exit 2
-fi
+[ -n "$V_OLD" ] && [ -n "$V_NEW" ] || { echo "Usage: $0 <v_old> <v_new_deb> [cid=1] [net=hubsinknet] [-e foo=bar ...]"; exit 2; }
 
-REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-cd "$REPO_ROOT"
+cd "$(dirname "$0")/../../.."
+[[ "$V_NEW" = /* ]] || V_NEW="$PWD/$V_NEW"
+[ -f "$V_NEW" ] || { echo "ERROR: $V_NEW not found"; exit 3; }
 
-if [[ "$V_NEW_BUILD" != /* ]]; then
-  V_NEW_BUILD="$REPO_ROOT/$V_NEW_BUILD"
-fi
-if [ ! -f "$V_NEW_BUILD" ]; then
-  echo "ERROR: v_new .deb not found at $V_NEW_BUILD" >&2
-  exit 3
-fi
+[ -z "${ANSIBLE_BECOME_PASS:-}" ] && { read -rsp "BECOME password: " ANSIBLE_BECOME_PASS; echo; export ANSIBLE_BECOME_PASS; }
 
-# prompt once for sudo password (skip if already exported)
-if [ -z "${ANSIBLE_BECOME_PASS:-}" ]; then
-  read -rsp "BECOME password (asked once, reused for the whole run): " ANSIBLE_BECOME_PASS
-  echo
-  export ANSIBLE_BECOME_PASS
-fi
+C=( -e cluster_id_start="$CID" -e cluster_id="$CID"
+    -e docker_network_name="$NET" -e backups_volume_name="lab_backups_$NET" )
 
-# Common overrides plumbed through every playbook in this run.
-COMMON_OVERRIDES=(
-    -e "cluster_id_start=$CLUSTER_ID_START"
-    -e "cluster_id=$CLUSTER_ID_START"
-    -e "docker_network_name=$DOCKER_NETWORK_NAME"
-    -e "backups_volume_name=lab_backups_${DOCKER_NETWORK_NAME}"
-)
+step() { printf '\n\033[1;36m[%s] %s\033[0m\n' "$(date +%H:%M:%S)" "$*"; }
 
-echo "==> RV-1 run: cluster_id_start=$CLUSTER_ID_START  docker_network_name=$DOCKER_NETWORK_NAME"
-run() { echo; echo "==> $*"; "$@"; }
+echo "RV-1  cluster=${CID}a/b/c  net=$NET  v_old=$V_OLD"
 
-# 1. teardown any prior lab on this network (scoped to docker_network_name)
-run ansible-playbook playbooks/teardown_containers.yml "${COMMON_OVERRIDES[@]}"
+step "teardown";    ansible-playbook playbooks/teardown_containers.yml "${C[@]}"
+step "provision";   ansible-playbook playbooks/provision_nodes.yml     "${C[@]}" -e clusters_count=1 -e nodes_per_cluster=3
+step "install";     ansible-playbook playbooks/install_ravendb.yml     "${C[@]}" -e rdb_version="$V_OLD"
+step "form";        ansible-playbook playbooks/form_clusters.yml       "${C[@]}" -e clusters_count=1 -e nodes_per_cluster=3
+step "rv1";         ansible-playbook scenarios/EMR/RV1/rv1.yml         "${C[@]}" -e v_old="$V_OLD" -e v_new_build="$V_NEW" "${EXTRA[@]}"
 
-# 2. bring up a clean single-cluster x 3-node lab at v_old
-run ansible-playbook playbooks/provision_nodes.yml \
-    "${COMMON_OVERRIDES[@]}" \
-    -e clusters_count=1 -e nodes_per_cluster=3
-run ansible-playbook playbooks/install_ravendb.yml \
-    "${COMMON_OVERRIDES[@]}" \
-    -e rdb_version="$V_OLD"
-run ansible-playbook playbooks/form_clusters.yml \
-    "${COMMON_OVERRIDES[@]}" \
-    -e clusters_count=1 -e nodes_per_cluster=3
-
-# 3. run RV-1.  Forward any extra `-e` overrides the caller appended on the cmdline so
-#    smoke-mode sizing (e.g. -e phase1_seed_count=500) actually reaches the scenario.
-run ansible-playbook scenarios/EMR/RV1/rv1.yml \
-    "${COMMON_OVERRIDES[@]}" \
-    -e v_old="$V_OLD" \
-    -e v_new_build="$V_NEW_BUILD" \
-    "${EXTRA_VARS[@]}"
-
-echo
-echo "==> RV-1 finished."
+step "RV-1 done"
