@@ -12,7 +12,9 @@
 #   * a container is in restart-loop and you don't care which scenario it belonged to
 #
 # DOES NOT touch unrelated containers/networks/volumes on the host.  Match patterns:
-#   containers: name matches ^[0-9]+[a-c]$  (e.g. 1a, 4b, 9c -- the lab's naming convention)
+#   containers: name matches ^[0-9]+[a-z]$  (e.g. 1a, 4b, 9i -- the lab's naming convention;
+#                                            T4 scenarios go up to <id>i so we accept the
+#                                            full a-z range)
 #   networks:   rv1net, rp1net, rpv1net, hubsinknet
 #   volumes:    anything starting with lab_backups
 #
@@ -37,10 +39,10 @@ rm -f /tmp/w[0-9]*-*.pid /tmp/w[0-9]*-*.log 2>/dev/null || true
 
 # ---------- 2. remove every container matching the lab naming pattern -----------------------------
 say "==> removing lab containers (name pattern: <digit><letter>)"
-LAB_CONTAINERS="$(docker ps -aq --filter 'name=^[0-9]+[a-c]$' 2>/dev/null || true)"
+LAB_CONTAINERS="$(docker ps -aq --filter 'name=^[0-9]+[a-z]$' 2>/dev/null || true)"
 if [ -n "$LAB_CONTAINERS" ]; then
   log "    candidates:"
-  [ "$VERBOSE" = 1 ] && docker ps -a --filter 'name=^[0-9]+[a-c]$' --format '    {{.Names}} ({{.Status}})'
+  [ "$VERBOSE" = 1 ] && docker ps -a --filter 'name=^[0-9]+[a-z]$' --format '    {{.Names}} ({{.Status}})'
   docker rm -f $LAB_CONTAINERS >/dev/null 2>&1 || true
   say "    removed $(echo "$LAB_CONTAINERS" | wc -w) container(s)"
 else
