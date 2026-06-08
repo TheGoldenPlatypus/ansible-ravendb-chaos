@@ -9,7 +9,9 @@
 #
 #
 # INPUTS:
-#   targets  OPTIONAL.  JSON list overriding auto-discovery (e.g. '["1a","2b"]').
+#   targets             OPTIONAL.  JSON list overriding auto-discovery (e.g. '["1a","2b"]').
+#   docker_network_name OPTIONAL.  Default `hubsinknet`.  Override when targeting a
+#                                  non-default lab network (e.g. parallel variant runs).
 #
 # RUN EXAMPLES:
 #   # docker -- heal every container on the lab network
@@ -20,6 +22,9 @@
 #
 #   # surgical override -- heal only these two
 #   ansible-playbook toolbox/network/heal_all.yml -e '{"targets":["1a","1b"]}'
+#
+#   # Variant lab on a separate docker network:
+#   ansible-playbook toolbox/network/heal_all.yml -e docker_network_name=hubsink_c
 ##################################################################################################
 
 - name: Flush every chaos iptables rule from every node

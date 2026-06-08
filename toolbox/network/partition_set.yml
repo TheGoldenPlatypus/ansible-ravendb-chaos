@@ -7,8 +7,10 @@
 # like "isolate the hub mentor from all 6 sink nodes".
 #
 # INPUTS:
-#   set_a   REQUIRED.  JSON list of node names (e.g. '["1a"]').
-#   set_b   REQUIRED.  JSON list of node names (e.g. '["1b","1c","2a","2b","2c"]').
+#   set_a               REQUIRED.  JSON list of node names (e.g. '["1a"]').
+#   set_b               REQUIRED.  JSON list of node names (e.g. '["1b","1c","2a","2b","2c"]').
+#   docker_network_name OPTIONAL.  Default `hubsinknet`.  Override when targeting a
+#                                  non-default lab network (e.g. parallel variant runs).
 #
 # RUN EXAMPLES:
 #   # P1 docker -- isolate the hub mentor (1a) from the other 8 nodes
@@ -18,6 +20,11 @@
 #   # P2 ssh -- isolate Sink_A from Hub + Sink_B
 #   ansible-playbook -i inventory/ssh_hosts.yml toolbox/network/partition_set.yml -K \
 #       -e '{"set_a":["2a","2b","2c"],"set_b":["1a","1b","1c","3a","3b","3c"]}'
+#
+#   # Variant lab on a separate docker network:
+#   ansible-playbook toolbox/network/partition_set.yml \
+#       -e '{"set_a":["9a"],"set_b":["9b","9c"]}' \
+#       -e docker_network_name=hubsink_c
 ##################################################################################################
 
 - name: Partition a set of nodes from another set (mode-aware wrapper)

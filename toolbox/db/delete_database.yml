@@ -25,8 +25,10 @@
 #   cluster_leader  REQUIRED.  Node name of any node in the cluster (e.g. 1a).
 #   db_name         REQUIRED.  Database name to delete.
 #   timeout_secs    OPTIONAL.  Default 60.  Wait budget for the topology delete to propagate.
-#   data_dir        OPTIONAL.  Default /var/lib/ravendb/data.  Base RavenDB data dir on
-#                              each node.  Actual path: <data_dir>/Databases/<db_name>/.
+#   data_dir            OPTIONAL.  Default /var/lib/ravendb/data.  Base RavenDB data dir on
+#                                  each node.  Actual path: <data_dir>/Databases/<db_name>/.
+#   docker_network_name OPTIONAL.  Default `hubsinknet`.  Override when targeting a
+#                                  non-default lab network (e.g. parallel variant runs).
 #
 # RUN EXAMPLES:
 #   # docker
@@ -34,6 +36,11 @@
 #
 #   # ssh
 #   ansible-playbook -i inventory/ssh_hosts.yml toolbox/db/delete_database.yml -e cluster_leader=1a -e db_name=Tenants
+#
+#   # Variant lab on a separate docker network:
+#   ansible-playbook toolbox/db/delete_database.yml -K \
+#       -e cluster_leader=9a -e db_name=Tenants \
+#       -e docker_network_name=hubsink_c
 ##################################################################################################
 
 - name: Delete from cluster topology + compute peers

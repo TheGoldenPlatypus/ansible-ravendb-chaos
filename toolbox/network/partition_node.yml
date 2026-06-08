@@ -5,10 +5,17 @@
 # peers in one go.  Peers are discovered by reading the target's /cluster/topology.
 #
 # INPUTS:
-#   target  REQUIRED.  Container name to partition.  Must currently be in a cluster.
+#   target              REQUIRED.  Container name to partition.  Must currently be in a cluster.
+#   docker_network_name OPTIONAL.  Default `hubsinknet`.  Override when targeting a
+#                                  non-default lab network (e.g. parallel variant runs).
 #
-# RUN EXAMPLE:
+# RUN EXAMPLES:
 #   ansible-playbook toolbox/network/partition_node.yml -e target=1c
+#
+#   # Variant lab on a separate docker network:
+#   ansible-playbook toolbox/network/partition_node.yml \
+#       -e target=9c \
+#       -e docker_network_name=hubsink_c
 ##################################################################################################
 
 - name: Partition a node from the rest of its cluster

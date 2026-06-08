@@ -5,10 +5,17 @@
 # and its cluster peers.  Peers are discovered from the target's own /cluster/topology.
 #
 # INPUTS:
-#   target  REQUIRED.  Container name to heal.
+#   target              REQUIRED.  Container name to heal.
+#   docker_network_name OPTIONAL.  Default `hubsinknet`.  Override when targeting a
+#                                  non-default lab network (e.g. parallel variant runs).
 #
-# RUN EXAMPLE:
+# RUN EXAMPLES:
 #   ansible-playbook toolbox/network/heal_node.yml -e target=1c
+#
+#   # Variant lab on a separate docker network:
+#   ansible-playbook toolbox/network/heal_node.yml \
+#       -e target=9c \
+#       -e docker_network_name=hubsink_c
 ##################################################################################################
 
 - name: Heal a previously-partitioned node

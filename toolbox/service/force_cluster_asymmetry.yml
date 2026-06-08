@@ -15,8 +15,10 @@
 # The parent's -K prompt is forwarded to child invocations via ANSIBLE_BECOME_PASS.
 #
 # INPUTS:
-#   version_map  REQUIRED.  Dict mapping container names to target versions or build paths.
-#                           Pass as JSON on the CLI.
+#   version_map         REQUIRED.  Dict mapping container names to target versions or build paths.
+#                                  Pass as JSON on the CLI.
+#   docker_network_name OPTIONAL.  Default `hubsinknet`.  Override when targeting a
+#                                  non-default lab network (e.g. parallel variant runs).
 #
 # RUN EXAMPLES:
 #   # asymmetric hub: 1b on 7.2.3, 1c on a dev .deb, 1a left untouched
@@ -30,6 +32,11 @@
 #   # symmetric upgrade of the whole hub cluster (degenerate case -- all entries same version)
 #   ansible-playbook toolbox/service/force_cluster_asymmetry.yml -K \
 #       -e '{"version_map":{"1a":"/tmp/raven-x.deb","1b":"/tmp/raven-x.deb","1c":"/tmp/raven-x.deb"}}'
+#
+#   # Variant lab on a separate docker network:
+#   ansible-playbook toolbox/service/force_cluster_asymmetry.yml -K \
+#       -e '{"version_map":{"9b":"7.2.3"}}' \
+#       -e docker_network_name=hubsink_c
 ##################################################################################################
 
 - name: Force a cluster into the requested asymmetric version state

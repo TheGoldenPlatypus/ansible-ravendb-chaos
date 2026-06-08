@@ -15,7 +15,9 @@
 #   Optional `targets` JSON list overrides the auto-discovered list.
 #
 # INPUTS:
-#   targets  OPTIONAL.  JSON list overriding auto-discovery (e.g. '["1a","2b"]').
+#   targets             OPTIONAL.  JSON list overriding auto-discovery (e.g. '["1a","2b"]').
+#   docker_network_name OPTIONAL.  Default `hubsinknet`.  Override when targeting a
+#                                  non-default lab network (e.g. parallel variant runs).
 #
 # RUN EXAMPLES:
 #   # docker -- list across the lab
@@ -26,6 +28,10 @@
 #
 #   # surgical override -- check only these two
 #   ansible-playbook toolbox/diagnostic/diagnostic_partition_list.yml -e '{"targets":["1a","1b"]}'
+#
+#   # Variant lab on a separate docker network:
+#   ansible-playbook toolbox/diagnostic/diagnostic_partition_list.yml \
+#       -e docker_network_name=hubsink_c
 ##################################################################################################
 
 - name: List active chaos iptables rules across every node
