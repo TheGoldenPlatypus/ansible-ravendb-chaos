@@ -468,16 +468,15 @@ ansible-playbook toolbox/workloads/assert_workload_alive.yml \
     -e pidfile=/tmp/w1-1a-db1.pid
 ```
 
-### `pause_gate.yml`  (toolbox/control)
+### `pause_gate.yml`  (toolbox/control) -- kept as a standalone example, not used in scenarios
 
 ```bash
-# Always prints the section banner; only pauses when pause_between_sections=true.
-# Used at the top of every section in EMR scenarios.
+# Prints a section banner; pauses for ENTER when pause_between_sections=true.  Active
+# scenarios don't import it -- they're meant for unattended PR runs.  This wrapper stays
+# around as a building block for future demo / showcase playbooks.
 ansible-playbook toolbox/control/pause_gate.yml \
-    -e section_label="SECTION 5 -- upgrade 1a"
-
-# Demo mode: pause for ENTER between sections
-ansible-playbook scenarios/EMR/RP1/rp1.yml -e pause_between_sections=true
+    -e section_label="SECTION 5 -- upgrade 1a" \
+    -e pause_between_sections=true
 ```
 
 ### `smuggler_import.yml`  (toolbox/backup)
@@ -573,15 +572,15 @@ ansible-playbook toolbox/diagnostic/diagnostic_orphan_revisions.yml \
     -e db_name=db1 -e '{"nodes":["1a","1b","1c"]}'
 ```
 
-### `diagnostic_equal_stats.yml`
+### `diagnostic_extension_stats_parity.yml`
 
 ```bash
 # All three extension aspects (attachments + counters + timeseries).
-ansible-playbook toolbox/diagnostic/diagnostic_equal_stats.yml \
+ansible-playbook toolbox/diagnostic/diagnostic_extension_stats_parity.yml \
     -e db_name=db1 -e '{"nodes":["1a","1b","1c"]}'
 
 # Only the aspect you care about.
-ansible-playbook toolbox/diagnostic/diagnostic_equal_stats.yml \
+ansible-playbook toolbox/diagnostic/diagnostic_extension_stats_parity.yml \
     -e db_name=db1 -e aspects=attachments \
     -e '{"nodes":["1a","1b","1c"]}'
 ```
@@ -617,7 +616,7 @@ ansible-playbook toolbox/diagnostic/diagnostic_stored_item_cv_split.yml \
 
 ```bash
 # Consolidated /stats parity across nodes (12 fields, 1 GET/node) -- replaces
-# doc_count_parity + equal_stats chain.  Prints a single table; asserts 9 of 11 Count*
+# doc_count_parity + extension_stats_parity chain.  Prints a single table; asserts 9 of 11 Count*
 # fields (CountOfCounterEntries + CountOfTimeSeriesSegments + SizeOnDisk are info-only).
 ansible-playbook toolbox/diagnostic/diagnostic_stats_parity.yml \
     -e db_name=db1 -e '{"nodes":["1a","1b","1c"]}'
@@ -909,6 +908,28 @@ ansible-playbook scenarios/EMR/workloads/w3/workload_w3.yml \
     -e id_prefix=hot -e pool_size=1000 -e writers=4
 ```
 
+### `workload_w4.yml` -- filter-boundary churn (50/50 in-prefix / out-prefix writes)
+
+```bash
+# Hammer the filter boundary by interleaving writes to an in-allowed prefix vs an out-allowed
+# prefix.  Used by RP-2 step 6 (widen + narrow with backlog under W-4 load).
+ansible-playbook scenarios/EMR/workloads/w4/workload_w4.yml \
+    -e target=1a -e db_name=db1 \
+    -e in_prefix=users -e out_prefix=orders \
+    -e pool_size=1000 -e duration_secs=60
+```
+
+### `workload_w5.yml` -- conflict generator (concurrent writes on the same doc-id pool)
+
+```bash
+# Launch TWO instances on opposite sides of a partition with same id_prefix + pool_size and
+# DISTINCT side_label so the resulting writes conflict on heal.  Used by RP-2 step 20.
+ansible-playbook scenarios/EMR/workloads/w5/workload_w5.yml \
+    -e target=1a -e db_name=db1 \
+    -e id_prefix=users/conflict -e pool_size=500 \
+    -e side_label=majority -e duration_secs=180
+```
+
 ### `workload_w7.yml` -- single-doc revision firehose (RV-1 Phase 3)
 
 ```bash
@@ -930,15 +951,201 @@ ansible-playbook scenarios/EMR/workloads/w7/workload_w7_reader.yml \
 
 ---
 
+## 4.6. Calling the `ravendb_*` Python modules directly (`library/`)
+
+Six custom modules under `library/` are the canonical way to call RavenDB from inside a
+scenario's `tasks:` block.  The toolbox YAML wrappers remain as CLI examples but scenarios
+should prefer direct module calls -- one task instead of an `import_playbook` round-trip,
+results in `register: r` for inline assertions, no var-scoping gymnastics.
+
+Every call requires `ravendb_domain`, `client_cert`, `ca_cert` (auto-resolvable from
+`group_vars/all.yml`).  Most kinds take `target` + `db_name`; parity / sweep kinds take
+`nodes` instead.  Set `assert_mode: true` to make a parity check fail loud (default is
+info-only output).
+
+### `ravendb_revisions` -- configure document revisions
+
+```yaml
+# Default config -- minimum N revisions kept, optional age purge
+- ravendb_revisions:
+    ravendb_domain: "{{ ravendb_domain }}"
+    client_cert: "{{ cert_dir }}/client.pem"
+    ca_cert: "{{ cert_ca_crt }}"
+    target: 1a
+    db_name: db1
+    default_keep: 25
+    default_max_age_secs: 21600
+
+# Per-collection config
+- ravendb_revisions:
+    ravendb_domain: "{{ ravendb_domain }}"
+    client_cert: "{{ cert_dir }}/client.pem"
+    ca_cert: "{{ cert_ca_crt }}"
+    target: 1a
+    db_name: db1
+    collections_config:
+      Users:    { keep: 10, max_age_secs: 1800 }
+      Orders:   { keep: 50, max_age_secs: 7200 }
+      Internal: { keep: 25, max_age_secs: 21600 }
+
+# Keep-all (no purge -- RV-1 phase 3 uses this for the 1M-rev firehose)
+- ravendb_revisions:
+    target: 1a
+    db_name: db1
+    minimum_revisions: 100000000
+    ravendb_domain: "{{ ravendb_domain }}"
+    client_cert: "{{ cert_dir }}/client.pem"
+    ca_cert: "{{ cert_ca_crt }}"
+```
+
+### `ravendb_writes` -- writes (9 `kind:`s)
+
+```yaml
+# kind: docs                -- N PUTs with the same body (single revision per id; dedupes)
+# kind: docs_freeform       -- N PUTs with random GUID ids
+# kind: docs_revisions      -- N docs x M revisions, DISTINCT body per PUT
+# kind: docs_interleaved    -- round-robin across multiple prefixes
+# kind: attachments         -- add attachment to N existing docs
+# kind: counters            -- increment a counter N times on one doc
+# kind: timeseries          -- append (or delete a range) on one doc's TS
+# kind: delete              -- DELETE by id list OR by prefix+count
+# kind: restore_revision    -- restore an older revision as the new live doc
+
+- ravendb_writes:
+    kind: docs_revisions
+    ravendb_domain: "{{ ravendb_domain }}"
+    client_cert: "{{ cert_dir }}/client.pem"
+    ca_cert: "{{ cert_ca_crt }}"
+    target: 1a
+    db_name: db1
+    id_prefix: seed
+    collection: MicroDocs
+    count: 10000
+    revs_per_doc: 5
+  register: r
+- debug: { msg: "{{ r.msg }}" }
+```
+
+### `ravendb_wait` -- sync gates (9 `kind:`s)
+
+```yaml
+# kind: leader              -- /cluster/topology reports a Leader (optionally pinned)
+# kind: member              -- target node is full Member of cluster
+# kind: rehab               -- target node entered DB-level rehab
+# kind: etag_parity         -- per-node LastDatabaseEtag stable across 2 samples (drained)
+# kind: docs_drain          -- per-node CV stable across 2 samples
+# kind: quiescence          -- DatabaseChangeVector equality cross-node (converged)
+# kind: stats_field_parity  -- /stats fields equal cross-node (post-cleanup tombstone wait)
+# kind: conflicts_resolved  -- /replication/conflicts == 0 on every node
+# kind: marker_propagation  -- PUT marker on source, poll until present on every target
+
+- ravendb_wait:
+    kind: etag_parity
+    ravendb_domain: "{{ ravendb_domain }}"
+    client_cert: "{{ cert_dir }}/client.pem"
+    ca_cert: "{{ cert_ca_crt }}"
+    db_name: db1
+    nodes: [1a, 1b, 1c]
+    timeout: 180
+  register: r
+- debug: { msg: "{{ r.msg }}" }
+```
+
+### `ravendb_tasks` -- ongoing-task ops (4 `kind:`s)
+
+```yaml
+# kind: define_hub          -- hub-side: define PullReplicationAsHub + per-sink access entries
+# kind: attach_sinks        -- sink-side: create connection string + sink-pull task w/ PFX
+# kind: mutate_sink_filter  -- live-mutate AllowedHubToSinkPaths on an existing sink-pull task
+# kind: set_mentor_node     -- flip MentorNode on hub / sink / external replication task
+
+- ravendb_tasks:
+    kind: define_hub
+    ravendb_domain: "{{ ravendb_domain }}"
+    client_cert: "{{ cert_dir }}/client.pem"
+    ca_cert: "{{ cert_ca_crt }}"
+    hub_leader: 1a
+    db_name: db1
+    hub_task_name: rp1-hub
+    sink_cluster_ids: [2]
+    sink_allowed_paths: { "2": ["users/sink1/*"] }
+    replication_certs_dir: "{{ playbook_dir }}/../../../replication-certs"
+
+- ravendb_tasks:
+    kind: set_mentor_node
+    ravendb_domain: "{{ ravendb_domain }}"
+    client_cert: "{{ cert_dir }}/client.pem"
+    ca_cert: "{{ cert_ca_crt }}"
+    target: 1a
+    db_name: db1
+    task_name: rp2-hub-to-sink1
+    task_type: hub        # or sink / external
+    mentor_node: B
+```
+
+### `ravendb_backup` -- backup / restore / smuggler (3 `kind:`s)
+
+```yaml
+# kind: backup              -- trigger Logical/Snapshot backup, wait for completion
+# kind: restore             -- restore a backup folder as a new DB, wait for completion
+# kind: smuggler_import     -- POST a .ravendbdump from controller into an existing DB
+
+- ravendb_backup:
+    kind: backup
+    ravendb_domain: "{{ ravendb_domain }}"
+    client_cert: "{{ cert_dir }}/client.pem"
+    ca_cert: "{{ cert_ca_crt }}"
+    target: 1a
+    db_name: db1
+    backup_type: Backup      # or Snapshot
+    backup_path: /backups/run1
+```
+
+### `ravendb_diagnostic` -- read-only checks (19 `kind:`s)
+
+Info-only by default; pass `assert_mode: true` to make a parity / invariant kind fail loud.
+
+```yaml
+# info-only kinds:
+#   doc_count, replication, schema_version, size_envelope,
+#   capture_cv, capture_doc_cv, scan_fltr
+# parity / invariant kinds (accept assert_mode):
+#   doc_count_parity, doc_id_set_parity, revision_count_parity, orphan_revisions,
+#   extension_stats_parity, stored_item_cv_split, lane_inert, filter_compliance,
+#   cross_sink_isolation, cv_boundary_by_dbid, db_cv_order_side_only, stats_parity
+
+- ravendb_diagnostic:
+    kind: stats_parity
+    ravendb_domain: "{{ ravendb_domain }}"
+    client_cert: "{{ cert_dir }}/client.pem"
+    ca_cert: "{{ cert_ca_crt }}"
+    db_name: db1
+    nodes: [1a, 1b, 1c]
+    assert_mode: true
+  register: r
+- debug: { msg: "{{ r.msg }}" }
+
+- ravendb_diagnostic:
+    kind: cv_boundary_by_dbid
+    ravendb_domain: "{{ ravendb_domain }}"
+    client_cert: "{{ cert_dir }}/client.pem"
+    ca_cert: "{{ cert_ca_crt }}"
+    db_name: db1
+    source_nodes: [1a, 1b, 1c]
+    receiver_nodes: [2a, 2b, 2c]
+    assert_mode: true
+```
+
+---
+
 ## 5. EMR scenarios (`scenarios/EMR/`)
 
-Active scenarios: **RV-1**, **RP-1**, **RPV-1** — each implements one slice of [`EMR_TESTING_PLAN/scenarios.md`](EMR_TESTING_PLAN/scenarios.md).  Earlier retired implementations are archived under [`scenarios/EMR/legacy/`](scenarios/EMR/legacy/) as a composition reference.  Top-level scenarios index + per-scenario detail: [`scenarios/EMR/README.md`](scenarios/EMR/README.md).
+Active scenarios: **RV-1**, **RP-1**, **RP-2**, **RPV-1** — each implements one slice of [`EMR_TESTING_PLAN/scenarios.md`](EMR_TESTING_PLAN/scenarios.md).
 
 Common conventions:
 * Each scenario has a `run.sh` wrapper: `teardown → provision → install → form_clusters → scenario`.
-* Smoke-size every scenario via `-e` overrides (see header comment of each `*.yml`).
-* `-e pause_between_sections=true` makes every section wait for ENTER (showcase mode).
-* Every section banner is grep-friendly: `grep ">>>>>" logs/<scenario>-*.log` is a TOC.
+* `run.sh <args...> [cid] [net] [-e foo=bar ...]` — positional args stop at the first `-flag`, rest go to the scenario as overrides.
+* Smoke-size any scenario via `-e` overrides (see the smoke-mode subsection per scenario below).
 
 ### RV-1 -- single-cluster `v_62 → v_new` full chain + churn + 1M-rev (T1)
 
@@ -981,6 +1188,34 @@ ansible-playbook scenarios/EMR/RP1/rp1.yml -K \
     2>&1 | tee logs/rp1-smoke-$(date +%Y%m%d-%H%M%S).log
 ```
 
+### RP-2 -- compound replication chaos across hub + 2 sinks (T3, all v_new)
+
+Hub + 2 sinks (RF=3 each), 9 nodes all on v_new throughout (no upgrade).  4 phases:
+phase (a) echo prevention + concurrent conflict + cross-sink leak, phase (b) 7 filter mutation
+sub-steps, phase (c) mentor rotation + hard kill + node remove/rejoin, phase (d) split-brain.
+Currently blocked at step 6b on a known RavenDB filter-mutation live-propagation gap (pending
+upstream reply — the test correctly surfaces the issue).
+
+```bash
+# End-to-end (~40 min spec sizing)
+scenarios/EMR/RP2/run.sh builds/raven-pr22875.deb
+
+# Shakedown (~10 min)
+scenarios/EMR/RP2/run.sh builds/raven-pr22875.deb \
+    -e setup_hub_users=200 -e setup_sink1_users=200 \
+    -e phase_a_active_count=100 -e phase_a_conflict_count=100 -e phase_a_leak_check_count=100 \
+    -e phase_b_backlog_count=100 -e phase_b_archived_count=200 \
+    -e phase_b_w4_duration_secs=15 -e phase_b_w1_duration_secs=20 \
+    -e phase_b_partition_window_secs=15 -e phase_b_egress_window_secs=15 \
+    -e phase_b_mentor_restart_count=2 -e phase_b_mentor_restart_window_secs=30 \
+    -e phase_b_retry_storm_window_secs=30 -e phase_b_retry_storm_period_secs=10 \
+    -e phase_c_mentor_rotation_window_secs=30 -e phase_c_w1_post_kill_secs=20 \
+    -e phase_c_remove_node_wait_secs=20 \
+    -e phase_d_w5_window_secs=30 -e phase_d_w5_pool_size=100 \
+    -e parity_probe_count=10 -e burst_cooldown_secs=5 \
+    2>&1 | tee logs/rp2-smoke-$(date +%Y%m%d-%H%M%S).log
+```
+
 ### RPV-1 -- cross-cluster `v_62 → v_new` rolling upgrade, filter-aware (T3)
 
 Hub + Sink-1 (filter `users/sink1/* + orders/sink1/*`) + Sink-2 (filter `users/sink2/* +
@@ -1020,26 +1255,37 @@ ansible-playbook scenarios/EMR/RPV1/rpv1.yml -K \
          "upgrade_step_3":["3a","1c","2b"]}'
 ```
 
-### Running 3 scenarios in parallel on the same docker host
+### Running scenarios in parallel on the same docker host
 
-Each `run.sh` accepts `[cluster_id_start] [docker_network_name]` positional args.  Each parallel
-run must use a **disjoint cluster_id range** + **unique network name**:
+Each `run.sh` accepts `[cid] [net]` positional args.  Each parallel run must use a **disjoint
+cluster_id range** + **unique network name**.  Container names are globally unique per docker
+daemon -- a cid collision will stomp the other run's containers.
+
+| Scenario | cids needed | suggested `cid` | suggested `net` |
+|---|---|---|---|
+| RV-1   | 1 | `1` | `rv1net`   |
+| RP-1   | 2 | `2` | `rp1net`   |
+| RP-2   | 3 | `4` | `rp2net`   |
+| RPV-1  | 3 | `7` | `rpv1net`  |
+
+Export the BECOME password once so no shell re-prompts:
 
 ```bash
-# Shell A -- RV-1 on cluster 1, network rv1net
-scenarios/EMR/RV1/run.sh 6.2.15 builds/raven-pr22875.deb 1 rv1net \
-    2>&1 | tee logs/rv1-$(date +%Y%m%d-%H%M%S).log
+read -rsp "BECOME password: " ANSIBLE_BECOME_PASS; echo; export ANSIBLE_BECOME_PASS
 
-# Shell B -- RP-1 on clusters 4-5, network rp1net
-scenarios/EMR/RP1/run.sh builds/raven-pr22875.deb 4 rp1net \
-    2>&1 | tee logs/rp1-$(date +%Y%m%d-%H%M%S).log
-
-# Shell C -- RPV-1 on clusters 7-9, network rpv1net
-scenarios/EMR/RPV1/run.sh 6.2.15 builds/raven-pr22875.deb 7 rpv1net \
-    2>&1 | tee logs/rpv1-$(date +%Y%m%d-%H%M%S).log
+# Shell A
+scenarios/EMR/RV1/run.sh 6.2.15 builds/raven-pr22875.deb 1 rv1net   ...  2>&1 | tee logs/rv1-$(date +%Y%m%d-%H%M).log
+# Shell B
+scenarios/EMR/RP1/run.sh builds/raven-pr22875.deb 2 rp1net          ...  2>&1 | tee logs/rp1-$(date +%Y%m%d-%H%M).log
+# Shell C
+scenarios/EMR/RP2/run.sh builds/raven-pr22875.deb 4 rp2net          ...  2>&1 | tee logs/rp2-$(date +%Y%m%d-%H%M).log
+# Shell D
+scenarios/EMR/RPV1/run.sh 6.2.15 builds/raven-pr22875.deb 7 rpv1net ...  2>&1 | tee logs/rpv1-$(date +%Y%m%d-%H%M).log
 ```
 
-18 RavenDB containers across 3 isolated docker networks, all running concurrently.
+All four in parallel = 27 RavenDB containers.  WSL2 default kernel limits (`pid_max=32768`)
+can hit `OCI runtime exec failed: setns process: exit status 1` under that load -- see
+[NOTES.md § WSL2 kernel limits](NOTES.md) for the one-time `sysctl` bump.
 
 ---
 
