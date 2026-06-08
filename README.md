@@ -62,7 +62,7 @@ Four pre-built cert files (`ca.crt`, `ca.key`, `server.pfx`, `client.pfx`) live 
 
 > https://drive.google.com/file/d/1frqQp_3ZeSvoDfTBhj8YoSO6XgFc76q8/view?usp=sharing
 
-Bring your own `license.json` (from your RavenDB account) and drop it next to the four cert files. Default lookup path is `/home/kaiju-1/EMR/selfsignedmaterials/` - override `cert_dir` in `inventory/group_vars/all.yml` if you put it elsewhere.
+Bring your own `license.json` (from your RavenDB account) and drop it next to the four cert files. Default lookup path is `/home/kaiju-1/company-1/selfsignedmaterials/` - override `cert_dir` in `inventory/group_vars/all.yml` if you put it elsewhere.
 
 ---
 
@@ -110,7 +110,7 @@ ansible-playbook playbooks/provision_nodes.yml -e clusters_count=2 -e nodes_per_
     -e cluster_id_start=4 -e docker_network_name=betanet
 ```
 
-Containers in Run A are named `1a/1b/1c`; in Run B `4a/4b/4c/5a/5b/5c`. `form_clusters` and `teardown_containers` both scope to the configured `docker_network_name`, so the two labs are fully isolated. EMR scenarios accept matching `-e cluster_id_start=N -e docker_network_name=NAME` overrides — see [scenarios/EMR/README.md](scenarios/EMR/README.md) for the parallel-run pattern across RV-1 / RP-1 / RPV-1.
+Containers in Run A are named `1a/1b/1c`; in Run B `4a/4b/4c/5a/5b/5c`. `form_clusters` and `teardown_containers` both scope to the configured `docker_network_name`, so the two labs are fully isolated. company-1 scenarios accept matching `-e cluster_id_start=N -e docker_network_name=NAME` overrides — see [scenarios/company-1/README.md](scenarios/company-1/README.md) for the parallel-run pattern across RV-1 / RP-1 / RPV-1.
 
 ## Bring-up - SSH mode
 
@@ -353,7 +353,7 @@ Each tool's file header has the full inputs + run examples - click the link to r
 
 ### 🚦 control - scenario flow control
 
-- [`pause_gate.yml`](toolbox/control/pause_gate.yml) - Section banner + opt-in pause.  Always prints a 3-line ASCII banner (`>>>>>  SECTION X -- …`); pauses for ENTER when `pause_between_sections=true`.  Used at the top of every section in the EMR scenarios.
+- [`pause_gate.yml`](toolbox/control/pause_gate.yml) - Section banner + opt-in pause.  Always prints a 3-line ASCII banner (`>>>>>  SECTION X -- …`); pauses for ENTER when `pause_between_sections=true`.  Used at the top of every section in the company-1 scenarios.
   **Required:** `section_label`.
   **Optional:** `pause_between_sections` (default false).
 
@@ -395,6 +395,6 @@ One-off overrides: `-e key=value` on the command line.
 
 - **[CHEATSHEET.md](CHEATSHEET.md)** - copy-paste runner for every playbook + tool, including optional-var variants.
 - **[NOTES.md](NOTES.md)** - environment caveats (WSL wedge, hardware), per-tool quirks (timeseries date shell-out, delete-range inclusive bounds, backup folder path, etc.), and design decisions (why mode-aware over `_ssh` variants, why CV equality not etag stability, why no `workload_mixed.yml`).
-- **[scenarios/EMR/README.md](scenarios/EMR/README.md)** - end-to-end EMR test scenarios.  RV-1 (single-cluster v_62→v_new + churn + 1M-rev), RP-1 (CV-boundary regression guard), RPV-1 (cross-cluster rolling upgrade, 3 variants).  Each scenario composes toolbox tools, ships with a `run.sh` wrapper, and is parallel-safe via `cluster_id_start` / `docker_network_name` overrides.  Full spec in [EMR_TESTING_PLAN/](EMR_TESTING_PLAN/).
+- **[scenarios/company-1/README.md](scenarios/company-1/README.md)** - end-to-end company-1 test scenarios.  RV-1 (single-cluster v_62→v_new + churn + 1M-rev), RP-1 (CV-boundary regression guard), RPV-1 (cross-cluster rolling upgrade, 3 variants).  Each scenario composes toolbox tools, ships with a `run.sh` wrapper, and is parallel-safe via `cluster_id_start` / `docker_network_name` overrides.  Full spec in [company-1_TESTING_PLAN/](company-1_TESTING_PLAN/).
 - **`scripts/build_ravendb_pr.sh`** - build a RavenDB `.deb` (Studio included) from any ravendb/ravendb PR. Output lands in `builds/raven-pr<N>.deb`; hand it to `install_ravendb.yml -e custom_build=...`.
 - **`.github/CODEOWNERS`** - repo ownership.

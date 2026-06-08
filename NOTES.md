@@ -21,7 +21,7 @@ on WSL for docker-mode; the wedge only bites SSH-mode chaos.
 ### WSL2 kernel limits for many parallel containers
 
 WSL2 defaults are tight: `kernel.pid_max=32768`, `fs.inotify.max_user_watches=8192`.  Running
-multiple EMR scenarios in parallel (each spawns 3-9 privileged systemd containers, each forks
+multiple company-1 scenarios in parallel (each spawns 3-9 privileged systemd containers, each forks
 ~80 processes) overshoots these defaults and surfaces as random `OCI runtime exec failed: ...
 setns process: exit status 1` during install.  Bump them once:
 
@@ -40,11 +40,11 @@ Chaos scenarios assume RavenDB restarts in seconds.  On nodes with < 1 GB RAM (e
 Pi Zero), `systemctl restart ravendb` can take ~50s+ and timing-sensitive scenarios won't
 behave usefully.  **Aim for ≥ 2 GB RAM per node for real testing.**
 
-### EMR scenarios are docker-only
+### company-1 scenarios are docker-only
 
-The EMR scenarios under `scenarios/EMR/` assume containers on a single docker daemon (via
+The company-1 scenarios under `scenarios/company-1/` assume containers on a single docker daemon (via
 `community.docker`).  Some toolbox tools have `_ssh` variants for bare-metal VM runs
-(`cut_link_ssh`, `partition_node_ssh`, `heal_node_ssh`), but the EMR scenarios themselves
+(`cut_link_ssh`, `partition_node_ssh`, `heal_node_ssh`), but the company-1 scenarios themselves
 don't wire ssh mode -- and several newer primitives (`inject_egress_delay`,
 `clear_egress_delay`, `hard_kill_ravendb`, `mutate_sink_filter`) are docker-only with no
 ssh variant.
@@ -132,7 +132,7 @@ identify "this won't change state" / "this will block" at a glance.
 
 ---
 
-## EMR-scenario authoring gotchas
+## company-1-scenario authoring gotchas
 
 The footguns that bit us writing RV-1 / RP-1 / RP-2 / RPV-1 — useful when adding the remaining
 scenarios (RP-3 / RV-2 / RV-3 / RPV-2).
@@ -140,7 +140,7 @@ scenarios (RP-3 / RV-2 / RV-3 / RPV-2).
 ### `vars.yml` is NOT reachable from `import_playbook:` `vars:` blocks
 
 Ansible evaluates `import_playbook` vars at parse time, before any `vars_files:` directive has
-loaded the scenario's `vars.yml`.  Symptom: a var defined in `scenarios/EMR/<X>/vars.yml`
+loaded the scenario's `vars.yml`.  Symptom: a var defined in `scenarios/company-1/<X>/vars.yml`
 evaluates to `Undefined` inside the importing playbook's `vars:` dict, but works fine inside
 the imported playbook's tasks.
 
@@ -177,12 +177,12 @@ to run an inner playbook from inside a play (`import_playbook` is top-level only
 
 Inside an imported `toolbox/*.yml`, `{{ playbook_dir }}` is the toolbox dir, not the scenario
 dir.  When you need a path relative to scenario fixtures, use either an absolute path passed via
-`-e`, or `{{ lookup('env', 'PWD') }}/scenarios/EMR/<X>/...` (assumes the run.sh `cd`s to repo
+`-e`, or `{{ lookup('env', 'PWD') }}/scenarios/company-1/<X>/...` (assumes the run.sh `cd`s to repo
 root, which all our run.sh scripts do).
 
 ### Background workloads — launch the .sh directly, not via `ansible-playbook`
 
-The historical pattern `nohup ansible-playbook scenarios/EMR/workloads/wN/workload_wN.yml &`
+The historical pattern `nohup ansible-playbook scenarios/company-1/workloads/wN/workload_wN.yml &`
 spawns 5 process levels (outer ansible → bash subshell → nohup → inner ansible-playbook →
 .sh → curl).  A signal anywhere up the chain can kill the .sh and the EXIT trap removes the
 pidfile — `assert_workload_alive` then trips with `NO_PIDFILE` and the scenario fails for the
@@ -261,7 +261,7 @@ net.ipv4.tcp_tw_reuse=1` on the controller.
 
 ### Workloads run indefinitely until explicitly killed
 
-Per the EMR plan ("continuous from T0 through endpoint") all W-* workloads default to
+Per the company-1 plan ("continuous from T0 through endpoint") all W-* workloads default to
 `DURATION_SECS=0` (the indefinite sentinel) and only stop when the scenario invokes
 `stop_workload.yml`.  **Never** set `duration_secs` in a scenario unless that section
 explicitly wants a fixed-window write phase.

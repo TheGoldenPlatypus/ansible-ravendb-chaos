@@ -24,6 +24,3 @@ captures/
 
 # RavenDB .debs built by scripts/build_ravendb_pr.sh
 builds/
-
-# scenario / smoke run logs (per-run tee'd output)
-logs/
