@@ -1,21 +1,16 @@
 ##################################################################################################
 # toolbox/diagnostic/diagnostic_cross_sink_isolation.yml
 #
-# filter invariant (v): "no leak across sinks."  Asserts a sink cluster does NOT contain
-# documents that belong to OTHER sinks' filter buckets (e.g. sink-1 must have zero docs matching
-# users/sink2/* or orders/sink2/*).
-#
-# Why this exists alongside diagnostic_filter_compliance:
-#   filter_compliance enumerates every doc on the sink and checks it matches the allowed set.
-#   This tool probes the deterministic seeded ids of the SIBLING sink's buckets directly --
-#   gives a sharper failure message when the leak is specifically from a sibling sink's pool.
+# Probes a sink for documents with the sibling sinks' forbidden prefixes -- sharper failure
+# message than filter_compliance when the leak is specifically from a sibling sink's pool.
+# Info by default; pass assert_mode=true to fail on any leak.
 #
 # INPUTS:
-#   db_name              REQUIRED.  Database name.
-#   sink_cluster_leader  REQUIRED.  This sink's leader (e.g. 2a).
-#   forbidden_prefixes   REQUIRED.  JSON list of prefixes that must NOT appear on this sink
-#                                   (e.g. ["users/sink2/", "orders/sink2/"] when checking sink-1).
-#   sample_per_prefix    OPTIONAL.  How many ids to probe per prefix.  Default 100.
+#   db_name              REQUIRED.
+#   sink_cluster_leader  REQUIRED.
+#   forbidden_prefixes   REQUIRED.  JSON list of prefixes that must NOT appear on this sink.
+#   sample_per_prefix    OPTIONAL.  Default 100.
+#   assert_mode          OPTIONAL.  Default false.
 #
 # RUN EXAMPLE:
 #   ansible-playbook toolbox/diagnostic/diagnostic_cross_sink_isolation.yml \
@@ -23,80 +18,20 @@
 #       -e '{"forbidden_prefixes":["users/sink2/","orders/sink2/"]}'
 ##################################################################################################
 
-- name: Assert sink has none of the forbidden (sibling-sink) prefixes
+- name: Probe sink for forbidden sibling-sink prefixes
   hosts: localhost
   connection: local
   gather_facts: false
-
   tasks:
-    - name: Validate inputs
-      ansible.builtin.assert:
-        that:
-          - db_name is defined
-          - sink_cluster_leader is defined
-          - forbidden_prefixes is defined
-          - forbidden_prefixes is iterable
-          - (forbidden_prefixes | length) > 0
-        fail_msg: >-
-          Required: -e db_name=<db> -e sink_cluster_leader=<node>
-          -e '{"forbidden_prefixes":["users/sink2/", ...]}'
-
-    - name: Resolve sample size
-      ansible.builtin.set_fact:
-        eff_sample: "{{ (sample_per_prefix | default(100)) | int }}"
-
-    - name: Show probe plan
-      ansible.builtin.debug:
-        msg: >-
-          Checking sink leader {{ sink_cluster_leader }} for forbidden prefixes
-          {{ forbidden_prefixes }} -- sampling up to {{ eff_sample }} ids per prefix.
-
-    - name: Build probe id list (forbidden prefix x sample range)
-      ansible.builtin.set_fact:
-        probe_ids: >-
-          {{
-            (forbidden_prefixes | map('regex_replace', '/$', '') | list)
-              | product(range(eff_sample | int) | list)
-              | map('join', '/')
-              | list
-          }}
-
-    - name: GET each forbidden id on the sink leader
-      ansible.builtin.uri:
-        url: "https://{{ sink_cluster_leader }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/docs?id={{ item | urlencode }}"
+    - ravendb_diagnostic:
+        kind: cross_sink_isolation
+        ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
-        ca_path: "{{ cert_ca_crt }}"
-        status_code: [200, 404, 500, 503]
-      register: probe
-      loop: "{{ probe_ids }}"
-      loop_control:
-        label: "{{ item }}"
-
-    - name: Find leaked ids (any 200 = doc present that shouldn't be)
-      ansible.builtin.set_fact:
-        leaked_ids: >-
-          {{
-            probe.results
-              | selectattr('status', 'equalto', 200)
-              | map(attribute='item')
-              | list
-          }}
-
-    - name: Show summary
-      ansible.builtin.debug:
-        msg:
-          - "probed {{ probe_ids | length }} forbidden id(s) on {{ sink_cluster_leader }}"
-          - "leaked ids (present on this sink, shouldn't be): {{ leaked_ids | length }}"
-          - "leak sample (first 10): {{ leaked_ids[:10] }}"
-
-    - name: Assert cross-sink isolation (filter invariant (v))
-      ansible.builtin.assert:
-        that:
-          - (leaked_ids | length) == 0
-        fail_msg: >-
-          FAIL  cross-sink leak.  {{ leaked_ids | length }} doc(s) with forbidden prefix(es)
-          {{ forbidden_prefixes }} were found on sink {{ sink_cluster_leader }}.
-          Sample: {{ leaked_ids[:10] }}
-        success_msg: >-
-          PASS  cross-sink isolation.  Zero docs on {{ sink_cluster_leader }} with forbidden
-          prefix(es) {{ forbidden_prefixes }} ({{ probe_ids | length }} probes).
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: "{{ db_name }}"
+        sink_cluster_leader: "{{ sink_cluster_leader }}"
+        forbidden_prefixes: "{{ forbidden_prefixes }}"
+        sample_per_prefix: "{{ sample_per_prefix | default(omit) }}"
+        assert_mode: "{{ assert_mode | default(false) | bool }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }

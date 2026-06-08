@@ -1,15 +1,14 @@
 ##################################################################################################
 # toolbox/diagnostic/diagnostic_capture_doc_cv.yml
 #
-# Read-only.  For each (node, id) pair, fetches the document's @change-vector and writes one
-# file per pair to output_dir.  Files are named <node>__<id-encoded>.cv.  Missing docs are
-# recorded as <NOT_FOUND> so the absence is also captured.
+# Read-only.  For each (node, id) pair, fetches the doc's @change-vector and writes one file
+# per pair to output_dir.  Files named <node>__<id-encoded>.cv.  Missing docs -> "<NOT_FOUND>".
 #
 # INPUTS:
-#   db_name      REQUIRED.  Database name.
-#   ids          REQUIRED.  JSON list of doc ids (e.g. '["users/1","users/2"]').
-#   nodes        REQUIRED.  JSON list of node names to probe.
-#   output_dir   OPTIONAL.  Default = captures/doccv-<db>-<timestamp>/.
+#   db_name      REQUIRED.
+#   ids          REQUIRED.  JSON list of doc ids.
+#   nodes        REQUIRED.
+#   output_dir   OPTIONAL.  Default = <repo>/captures/doccv-<db>-<timestamp>/.
 #
 # RUN EXAMPLE:
 #   ansible-playbook toolbox/diagnostic/diagnostic_capture_doc_cv.yml \
@@ -20,56 +19,15 @@
   hosts: localhost
   connection: local
   gather_facts: false
-
   tasks:
-    - name: Validate inputs
-      ansible.builtin.assert:
-        that:
-          - db_name is defined
-          - ids is defined
-          - ids | length > 0
-          - nodes is defined
-          - nodes is iterable
-          - (nodes | length) > 0
-        fail_msg: "Required: -e db_name=<db> -e '{\"ids\":[...],\"nodes\":[\"1a\",\"1b\",\"1c\"]}'"
-
-    - name: Resolve output_dir
-      ansible.builtin.set_fact:
-        effective_output_dir: "{{ output_dir | default(playbook_dir.split('/toolbox')[0] ~ '/captures/doccv-' ~ db_name ~ '-' ~ lookup('pipe', 'date +%Y%m%d-%H%M%S')) }}"
-
-    - name: Build (node, id) cross product
-      ansible.builtin.set_fact:
-        pairs: "{{ nodes | product(ids) | map('list') | list }}"
-
-    - name: Ensure output_dir exists
-      ansible.builtin.file:
-        path: "{{ effective_output_dir }}"
-        state: directory
-        mode: '0755'
-
-    - name: Fetch each doc on each node
-      ansible.builtin.uri:
-        url: "https://{{ item.0 }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/docs?id={{ item.1 | urlencode }}"
+    - ravendb_diagnostic:
+        kind: capture_doc_cv
+        ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
-        ca_path: "{{ cert_ca_crt }}"
-        status_code: [200, 404, 500, 503]
-      register: docs
-      loop: "{{ pairs }}"
-      loop_control:
-        label: "{{ item.0 }}::{{ item.1 }}"
-
-    - name: Write per-(node, id) CV file
-      ansible.builtin.copy:
-        dest: "{{ effective_output_dir }}/{{ r.item.0 }}__{{ r.item.1 | regex_replace('[^A-Za-z0-9._-]', '_') }}.cv"
-        content: "{{ (r.json.Results[0]['@metadata']['@change-vector'] | default('<NOT_FOUND status=' ~ r.status ~ '>')) }}\n"
-        mode: '0644'
-      loop: "{{ docs.results }}"
-      loop_control:
-        loop_var: r
-        label: "{{ r.item.0 }}::{{ r.item.1 }}"
-
-    - name: Summary
-      ansible.builtin.debug:
-        msg: >-
-          Wrote {{ pairs | length }} file(s) to {{ effective_output_dir }}/
-          ({{ nodes | length }} nodes x {{ ids | length }} ids, db={{ db_name }})
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: "{{ db_name }}"
+        nodes: "{{ nodes }}"
+        ids: "{{ ids }}"
+        output_dir: "{{ output_dir | default(playbook_dir.split('/toolbox')[0] ~ '/captures/doccv-' ~ db_name ~ '-' ~ lookup('pipe','date +%Y%m%d-%H%M%S')) }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }

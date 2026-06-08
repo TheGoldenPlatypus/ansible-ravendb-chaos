@@ -1,121 +1,43 @@
 ##################################################################################################
 # toolbox/diagnostic/diagnostic_revision_count_parity.yml
 #
-# For a probe set of doc ids, GETs the revision list on every node and asserts each id has
-# the same revision count across all nodes -- a duplicate row on one node shows up as a
-# count mismatch.
-#
-# The expected_count input is optional.  When given, the assert also requires every node to
-# report exactly that count (catches "all nodes agree but they all lost a revision" cases
-# that pure parity would miss).
+# For a probe set of doc ids, GETs revision lists on every node and reports per-id counts.
+# Info by default; pass assert_mode=true to fail on count drift.  When expected_count is set,
+# also checks every node reports exactly that count.
 #
 # INPUTS (provide EITHER ids OR id_prefix+count):
-#   db_name         REQUIRED.  Database name.
-#   nodes           REQUIRED.  JSON list of node names to compare.
-#   ids             OPTIONAL.  JSON list of doc ids to probe.
-#   id_prefix       OPTIONAL.  Prefix for the probe set; ids built as <prefix>/0..count-1.
+#   db_name         REQUIRED.
+#   nodes           REQUIRED.
+#   ids             OPTIONAL.
+#   id_prefix       OPTIONAL.
 #   count           OPTIONAL.  Required if id_prefix is set.
-#   expected_count  OPTIONAL.  Expected revision count per id.  If set, the assert also checks
-#                              every node reports exactly this number.
-#   page_size       OPTIONAL.  Default 1024.  Revisions per id; bump if any probe id has >1024.
+#   expected_count  OPTIONAL.  When set, also asserts the count matches exactly.
+#   page_size       OPTIONAL.  Default 1024.
+#   assert_mode     OPTIONAL.  Default false.
 #
-# RUN EXAMPLES:
+# RUN EXAMPLE:
 #   ansible-playbook toolbox/diagnostic/diagnostic_revision_count_parity.yml \
 #       -e db_name=Tenants -e id_prefix=users/sink1 -e count=20 \
 #       -e '{"nodes":["1a","1b","1c"]}'
-#
-#   ansible-playbook toolbox/diagnostic/diagnostic_revision_count_parity.yml \
-#       -e db_name=Tenants -e '{"ids":["pre-upgrade/0"],"nodes":["1a","1b","1c"]}' \
-#       -e expected_count=5
 ##################################################################################################
 
-- name: Assert per-id revision count parity across nodes
+- name: Per-id revision count parity across nodes
   hosts: localhost
   connection: local
   gather_facts: false
-
   tasks:
-    - name: Validate inputs
-      ansible.builtin.assert:
-        that:
-          - db_name is defined
-          - nodes is defined
-          - nodes is iterable
-          - (nodes | length) > 0
-          - (ids is defined) or (id_prefix is defined and count is defined)
-        fail_msg: >-
-          Required: -e db_name=<db> -e '{"nodes":[...]}' AND
-          either -e '{"ids":[...]}' or both -e id_prefix=<p> -e count=<N>
-
-    - name: Resolve probe set + page size
-      ansible.builtin.set_fact:
-        probe_ids: "{{ ids if (ids is defined) else (range(count | int) | map('regex_replace', '^(.*)$', id_prefix ~ '/\\1') | list) }}"
-        eff_page_size: "{{ (page_size | default(1024)) | int }}"
-
-    - name: GET /revisions for each (node, id)
-      ansible.builtin.uri:
-        url: "https://{{ item.0 }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/revisions?id={{ item.1 | urlencode }}&pageSize={{ eff_page_size }}"
+    - ravendb_diagnostic:
+        kind: revision_count_parity
+        ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
-        ca_path: "{{ cert_ca_crt }}"
-        status_code: [200, 404, 500, 503]
-      register: probe
-      loop: "{{ nodes | product(probe_ids) | list }}"
-      loop_control:
-        label: "{{ item.0 }} <- {{ item.1 }}"
-
-    - name: Build per-id count list (accumulator across probe ids)
-      ansible.builtin.set_fact:
-        id_count_map: >-
-          {{
-            (id_count_map | default({})) | combine({
-              item: (probe.results
-                      | selectattr('item.1', '==', item)
-                      | map(attribute='json.Results')
-                      | map('default', [])
-                      | map('length')
-                      | list)
-            })
-          }}
-      loop: "{{ probe_ids }}"
-      loop_control:
-        label: "{{ item }}"
-
-    - name: Find ids whose per-node revision counts disagree (value list isn't uniform)
-      ansible.builtin.set_fact:
-        mismatched_ids: "{{ mismatched_ids | default([]) + ([item.key] if (item.value | unique | list | length) != 1 else []) }}"
-      loop: "{{ id_count_map | dict2items }}"
-      loop_control:
-        label: "{{ item.key }}"
-
-    - name: Find ids whose revision count differs from expected_count (optional)
-      ansible.builtin.set_fact:
-        unexpected_count_ids: >-
-          {{
-            id_count_map | dict2items
-              | selectattr('value', 'ne', ([(expected_count | int)] * (nodes | length)))
-              | map(attribute='key')
-              | list
-          }}
-      when: expected_count is defined
-
-    - name: Show summary
-      ansible.builtin.debug:
-        msg:
-          - "probed {{ probe_ids | length }} id(s) across {{ nodes | length }} node(s)"
-          - "node order: {{ nodes }}"
-          - "per-id counts: {{ id_count_map }}"
-
-    - name: Assert per-id parity across nodes
-      ansible.builtin.assert:
-        that:
-          - mismatched_ids | length == 0
-        fail_msg: "FAIL  revision count drift on ids: {{ mismatched_ids }}  (full map: {{ id_count_map }})"
-        success_msg: "PASS  revision count parity across {{ nodes }} for {{ probe_ids | length }} probe id(s)"
-
-    - name: Assert counts match expected_count (strict)
-      ansible.builtin.assert:
-        that:
-          - unexpected_count_ids | length == 0
-        fail_msg: "FAIL  ids whose revision count != expected {{ expected_count }}: {{ unexpected_count_ids }}"
-        success_msg: "PASS  every probe id has exactly {{ expected_count }} revision(s) on every node"
-      when: expected_count is defined
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: "{{ db_name }}"
+        nodes: "{{ nodes }}"
+        ids: "{{ ids | default(omit) }}"
+        id_prefix: "{{ id_prefix | default(omit) }}"
+        count: "{{ count | default(omit) }}"
+        expected_count: "{{ expected_count | default(omit) }}"
+        page_size: "{{ page_size | default(omit) }}"
+        assert_mode: "{{ assert_mode | default(false) | bool }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }

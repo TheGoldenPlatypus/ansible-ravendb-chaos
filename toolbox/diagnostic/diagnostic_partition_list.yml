@@ -38,8 +38,6 @@
       ansible.builtin.set_fact:
         effective_mode: "{{ target_mode | default('docker') }}"
 
-    # ---- Discover targets + build IP map ----------------------------------------------------
-
     - name: Auto-discover docker containers and build name<->ip map
       block:
         - name: Inspect docker network
@@ -77,8 +75,6 @@
           - effective_targets | length > 0
         fail_msg: "No targets to inspect (auto-discovery empty and no -e targets=... override)"
 
-    # ---- Collect per-node REJECT/DROP rules ------------------------------------------------
-
     - name: Collect chaos rules (docker mode)
       community.docker.docker_container_exec:
         container: "{{ item }}"
@@ -105,11 +101,6 @@
     - name: Unify both mode results into one structure
       ansible.builtin.set_fact:
         all_results: "{{ (rules_docker.results | default([])) + (rules_ssh.results | default([])) }}"
-
-    # ---- Render summary --------------------------------------------------------------------
-    # For each node print: name + count + every rule with IPs replaced by node names where known.
-    # Lines like:  "-A INPUT -s 1b -p tcp -j REJECT --reject-with tcp-reset"
-    # are produced by stripping container IPs and substituting their mapped name.
 
     - name: Render per-node summary
       ansible.builtin.debug:

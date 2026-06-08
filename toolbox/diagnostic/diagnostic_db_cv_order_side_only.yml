@@ -1,94 +1,34 @@
 ##################################################################################################
 # toolbox/diagnostic/diagnostic_db_cv_order_side_only.yml
 #
-# Looks at the cluster-level DatabaseChangeVector on the SINK cluster and makes sure none of its
-# entries name a source-side node.  Plain rule: "the sink's CV must not name the source."
-#
-# How it works:
-#   * Visits every sink node (e.g. 2a/2b/2c) and reads /databases/<db>/stats.DatabaseChangeVector.
-#   * Splits the CV string into entries like "A:1234-uuid" (tag : etag - dbid).
-#   * Every entry's tag must be one of the sink's own tags (A, B, C derived from 2a, 2b, 2c).
-#   * Any other tag = source leak = FAIL.
+# Reads cluster-level DatabaseChangeVector on the receiver group and asserts every CV entry's
+# tag is one of the receiver group's own tags (e.g. 2a/2b/2c -> tags A/B/C).  Any other tag =
+# source-side leak.  Info by default; pass assert_mode=true to fail on any leak.
 #
 # INPUTS:
-#   db_name                 REQUIRED.  Database name.
-#   receiver_group_nodes    REQUIRED.  JSON list of sink-side node names (e.g. ["2a","2b","2c"]).
-#   receiver_group_tags     OPTIONAL.  Single-letter tags expected in the CV.  Derived from the
-#                                      last char of each receiver_group_nodes entry when omitted
-#                                      (so 2a -> A, 2b -> B, 2c -> C).
+#   db_name                 REQUIRED.
+#   receiver_group_nodes    REQUIRED.  e.g. ["2a","2b","2c"].
+#   receiver_group_tags     OPTIONAL.  Defaults to upper(last-char-of-each-receiver-node).
+#   assert_mode             OPTIONAL.  Default false.
 #
 # RUN EXAMPLE:
 #   ansible-playbook toolbox/diagnostic/diagnostic_db_cv_order_side_only.yml \
 #       -e db_name=db1 -e '{"receiver_group_nodes":["2a","2b","2c"]}'
 ##################################################################################################
 
-- name: Assert receiver DB CV references only receiver-group nodes
+- name: Assert receiver DB CV references only receiver-group tags
   hosts: localhost
   connection: local
   gather_facts: false
-
   tasks:
-    - name: Validate inputs
-      ansible.builtin.assert:
-        that:
-          - db_name is defined
-          - receiver_group_nodes is defined
-          - receiver_group_nodes is iterable
-          - (receiver_group_nodes | length) > 0
-        fail_msg: "Required: -e db_name=<db> -e '{\"receiver_group_nodes\":[...]}'"
-
-    - name: Resolve expected receiver_group_tags
-      ansible.builtin.set_fact:
-        eff_tags: "{{ receiver_group_tags | default(receiver_group_nodes | map('regex_replace', '^.*([a-zA-Z])$', '\\1') | map('upper') | list) }}"
-
-    - name: Show what we're checking
-      ansible.builtin.debug:
-        msg: "Expecting DB CV on {{ receiver_group_nodes }} to contain ONLY entries with tags in {{ eff_tags }}"
-
-    - name: GET /stats on each receiver node
-      ansible.builtin.uri:
-        url: "https://{{ item }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/stats"
+    - ravendb_diagnostic:
+        kind: db_cv_order_side_only
+        ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
-        ca_path: "{{ cert_ca_crt }}"
-        status_code: [200]
-      register: stats
-      loop: "{{ receiver_group_nodes }}"
-      loop_control:
-        label: "{{ item }}"
-
-    - name: Parse CV entries per node + find offending tags
-      ansible.builtin.set_fact:
-        violations: >-
-          {{
-            (violations | default([])) + [{
-              'node': item.item,
-              'cv': item.json.DatabaseChangeVector | default(''),
-              'offending': (item.json.DatabaseChangeVector | default('')
-                              | regex_findall('([A-Za-z0-9]+):\d+-[A-Za-z0-9+/=_\-]+')
-                              | reject('in', eff_tags)
-                              | list)
-            }]
-          }}
-      loop: "{{ stats.results }}"
-      loop_control:
-        label: "{{ item.item }}"
-
-    - name: Show per-node verdict
-      ansible.builtin.debug:
-        msg: >-
-          {{ v.node }}: {{ 'OK' if (v.offending | length) == 0 else 'LEAK ' ~ (v.offending | unique | list) }}
-          (cv={{ v.cv }})
-      loop: "{{ violations }}"
-      loop_control:
-        loop_var: v
-        label: "{{ v.node }}"
-
-    - name: Assert CV-boundary (every receiver's DB CV references only receiver-group tags)
-      ansible.builtin.assert:
-        that:
-          - (violations | map(attribute='offending') | map('length') | sum) == 0
-        fail_msg: >-
-          FAIL  CV-boundary breach.  Offending source-side tags leaked into receiver's DB CV:
-          {{ violations | selectattr('offending', '!=', []) | list }}
-        success_msg: >-
-          PASS  CV-boundary holds.  Every receiver's DB CV references only {{ eff_tags }}
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: "{{ db_name }}"
+        receiver_group_nodes: "{{ receiver_group_nodes }}"
+        receiver_group_tags: "{{ receiver_group_tags | default(omit) }}"
+        assert_mode: "{{ assert_mode | default(false) | bool }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }

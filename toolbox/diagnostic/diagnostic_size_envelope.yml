@@ -1,151 +1,40 @@
 ##################################################################################################
 # toolbox/diagnostic/diagnostic_size_envelope.yml
 #
-# Whole-DB storage envelope check.  Reads `SizeOnDisk.SizeInBytes` from /stats on each node and
-# compares to a baseline; fails if any node grew by more than `max_growth_pct`.
+# Storage envelope check.  Two modes (auto-detected by whether baseline_file exists):
+#   1. CAPTURE -- baseline_file missing.  Records current SizeOnDisk per node, writes the file.
+#   2. CHECK   -- baseline_file exists.  Compares current sizes; prints per-node growth %.
 #
-# Two modes (auto-detected by whether baseline_file exists):
-#   1. CAPTURE -- baseline_file doesn't exist yet.  Records current sizes to the file, exits ok.
-#   2. CHECK   -- baseline_file exists.  Reads it, fetches current sizes, asserts the per-node
-#                 growth ratio is within max_growth_pct.
+# By default (assert_mode=false) this is info-only -- growth is just printed.  Pass
+# assert_mode=true to fail when any node's growth > max_growth_pct.
 #
 # INPUTS:
-#   db_name           REQUIRED.  Database name.
-#   nodes             REQUIRED.  JSON list of nodes to probe.
-#   baseline_file     REQUIRED.  Absolute path to the baseline JSON file.
-#   informational_only  OPTIONAL.  Default false.  When true, prints the growth table but
-#                                  skips the assertion.  Use when the workload is heavily
-#                                  writer-concentrated (writer-target legitimately grows
-#                                  multiple-x past baseline due to Voron page pre-allocation)
-#                                  and you want operator-eyeball signal, not a hard ceiling.
-#   max_growth_pct    OPTIONAL.  Default 300.  Per-node growth ceiling vs baseline.
-#                                Sized to catch runaway leaks (revision table not cleaned up,
-#                                tombstones piling up forever, etc.) which produce multi-x
-#                                growth.  The write-target node in a chaos run will normally
-#                                hit 1.5x-2x just from journal pages, tombstones, and scratch
-#                                files even on a healthy cluster; replication-target nodes
-#                                often stay near baseline because RavenDB pre-allocates Voron
-#                                pages.  So 50% would be a tight threshold that catches normal
-#                                writer-side bookkeeping.  Raise this if your scenario writes
-#                                more aggressively; lower it for short scenarios.
+#   db_name           REQUIRED.
+#   nodes             REQUIRED.
+#   baseline_file     REQUIRED.  Absolute path.
+#   max_growth_pct    OPTIONAL.  Default 300.  Per-node growth ceiling (only matters when asserting).
+#   assert_mode       OPTIONAL.  Default false.
 #
 # RUN EXAMPLE:
-#   # capture baseline after seeding
 #   ansible-playbook toolbox/diagnostic/diagnostic_size_envelope.yml \
-#       -e db_name=db1 -e '{"nodes":["1a","1b","1c"]}' \
-#       -e baseline_file=$PWD/captures/size-baseline-rv1.json
-#
-#   # later, check current sizes against baseline (auto -- same command)
+#       -e db_name=db1 -e baseline_file=$PWD/captures/size-baseline-rv1.json \
+#       -e '{"nodes":["1a","1b","1c"]}'
 ##################################################################################################
 
 - name: Storage envelope -- capture-or-check
   hosts: localhost
   connection: local
   gather_facts: false
-
   tasks:
-    - name: Validate inputs
-      ansible.builtin.assert:
-        that:
-          - db_name is defined
-          - nodes is defined
-          - nodes is iterable
-          - (nodes | length) > 0
-          - baseline_file is defined
-        fail_msg: "Required: -e db_name=<db> -e baseline_file=<path> -e '{\"nodes\":[...]}'"
-
-    - name: GET /stats on each node
-      ansible.builtin.uri:
-        url: "https://{{ item }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/stats"
+    - ravendb_diagnostic:
+        kind: size_envelope
+        ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
-        ca_path: "{{ cert_ca_crt }}"
-      register: stats
-      loop: "{{ nodes }}"
-      loop_control:
-        label: "{{ item }}"
-
-    - name: Build current size map (node -> SizeInBytes)
-      ansible.builtin.set_fact:
-        current_sizes: >-
-          {{
-            dict(stats.results
-                  | map(attribute='item')
-                  | zip(stats.results
-                          | map(attribute='json.SizeOnDisk.SizeInBytes')))
-          }}
-
-    - name: Check whether baseline_file exists
-      ansible.builtin.stat:
-        path: "{{ baseline_file }}"
-      register: baseline_stat
-
-
-    - name: Ensure baseline directory exists
-      ansible.builtin.file:
-        path: "{{ baseline_file | dirname }}"
-        state: directory
-        mode: '0755'
-      when: not baseline_stat.stat.exists
-
-    - name: Write baseline
-      ansible.builtin.copy:
-        dest: "{{ baseline_file }}"
-        content: "{{ current_sizes | to_nice_json }}\n"
-        mode: '0644'
-      when: not baseline_stat.stat.exists
-
-    - name: Announce capture
-      ansible.builtin.debug:
-        msg: "BASELINE CAPTURED  {{ baseline_file }}  sizes={{ current_sizes }}"
-      when: not baseline_stat.stat.exists
-
-
-    - name: Load baseline sizes
-      ansible.builtin.set_fact:
-        baseline_sizes: "{{ lookup('file', baseline_file) | from_json }}"
-      when: baseline_stat.stat.exists
-
-    - name: Compute per-node growth (accumulator)
-      ansible.builtin.set_fact:
-        growth: >-
-          {{
-            (growth | default({})) | combine({
-              item: {
-                'baseline': baseline_sizes[item] | int,
-                'current':  current_sizes[item]  | int,
-                'pct': (((current_sizes[item] | int) - (baseline_sizes[item] | int)) * 100.0
-                        / (baseline_sizes[item] | int)) | round(1)
-              }
-            })
-          }}
-      loop: "{{ nodes }}"
-      loop_control:
-        label: "{{ item }}"
-      when: baseline_stat.stat.exists
-
-    - name: Show growth per node
-      ansible.builtin.debug:
-        msg: "{{ growth }}"
-      when: baseline_stat.stat.exists
-
-    - name: Note informational_only mode (skipping the assertion)
-      ansible.builtin.debug:
-        msg: >-
-          INFO-ONLY  storage envelope NOT asserted (informational_only=true).
-          Growth values printed above are for operator review.  EMR_TESTING_PLAN's I-8
-          ("monotonic voron growth past envelope") is a directional invariant -- the
-          threshold here is policy, not from the spec; single-point % growth is not the
-          right shape for that check anyway.
-      when:
-        - baseline_stat.stat.exists
-        - (informational_only | default(false) | bool)
-
-    - name: Assert every node is within budget
-      ansible.builtin.assert:
-        that:
-          - (growth.values() | map(attribute='pct') | max) <= (max_growth_pct | default(300) | float)
-        fail_msg: "FAIL  storage envelope blown (>{{ max_growth_pct | default(300) }}%): {{ growth }}"
-        success_msg: "PASS  storage envelope within {{ max_growth_pct | default(300) }}%: {{ growth }}"
-      when:
-        - baseline_stat.stat.exists
-        - not (informational_only | default(false) | bool)
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: "{{ db_name }}"
+        nodes: "{{ nodes }}"
+        baseline_file: "{{ baseline_file }}"
+        max_growth_pct: "{{ max_growth_pct | default(omit) }}"
+        assert_mode: "{{ assert_mode | default(false) | bool }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }

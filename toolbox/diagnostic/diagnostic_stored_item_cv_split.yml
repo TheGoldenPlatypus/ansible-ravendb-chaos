@@ -1,120 +1,42 @@
 ##################################################################################################
 # toolbox/diagnostic/diagnostic_stored_item_cv_split.yml
 #
-# Spot-checks the change-vector (CV) shape on a node's stored documents.  RavenDB used to store
-# every doc's CV in one shape ("raw").  The new branch stores it in a different shape that splits
-# the CV into two halves separated by a delimiter character ("split").
+# Spot-checks the @change-vector shape on a node's stored documents.  RavenDB has two shapes:
+#   * raw    -- no delimiter (pre-fix / legacy).
+#   * split  -- contains a delimiter (new lane).
 #
-# You pass a small list of doc ids and tell the tool which shape you expect.  It fetches each
-# doc, looks at the @change-vector, and fails if any doc doesn't match.
-#
-# Two typical uses:
-#   * BEFORE the upgrade -- pass expect=raw on a v_old source to confirm the dataset really is
-#     in the old shape (a baseline sanity check).
-#   * AFTER filtered pull onto a v_new sink -- pass expect=split (the default) to confirm the
-#     new lane actually switched the storage shape.
-#
-# the exact delimiter character isn't fully pinned down in the plan.  Default "|" (pipe). 
-# Override with -e delimiter=... .
+# You pass a few doc ids and tell the tool which shape you expect.  Info by default; pass
+# assert_mode=true to fail on any doc that doesn't match.
 #
 # INPUTS:
-#   db_name      REQUIRED.  Database name.
-#   target       REQUIRED.  Node to inspect (e.g. 2a).  Re-invoke with different targets to
-#                           cover the receiver-group replicas.
-#   doc_ids      REQUIRED.  JSON list of doc ids to spot-check (small -- 3-10 is plenty).
+#   db_name      REQUIRED.
+#   target       REQUIRED.  Node to inspect (e.g. 2a).
+#   doc_ids      REQUIRED.  JSON list (3-10 is plenty).
 #   expect       OPTIONAL.  "split" (default) or "raw".
-#   delimiter    OPTIONAL.  Default "|".  Override only if the product uses a different
-#                           character to separate the two halves of the split shape.
+#   delimiter    OPTIONAL.  Default "|".
+#   assert_mode  OPTIONAL.  Default false.
 #
-# RUN EXAMPLES:
-#   # after filtered pull onto v_new sink -- expect the new split shape
+# RUN EXAMPLE:
 #   ansible-playbook toolbox/diagnostic/diagnostic_stored_item_cv_split.yml \
 #       -e db_name=db1 -e target=2a \
 #       -e '{"doc_ids":["users/sink1/0","users/sink1/1","users/sink1/2"]}'
-#
-#   # pre-upgrade baseline -- expect old raw shape on the source
-#   ansible-playbook toolbox/diagnostic/diagnostic_stored_item_cv_split.yml \
-#       -e db_name=db1 -e target=1a -e expect=raw \
-#       -e '{"doc_ids":["users/hub/0","users/hub/1"]}'
 ##################################################################################################
 
-- name: Inspect stored CV shape on a v_new receiver
+- name: Inspect stored CV shape on a target node
   hosts: localhost
   connection: local
   gather_facts: false
-
   tasks:
-    - name: Validate inputs
-      ansible.builtin.assert:
-        that:
-          - db_name is defined
-          - target is defined
-          - doc_ids is defined
-          - doc_ids is iterable
-          - (doc_ids | length) > 0
-        fail_msg: "Required: -e db_name=<db> -e target=<node> -e '{\"doc_ids\":[...]}'"
-
-    - name: Resolve params + RESET shape_map (clears any accumulator state from a prior call)
-      ansible.builtin.set_fact:
-        eff_delimiter: "{{ delimiter | default('|') }}"
-        eff_expect: "{{ expect | default('split') }}"
-        shape_map: {}    # without this reset the per-doc accumulator pollutes across invocations
-
-    - name: GET each doc on the target
-      ansible.builtin.uri:
-        url: "https://{{ target }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/docs?id={{ item | urlencode }}"
+    - ravendb_diagnostic:
+        kind: stored_item_cv_split
+        ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
-        ca_path: "{{ cert_ca_crt }}"
-        status_code: [200, 404]
-      register: docs
-      loop: "{{ doc_ids }}"
-      loop_control:
-        label: "{{ item }}"
-
-    - name: Build per-doc shape map
-      ansible.builtin.set_fact:
-        shape_map: >-
-          {{
-            shape_map | default({}) | combine({
-              item.item: {
-                'status': item.status,
-                'cv': (item.json.Results[0]['@metadata']['@change-vector'] | default(''))
-                      if item.status == 200 else '<NOT_FOUND>',
-                'has_delimiter': (eff_delimiter in (item.json.Results[0]['@metadata']['@change-vector'] | default('')))
-                                  if item.status == 200 else false
-              }
-            })
-          }}
-      loop: "{{ docs.results }}"
-      loop_control:
-        label: "{{ item.item }}"
-
-    - name: Find docs whose shape doesn't match expected
-      ansible.builtin.set_fact:
-        violations: >-
-          {{
-            shape_map | dict2items
-              | selectattr('value.status', '==', 200)
-              | rejectattr('value.has_delimiter', '==', (eff_expect == 'split'))
-              | list
-          }}
-
-    - name: Show shape summary
-      ansible.builtin.debug:
-        msg:
-          - "expected: {{ eff_expect }}-shape (delimiter '{{ eff_delimiter }}' {% if eff_expect == 'split' %}present{% else %}absent{% endif %})"
-          - "probed {{ doc_ids | length }} doc(s) on {{ target }}"
-          - "violations: {{ violations | length }}"
-          - "sample (first 3): {{ violations[:3] | map(attribute='key') | list }}"
-
-    - name: Assert shape matches expectation
-      ansible.builtin.assert:
-        that:
-          - (violations | length) == 0
-        fail_msg: >-
-          FAIL  CV-shape on {{ target }} doesn't match expected '{{ eff_expect }}' form.
-          Violations: {{ violations | map(attribute='key') | list }}
-          Sample CV: {{ (violations[0].value.cv) if (violations | length) > 0 else '' }}
-        success_msg: >-
-          PASS  every probed doc on {{ target }} has the '{{ eff_expect }}' CV shape
-          ({{ doc_ids | length }} docs)
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: "{{ db_name }}"
+        target: "{{ target }}"
+        doc_ids: "{{ doc_ids }}"
+        expect: "{{ expect | default(omit) }}"
+        delimiter: "{{ delimiter | default(omit) }}"
+        assert_mode: "{{ assert_mode | default(false) | bool }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }

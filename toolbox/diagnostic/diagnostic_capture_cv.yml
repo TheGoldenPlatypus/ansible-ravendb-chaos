@@ -1,16 +1,15 @@
 ##################################################################################################
 # toolbox/diagnostic/diagnostic_capture_cv.yml
 #
-# Read-only.  Fetches the DatabaseChangeVector from every probed node and writes one file per
-# node to output_dir.  Files are named <node>.cv with the CV string as their only content,
-# easy to diff or feed to diagnostic_scan_fltr.yml.
+# Read-only.  Fetches DatabaseChangeVector from every node and writes one file per node to
+# output_dir.  Files named <node>.cv -- easy to diff or feed to scan_fltr.
 #
 # INPUTS:
-#   db_name      REQUIRED.  Database name.
-#   nodes        REQUIRED.  JSON list of node names to probe.
-#   output_dir   OPTIONAL.  Where to write files.  Default = captures/cv-<db>-<timestamp>/.
+#   db_name      REQUIRED.
+#   nodes        REQUIRED.
+#   output_dir   OPTIONAL.  Default = <repo>/captures/cv-<db>-<timestamp>/.
 #
-# RUN EXAMPLES:
+# RUN EXAMPLE:
 #   ansible-playbook toolbox/diagnostic/diagnostic_capture_cv.yml \
 #       -e db_name=Tenants -e '{"nodes":["1a","1b","1c"]}'
 ##################################################################################################
@@ -19,50 +18,14 @@
   hosts: localhost
   connection: local
   gather_facts: false
-
   tasks:
-    - name: Validate inputs
-      ansible.builtin.assert:
-        that:
-          - db_name is defined
-          - nodes is defined
-          - nodes is iterable
-          - (nodes | length) > 0
-        fail_msg: "Required: -e db_name=<db> -e '{\"nodes\":[\"1a\",\"1b\",\"1c\"]}'"
-
-    - name: Resolve output_dir
-      ansible.builtin.set_fact:
-        effective_output_dir: "{{ output_dir | default(playbook_dir.split('/toolbox')[0] ~ '/captures/cv-' ~ db_name ~ '-' ~ lookup('pipe', 'date +%Y%m%d-%H%M%S')) }}"
-
-    - name: Ensure output_dir exists
-      ansible.builtin.file:
-        path: "{{ effective_output_dir }}"
-        state: directory
-        mode: '0755'
-
-    - name: Fetch /stats per node
-      ansible.builtin.uri:
-        url: "https://{{ item }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/stats"
+    - ravendb_diagnostic:
+        kind: capture_cv
+        ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
-        ca_path: "{{ cert_ca_crt }}"
-        status_code: [200, 404, 500, 503]
-      register: stats
-      loop: "{{ nodes }}"
-      loop_control:
-        label: "{{ item }}"
-
-    - name: Write per-node CV file
-      ansible.builtin.copy:
-        dest: "{{ effective_output_dir }}/{{ r.item }}.cv"
-        content: "{{ (r.json.DatabaseChangeVector | default('<UNAVAILABLE status=' ~ r.status ~ '>')) }}\n"
-        mode: '0644'
-      loop: "{{ stats.results }}"
-      loop_control:
-        loop_var: r
-        label: "{{ r.item }}"
-
-    - name: Summary
-      ansible.builtin.debug:
-        msg: >-
-          Wrote {{ nodes | length }} CV file(s) to {{ effective_output_dir }}/
-          ({{ nodes | length }} nodes inspected, db={{ db_name }})
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: "{{ db_name }}"
+        nodes: "{{ nodes }}"
+        output_dir: "{{ output_dir | default(playbook_dir.split('/toolbox')[0] ~ '/captures/cv-' ~ db_name ~ '-' ~ lookup('pipe','date +%Y%m%d-%H%M%S')) }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }

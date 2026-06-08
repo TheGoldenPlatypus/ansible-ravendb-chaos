@@ -1,13 +1,12 @@
 ##################################################################################################
 # toolbox/diagnostic/diagnostic_replication.yml
 #
-# Dumps the incoming + outgoing replication connections for a database on a target node.
-# Useful for diagnosing "who's talking to whom right now" -- e.g. finding the responsible
-# node for a pull-replication task.
+# Dumps incoming + outgoing replication connections for a database on a target node.
+# Pure info, no assert.  Useful for diagnosing "who's talking to whom right now".
 #
 # INPUTS:
-#   target   REQUIRED.  Container name to query (e.g. 1a, 2c, xyz3).
-#   db_name  REQUIRED.  Database name.
+#   target   REQUIRED.
+#   db_name  REQUIRED.
 #
 # RUN EXAMPLE:
 #   ansible-playbook toolbox/diagnostic/diagnostic_replication.yml -e target=2a -e db_name=Tenants
@@ -17,26 +16,13 @@
   hosts: localhost
   connection: local
   gather_facts: false
-
   tasks:
-    - name: Validate inputs
-      ansible.builtin.assert:
-        that:
-          - target is defined
-          - db_name is defined
-        fail_msg: "Required: -e target=<node> -e db_name=<db>"
-
-    - name: Get active replication connections
-      ansible.builtin.uri:
-        url: "https://{{ target }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/replication/active-connections"
+    - ravendb_diagnostic:
+        kind: replication
+        ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
-        ca_path: "{{ cert_ca_crt }}"
-      register: conns
-
-    - name: Print incoming connections (count + source urls)
-      ansible.builtin.debug:
-        msg: "INCOMING ({{ (conns.json.IncomingConnections | default([])) | length }}): {{ conns.json.IncomingConnections | default([]) | map(attribute='SourceUrl') | list }}"
-
-    - name: Print outgoing connections (raw, field names vary by task type)
-      ansible.builtin.debug:
-        msg: "OUTGOING ({{ (conns.json.OutgoingConnections | default([])) | length }}): {{ conns.json.OutgoingConnections | default([]) }}"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ target }}"
+        db_name: "{{ db_name }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
