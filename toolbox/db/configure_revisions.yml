@@ -11,6 +11,10 @@
 #      `default_keep` + `default_max_age_secs` configure the Default config used for any
 #      collection not in the dict.  the EMR plan uses this mode.
 #
+# Implementation: one custom module (library/ravendb_revisions.py) does the JSON-build + HTTPS
+# POST in Python.  This playbook is a thin wrapper that just forwards inputs.  Pattern for other
+# tools we want to de-noise.
+#
 # INPUTS:
 #   target                 REQUIRED.  Container/host to talk to.
 #   db_name                REQUIRED.  Database name.
@@ -38,89 +42,19 @@
   gather_facts: false
 
   tasks:
-    - name: Validate inputs
-      ansible.builtin.assert:
-        that:
-          - target is defined
-          - db_name is defined
-        fail_msg: "Required: -e target=<node> -e db_name=<db>"
-
-    - name: Resolve per-collection mode + helper to format seconds -> hh:mm:ss
-      ansible.builtin.set_fact:
-        per_collection_mode: "{{ collections_config is defined and (collections_config | length) > 0 }}"
-        eff_default_keep: "{{ (default_keep | default(25)) | int }}"
-        eff_default_age_secs: "{{ (default_max_age_secs | default(21600)) | int }}"
-
-    - name: Build Default config (per-collection mode -- use default_keep / default_max_age_secs)
-      ansible.builtin.set_fact:
-        default_cfg:
-          MinimumRevisionsToKeep: "{{ eff_default_keep | int }}"
-          MinimumRevisionAgeToKeep: "{{ '%02d:%02d:%02d' | format(eff_default_age_secs | int // 3600, (eff_default_age_secs | int % 3600) // 60, eff_default_age_secs | int % 60) }}"
-          Disabled: false
-      when: per_collection_mode | bool
-
-    - name: Build Default config (simple mode -- only minimum_revisions)
-      ansible.builtin.set_fact:
-        default_cfg:
-          MinimumRevisionsToKeep: "{{ (minimum_revisions | default(100)) | int }}"
-          Disabled: false
-      when: not (per_collection_mode | bool)
-
-    - name: Reset collections_body accumulator
-      ansible.builtin.set_fact:
-        collections_body: {}
-      when: per_collection_mode | bool
-
-    - name: Build each collection config entry
-      ansible.builtin.set_fact:
-        collections_body: >-
-          {{
-            collections_body | combine({
-              item.key: {
-                'MinimumRevisionsToKeep': (item.value.keep | int),
-                'MinimumRevisionAgeToKeep': ('%02d:%02d:%02d' | format(item.value.max_age_secs | int // 3600,
-                                                                       (item.value.max_age_secs | int % 3600) // 60,
-                                                                       item.value.max_age_secs | int % 60)),
-                'Disabled': false
-              }
-            })
-          }}
-      loop: "{{ collections_config | dict2items if per_collection_mode | bool else [] }}"
-      loop_control:
-        label: "{{ item.key }}"
-      when: per_collection_mode | bool
-
-    - name: POST revisions config (per-collection mode)
-      ansible.builtin.uri:
-        url: "https://{{ target }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/admin/revisions/config"
-        method: POST
+    - name: Configure revisions ({{ target }}/{{ db_name }})
+      ravendb_revisions:
+        target: "{{ target }}"
+        db_name: "{{ db_name }}"
+        ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
-        ca_path: "{{ cert_ca_crt }}"
-        body_format: json
-        body:
-          Default: "{{ default_cfg }}"
-          Collections: "{{ collections_body }}"
-        status_code: [200, 201, 204]
-      when: per_collection_mode | bool
-
-    - name: POST revisions config (simple mode)
-      ansible.builtin.uri:
-        url: "https://{{ target }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/admin/revisions/config"
-        method: POST
-        client_cert: "{{ cert_dir }}/client.pem"
-        ca_path: "{{ cert_ca_crt }}"
-        body_format: json
-        body:
-          Default: "{{ default_cfg }}"
-        status_code: [200, 201, 204]
-      when: not (per_collection_mode | bool)
+        ca_cert: "{{ cert_ca_crt }}"
+        minimum_revisions: "{{ minimum_revisions | default(100) | int }}"
+        collections_config: "{{ collections_config | default(omit) }}"
+        default_keep: "{{ default_keep | default(25) | int }}"
+        default_max_age_secs: "{{ default_max_age_secs | default(21600) | int }}"
+      register: result
 
     - name: Done
       ansible.builtin.debug:
-        msg: >-
-          REVISIONS  configured on {{ target }}/{{ db_name }}
-          {% if per_collection_mode | bool %}
-          per-collection: {{ collections_body.keys() | list }}; default keep={{ eff_default_keep }} age={{ eff_default_age_secs }}s
-          {% else %}
-          simple: MinimumRevisionsToKeep={{ minimum_revisions | default(100) }}
-          {% endif %}
+        msg: "{{ result.msg }}"
