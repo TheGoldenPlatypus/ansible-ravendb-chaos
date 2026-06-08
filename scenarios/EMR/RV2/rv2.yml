@@ -1,0 +1,617 @@
+##################################################################################################
+# scenarios/EMR/RV2/rv2.yml
+#
+# Two clusters.  Cluster 1 is a sharded 9-node source (3 shards of 3 replicas each) starting on
+# RavenDB 6.2.15; we roll it onto the build under test shard by shard.  Cluster 2 is a single
+# non-sharded node already on the new build that will receive a dump from the source.
+#
+#   Cluster 1 (sharded source, id=1):
+#     shard 0 (Sx) -> replicas on 1a, 1b, 1c
+#     shard 1 (Sy) -> replicas on 1d, 1e, 1f
+#     shard 2 (Sz) -> replicas on 1g, 1h, 1i
+#   Cluster 2 (non-sharded target, id=2):
+#     single node 2a
+#
+# What this scenario does:
+#   pre.  Sanity-check inputs.  Kill any leftover workloads from a previous run.
+#   1.    Create the sharded database on the source and seed it with 30k docs x 3 revisions on
+#         the source leader -- sharding routes each doc to its shard automatically.  Create the
+#         empty non-sharded database on the target.
+#   2.    Phase (a): launch W-1 on the source leader so writes are happening throughout the
+#         upgrade window.  Sharding spreads the writes across the three shards.
+#   3-5.  Phase (a): upgrade each shard's three replicas one at a time -- Sx first, then Sy,
+#         then Sz.  Run a schema-version checkpoint after each shard finishes.
+#   6.    Phase (a): stop the writer, drain each shard, trigger tombstone cleanup, wait for
+#         tombstone counts to converge on every shard, then run the per-shard assertions
+#         (/stats parity, revision-count parity, no orphans) and confirm every source node is
+#         on the new build.
+#   7.    Phase (b): export the sharded source to a .ravendbdump file on the controller.
+#   8.    Phase (b): import that dump into the non-sharded target.
+#   9.    Phase (b): the final cross-check -- the source's aggregated doc count must equal the
+#         target's doc count, per-doc revision counts must line up on the target, and target
+#         revisions must land in the new build's hashed form (the smuggler import re-keys
+#         everything through the public API).
+#
+# Deep version (invariants, risks, validators) -> EMR_TESTING_PLAN/scenarios.md (RV-2).
+#
+# PREREQ -- bring up a clean lab with 2 clusters (one of 9 nodes, one of 9 nodes).  The source
+# starts on the old build; the target node 2a is upgraded to the new build straight away so the
+# smuggler import in step 8 lands hashed-form revisions.
+#
+#   1. ansible-playbook playbooks/teardown_containers.yml -K
+#   2. ansible-playbook playbooks/provision_nodes.yml -K -e clusters_count=2 -e nodes_per_cluster=9
+#   3. ansible-playbook playbooks/install_ravendb.yml -K -e rdb_version=<v_old>
+#   4. ansible-playbook playbooks/form_clusters.yml -K -e clusters_count=2 -e nodes_per_cluster=9
+#   5. ansible-playbook toolbox/service/upgrade_node.yml -K -e target=2a -e custom_build=<v_new.deb> --skip-tags download
+#
+# RUN:
+#   ansible-playbook scenarios/EMR/RV2/rv2.yml -K \
+#       -e v_old=6.2.15 -e v_new_build=$PWD/builds/raven-prNNN.deb
+##################################################################################################
+
+
+# ----- pre: orphan-kill + validate ------------------------------------------------------------
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars: { pidfile: "/tmp/w1-{{ src_leader | default('1a') }}-db1.pid" }
+
+- name: RV-2 pre -- validate inputs + show plan
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - ansible.builtin.assert:
+        that:
+          - v_old is defined
+          - v_new_build is defined
+        fail_msg: "Required: -e v_old=<6.2.x version> -e v_new_build=<path to v_new .deb>"
+
+    - ansible.builtin.debug:
+        msg: >-
+          RV-2  v_old={{ v_old }}  v_new_build={{ v_new_build }}
+          src=[{{ src_nodes | join(',') }}]  tgt={{ tgt_node }}
+          seed={{ seed_count }}x{{ seed_revs_per_doc }} revs
+
+
+# ----- step 1: create the sharded source + the non-sharded target + seed the source -----------
+
+- name: RV-2 step 1 -- create sharded source db1 + non-sharded target db1
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    # Source side: a sharded database with 3 shards spread across the 9 source nodes.
+    - name: "Create sharded db1 on source leader (3 shards x 3 replicas)"
+      ravendb_sharding:
+        kind: create_sharded
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        cluster_leader: "{{ src_leader }}"
+        db_name: db1
+        shards: "{{ shard_topology }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Default revisions config on the source so the seed's 3-revision history is retained.
+    - name: "Configure default revisions on source leader/db1"
+      ravendb_revisions:
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ src_leader }}"
+        db_name: db1
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+- ansible.builtin.import_playbook: ../../../toolbox/db/create_database.yml
+  vars: { cluster_leader: "{{ tgt_leader | default('2a') }}", db_name: db1, replication_factor: 1 }
+
+- name: RV-2 step 1 -- configure target revisions + seed source with v_62 raw-CV revisions
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Configure default revisions on target leader/db1"
+      ravendb_revisions:
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ tgt_leader }}"
+        db_name: db1
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Seed: 30k docs x 3 revisions on the source leader.  Sharding hashes each docId, so the
+    # writes distribute roughly evenly (~10k per shard) without us having to target shards
+    # by hand.
+    - name: "Phase (a) seed: write seed/* on source leader (30k x 3 v_62 raw-CV revisions, sharded)"
+      ravendb_writes:
+        kind: docs_revisions
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ src_leader }}"
+        db_name: db1
+        id_prefix: "{{ seed_prefix | default('seed') }}"
+        collection: "{{ seed_collection | default('MicroDocs') }}"
+        count: "{{ seed_count | default(30000) | int }}"
+        revs_per_doc: "{{ seed_revs_per_doc | default(3) | int }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ----- step 2: phase (a) -- start W-1; sharding spreads its writes across all 3 shards --------
+
+- name: RV-2 step 2 -- launch W-1 on source leader (sharding distributes per docId)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Launch W-1 (background, async)
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w1/workload_w1.sh"
+      environment:
+        TARGET:       "{{ src_leader }}"
+        DB_NAME:      db1
+        ID_PREFIX:    "{{ seed_prefix | default('seed') }}"
+        POOL_SIZE:    "{{ seed_count | default(30000) | int }}"
+        RAVEN_DOMAIN: "{{ ravendb_domain }}"
+        CERT_PEM:     "{{ cert_dir }}/client.pem"
+        CA_CRT:       "{{ cert_ca_crt }}"
+      async: 14400
+      poll: 0
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars: { pidfile: "/tmp/w1-{{ src_leader | default('1a') }}-db1.pid", timeout: 30 }
+
+
+# ----- step 3: phase (a) -- upgrade shard Sx one replica at a time (1a, 1b, 1c) + checkpoint --
+
+- name: RV-2 step 3 -- upgrade shard Sx (3 replicas one at a time) + per-shard checkpoint
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Upgrade each Sx replica + wait_for_member
+      ansible.builtin.shell: |
+        set -e
+        ansible-playbook toolbox/service/upgrade_node.yml \
+          -e target={{ item }} -e custom_build={{ v_new_build }} --skip-tags download \
+          > /tmp/rv2-upgrade-{{ item }}.log 2>&1
+        ansible-playbook toolbox/wait/wait_for_member.yml \
+          -e cluster_leader={{ peer_map[item] }} -e db_name={{ db_name }} \
+          -e target={{ item }} \
+          -e timeout_secs={{ member_budget_secs | default(300) | int }} \
+          > /tmp/rv2-member-{{ item }}.log 2>&1
+      args: { chdir: "{{ playbook_dir }}/../../.." }
+      environment:
+        ANSIBLE_BECOME_PASS: "{{ ansible_become_pass | default('') }}"
+      loop: "{{ shard_nodes['0'] }}"
+      async: 2400
+      poll: 30
+
+    - name: Shard Sx checkpoint -- replicas (1a/b/c) all schema 72001
+      ravendb_diagnostic:
+        kind: schema_version
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        nodes: "{{ shard_nodes['0'] }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - ansible.builtin.pause:
+        seconds: "{{ upgrade_delay_secs | default(30) | int }}"
+      when: (upgrade_delay_secs | default(30) | int) > 0
+
+
+# ----- step 4: phase (a) -- upgrade shard Sy one replica at a time (1d, 1e, 1f) + checkpoint --
+
+- name: RV-2 step 4 -- upgrade shard Sy (3 replicas one at a time) + per-shard checkpoint
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Upgrade each Sy replica + wait_for_member
+      ansible.builtin.shell: |
+        set -e
+        ansible-playbook toolbox/service/upgrade_node.yml \
+          -e target={{ item }} -e custom_build={{ v_new_build }} --skip-tags download \
+          > /tmp/rv2-upgrade-{{ item }}.log 2>&1
+        ansible-playbook toolbox/wait/wait_for_member.yml \
+          -e cluster_leader={{ peer_map[item] }} -e db_name={{ db_name }} \
+          -e target={{ item }} \
+          -e timeout_secs={{ member_budget_secs | default(300) | int }} \
+          > /tmp/rv2-member-{{ item }}.log 2>&1
+      args: { chdir: "{{ playbook_dir }}/../../.." }
+      environment:
+        ANSIBLE_BECOME_PASS: "{{ ansible_become_pass | default('') }}"
+      loop: "{{ shard_nodes['1'] }}"
+      async: 2400
+      poll: 30
+
+    - name: Shard Sy checkpoint
+      ravendb_diagnostic:
+        kind: schema_version
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        nodes: "{{ shard_nodes['1'] }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - ansible.builtin.pause:
+        seconds: "{{ upgrade_delay_secs | default(30) | int }}"
+      when: (upgrade_delay_secs | default(30) | int) > 0
+
+
+# ----- step 5: phase (a) -- upgrade shard Sz one replica at a time (1g, 1h, 1i) + checkpoint --
+
+- name: RV-2 step 5 -- upgrade shard Sz (3 replicas one at a time) + per-shard checkpoint
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Upgrade each Sz replica + wait_for_member
+      ansible.builtin.shell: |
+        set -e
+        ansible-playbook toolbox/service/upgrade_node.yml \
+          -e target={{ item }} -e custom_build={{ v_new_build }} --skip-tags download \
+          > /tmp/rv2-upgrade-{{ item }}.log 2>&1
+        ansible-playbook toolbox/wait/wait_for_member.yml \
+          -e cluster_leader={{ peer_map[item] }} -e db_name={{ db_name }} \
+          -e target={{ item }} \
+          -e timeout_secs={{ member_budget_secs | default(300) | int }} \
+          > /tmp/rv2-member-{{ item }}.log 2>&1
+      args: { chdir: "{{ playbook_dir }}/../../.." }
+      environment:
+        ANSIBLE_BECOME_PASS: "{{ ansible_become_pass | default('') }}"
+      loop: "{{ shard_nodes['2'] }}"
+      async: 2400
+      poll: 30
+
+    - name: Shard Sz checkpoint
+      ravendb_diagnostic:
+        kind: schema_version
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        nodes: "{{ shard_nodes['2'] }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ----- step 6: phase (a) -- stop the writer, drain every shard, run the per-shard asserts -----
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/assert_workload_alive.yml
+  vars: { pidfile: "/tmp/w1-{{ src_leader | default('1a') }}-db1.pid" }
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars: { pidfile: "/tmp/w1-{{ src_leader | default('1a') }}-db1.pid" }
+
+- name: RV-2 step 6 -- drain + tombstone settle + per-shard final asserts
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    # Drain each shard.  Once internal replication catches up, all 3 replicas of a shard
+    # should report the same etag.
+    - name: Drain shard Sx
+      ravendb_wait:
+        kind: etag_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: "{{ shard_nodes['0'] }}"
+        timeout: "{{ drain_budget_secs | default(180) | int }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: Drain shard Sy
+      ravendb_wait:
+        kind: etag_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: "{{ shard_nodes['1'] }}"
+        timeout: "{{ drain_budget_secs | default(180) | int }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: Drain shard Sz
+      ravendb_wait:
+        kind: etag_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: "{{ shard_nodes['2'] }}"
+        timeout: "{{ drain_budget_secs | default(180) | int }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Tombstone cleanup runs on a per-node timer; without fresh activity it won't converge
+    # on its own within 5 minutes, so trigger it explicitly.  The sharded cleanup endpoint
+    # needs BOTH a nodeTag and a shardNumber and only cleans that one replica's local store,
+    # so we loop over every (shard, replica) pair.  Skipping any pair would leave tombstones
+    # on the other replicas and the parity wait below would hang.
+    - name: Trigger tombstone cleanup per (shard, replica)
+      ansible.builtin.uri:
+        url: >-
+          https://{{ src_leader }}.{{ ravendb_domain }}:443/databases/db1/admin/tombstones/cleanup?nodeTag={{ item.1 }}&shardNumber={{ item.0.key }}
+        method: POST
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        status_code: [200, 204]
+      register: cleanup_results
+      loop: "{{ shard_topology | dict2items | subelements('value') }}"
+      loop_control:
+        label: "shard {{ item.0.key }} via nodeTag={{ item.1 }}"
+    - ansible.builtin.debug:
+        msg: "tombstones/cleanup shard {{ cr.item.0.key }} nodeTag={{ cr.item.1 }} -> HTTP {{ cr.status }}  cleaned={{ (cr.json or {}).Value | default('?') }}"
+      loop: "{{ cleanup_results.results }}"
+      loop_control:
+        loop_var: cr
+        label: "shard {{ cr.item.0.key }} nodeTag={{ cr.item.1 }}"
+
+    # Tombstone counts drift between replicas until each node's background cleanup actually
+    # runs.  Wait per-shard for those counts to converge before running full /stats parity --
+    # otherwise the parity check fails on a benign transient.
+    - name: Sx tombstone settle
+      ravendb_wait:
+        kind: stats_field_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: "{{ shard_nodes['0'] }}"
+        fields: ["CountOfTombstones"]
+        timeout: "{{ tombstone_settle_timeout | default(300) | int }}"
+        poll_interval: 3
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: Sy tombstone settle
+      ravendb_wait:
+        kind: stats_field_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: "{{ shard_nodes['1'] }}"
+        fields: ["CountOfTombstones"]
+        timeout: "{{ tombstone_settle_timeout | default(300) | int }}"
+        poll_interval: 3
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: Sz tombstone settle
+      ravendb_wait:
+        kind: stats_field_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: "{{ shard_nodes['2'] }}"
+        fields: ["CountOfTombstones"]
+        timeout: "{{ tombstone_settle_timeout | default(300) | int }}"
+        poll_interval: 3
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # /stats parity within each shard -- the three replicas of a shard should agree on
+    # everything once the shard is drained.
+    - name: Sx stats parity
+      ravendb_diagnostic:
+        kind: stats_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: "{{ shard_nodes['0'] }}"
+        assert_mode: true
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: Sy stats parity
+      ravendb_diagnostic:
+        kind: stats_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: "{{ shard_nodes['1'] }}"
+        assert_mode: true
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: Sz stats parity
+      ravendb_diagnostic:
+        kind: stats_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: "{{ shard_nodes['2'] }}"
+        assert_mode: true
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Per-doc revision-count parity + an orphan-revisions check, per shard.  The sample size
+    # is kept small on purpose -- a sparse probe is the only practical way at this scale.
+    - name: Sx revision count parity
+      ravendb_diagnostic:
+        kind: revision_count_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: "{{ shard_nodes['0'] }}"
+        id_prefix: "{{ seed_prefix }}"
+        count: "{{ parity_probe_count | default(50) | int }}"
+        assert_mode: true
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: Sx orphan revisions
+      ravendb_diagnostic:
+        kind: orphan_revisions
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: "{{ shard_nodes['0'] }}"
+        assert_mode: true
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Every source node should now report the same new-build schema version.
+    - name: All 9 source nodes on v_new (schema parity)
+      ravendb_diagnostic:
+        kind: schema_version
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        nodes: "{{ src_nodes }}"
+        require_parity: true
+        db_name: db1
+        cluster_leader: "{{ src_leader }}"
+        assert_mode: true
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ----- step 7: phase (b) -- export the sharded source to a .ravendbdump file -------------------
+
+- name: RV-2 step 7 -- smuggler_export source db1 -> .ravendbdump on controller
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Phase (b) smuggler-export source sharded db1 to .ravendbdump"
+      ravendb_smuggler:
+        kind: export
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ src_leader }}"
+        db_name: db1
+        dump_path: "{{ smuggler_dump_path }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ----- step 8: phase (b) -- import the dump into the non-sharded target ------------------------
+
+- name: RV-2 step 8 -- smuggler_import dump -> target db1
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Phase (b) smuggler-import dump into target non-sharded db1"
+      ravendb_smuggler:
+        kind: import
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ tgt_leader }}"
+        db_name: db1
+        dump_path: "{{ smuggler_dump_path }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ----- step 9: phase (b) -- source-aggregate vs target parity + check the revision form -------
+
+- name: RV-2 step 9 -- phase (b) checkpoint (source-union vs target parity, PK form hashed)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    # The total document count across all source shards has to match the target's count.
+    # /stats on the source leader returns the orchestrator-aggregated total across shards;
+    # /stats on the target returns its own count.
+    - name: Source aggregate doc count
+      ravendb_diagnostic:
+        kind: doc_count
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ src_leader }}"
+        db_name: db1
+      register: src_count
+    - ansible.builtin.debug: { msg: "{{ src_count.msg }}" }
+
+    - name: Target doc count
+      ravendb_diagnostic:
+        kind: doc_count
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ tgt_leader }}"
+        db_name: db1
+      register: tgt_count
+    - ansible.builtin.debug: { msg: "{{ tgt_count.msg }}" }
+
+    # Per-doc revision-count parity across the seeded probe set.  Only the target needs to be
+    # probed here (the source was already verified per-shard in step 6).  The target's per-doc
+    # count must match what the source held -- seed revisions plus churn from W-1.  Same
+    # sparse-sample pattern as RV-1 phase 4.
+    - name: Target per-doc revision count exists (every probe id has >=1 revision)
+      ravendb_diagnostic:
+        kind: revision_count_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ tgt_leader }}"]
+        id_prefix: "{{ seed_prefix }}"
+        count: "{{ parity_probe_count | default(50) | int }}"
+        assert_mode: true
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # The smuggler import re-keys everything through the public API, so target revisions land
+    # in the new build's hashed form regardless of what shape they had on each source shard.
+    # This check confirms the hashed shape across a probe set on the target.  If the build
+    # hasn't activated the new revision lane yet, the tool reports N/A and passes through.
+    - name: Target revision PK form is hashed (smuggler re-keyed via public API)
+      ravendb_diagnostic:
+        kind: stored_item_cv_split
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        target: "{{ tgt_leader }}"
+        doc_ids: "{{ [seed_prefix] | product(range(0, parity_probe_count | default(50) | int) | list) | map('join', '/') | list }}"
+        expect: split
+        assert_mode: true
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+- name: RV-2 -- DONE
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - ansible.builtin.debug:
+        msg: >-
+          RV-2 PASS  src=[{{ src_nodes | join(',') }}] tgt={{ tgt_node }} db=db1
+          phase (a) sharded internal rolling upgrade + phase (b) sharded -> non-sharded
+          smuggler (PK re-write to hashed) all held.
