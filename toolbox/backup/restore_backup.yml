@@ -5,15 +5,18 @@
 # node's filesystem (use `docker cp` to move files between containers if needed).  Waits for the
 # restore operation to complete.
 #
-# INPUTS:
-#   target        REQUIRED.  Container/host that has the backup folder accessible.
-#   backup_path   REQUIRED.  Absolute path to the backup folder on target.
-#   new_db_name   REQUIRED.  Name for the restored database.
-#   timeout       OPTIONAL.  Max wait, seconds.  Default 600.
-#   poll_interval OPTIONAL.  Default 3.
+# Long-running: large restores can take minutes.  Open a second terminal and `tail -F` the
+# printed progress log to watch per-poll status live.
 #
-# RUN EXAMPLES:
-#   ansible-playbook toolbox/backup/restore_backup.yml -K -e target=1a \
+# INPUTS:
+#   target           REQUIRED.
+#   backup_path      REQUIRED.  Absolute path to the backup folder on target.
+#   new_db_name      REQUIRED.
+#   timeout_secs     OPTIONAL.  Default 600.
+#   poll_interval    OPTIONAL.  Default 3.
+#
+# RUN EXAMPLE:
+#   ansible-playbook toolbox/backup/restore_backup.yml -e target=1a \
 #       -e backup_path=/backups/Tenants-20260528-180000 -e new_db_name=Tenants_restored
 ##################################################################################################
 
@@ -21,69 +24,28 @@
   hosts: localhost
   connection: local
   gather_facts: false
-
   tasks:
-    - name: Validate inputs
-      ansible.builtin.assert:
-        that:
-          - target is defined
-          - backup_path is defined
-          - new_db_name is defined
-        fail_msg: "Required: -e target=<node> -e backup_path=<dir> -e new_db_name=<name>"
-
-    - name: Resolve defaults
+    - name: Resolve progress log path
       ansible.builtin.set_fact:
-        eff_timeout: "{{ (timeout | default(600)) | int }}"
-        eff_poll: "{{ (poll_interval | default(3)) | int }}"
+        progress_log: "/tmp/ravendb-restore-{{ new_db_name }}-{{ lookup('pipe','date +%Y%m%d-%H%M%S') }}.log"
 
-    - name: Trigger the restore
-      ansible.builtin.uri:
-        url: "https://{{ target }}.{{ ravendb_domain }}:443/admin/restore/database"
-        method: POST
+    - name: Progress hint
+      ansible.builtin.debug:
+        msg:
+          - "Long-running operation -- this task will block until the restore completes (or times out)."
+          - "Watch progress live from another shell:   tail -F {{ progress_log }}"
+
+    - ravendb_backup:
+        kind: restore
+        ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
-        ca_path: "{{ cert_ca_crt }}"
-        body_format: json
-        body:
-          Type: "Local"
-          BackupLocation: "{{ backup_path }}"
-          DatabaseName: "{{ new_db_name }}"
-          DisableOngoingTasks: true
-          EncryptionKey: null
-        status_code: [200, 201]
-        return_content: true
-      register: trigger
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ target }}"
+        backup_path: "{{ backup_path }}"
+        new_db_name: "{{ new_db_name }}"
+        timeout: "{{ timeout_secs | default(600) | int }}"
+        poll_interval: "{{ poll_interval | default(3) | int }}"
+        progress_log: "{{ progress_log }}"
+      register: r
 
-    - name: Extract OperationId
-      ansible.builtin.set_fact:
-        op_id: "{{ trigger.json.OperationId | int }}"
-
-    - name: Print plan
-      ansible.builtin.debug:
-        msg: "Triggered restore of {{ backup_path }} as {{ new_db_name }} on {{ target }}  (OperationId={{ op_id }})"
-
-    - name: Wait for the restore to finish (cluster-level operation)
-      ansible.builtin.uri:
-        url: "https://{{ target }}.{{ ravendb_domain }}:443/operations/state?id={{ op_id }}"
-        method: GET
-        client_cert: "{{ cert_dir }}/client.pem"
-        ca_path: "{{ cert_ca_crt }}"
-        status_code: [200]
-      register: op_state
-      retries: "{{ ((eff_timeout | int) / (eff_poll | int)) | int }}"
-      delay: "{{ eff_poll }}"
-      until: (op_state.json.Status | default(none)) in ['Completed', 'Faulted', 'Canceled']
-
-    - name: Dump op_state if Status missing (debug aid)
-      ansible.builtin.debug:
-        var: op_state.json
-      when: (op_state.json.Status | default(none)) is none
-
-    - name: Fail if restore did not complete cleanly
-      ansible.builtin.assert:
-        that:
-          - op_state.json.Status == 'Completed'
-        fail_msg: "Restore ended with Status={{ op_state.json.Status }}: {{ op_state.json | to_nice_json }}"
-
-    - name: Done
-      ansible.builtin.debug:
-        msg: "RESTORED  {{ backup_path }} -> new DB '{{ new_db_name }}' on {{ target }} (OperationId={{ op_id }})"
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }

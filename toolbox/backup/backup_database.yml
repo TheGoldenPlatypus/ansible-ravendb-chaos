@@ -1,120 +1,54 @@
 ##################################################################################################
 # toolbox/backup/backup_database.yml
 #
-# Triggers an on-demand Logical or Snapshot backup and waits for completion.  Under the hood
-# RavenDB doesn't expose a true ad-hoc backup REST -- this creates a periodic-backup task
-# (scheduled far in the future so it won't ever auto-fire), manually triggers it, waits, and
-# deletes the task at the end.
+# Triggers an on-demand Logical or Snapshot backup and waits for completion.  RavenDB has no
+# true ad-hoc backup REST -- this creates a periodic-backup task scheduled far in the future
+# (won't auto-fire), triggers it manually, waits, deletes the task at the end.
+#
+# Long-running: a real backup can take minutes.  Ansible buffers module output, so the task
+# looks "hung" while waiting.  Open a second terminal and `tail -F` the printed progress log
+# to watch per-poll status live.
 #
 # INPUTS:
-#   target        REQUIRED.  Container/host running the DB.
-#   db_name       REQUIRED.  Database name.
-#   backup_type   OPTIONAL.  "Backup" (Logical, default) or "Snapshot".
-#   backup_path   OPTIONAL.  Default /backups/<db>-<timestamp>/.  Folder for the backup files.
-#   timeout       OPTIONAL.  Max wait for completion, seconds.  Default 300.
-#   poll_interval OPTIONAL.  Default 3.
+#   target           REQUIRED.
+#   db_name          REQUIRED.
+#   backup_type      OPTIONAL.  "Backup" (default) or "Snapshot".
+#   backup_path      OPTIONAL.  Default /backups/<db>-<timestamp>/.
+#   timeout_secs     OPTIONAL.  Default 300.
+#   poll_interval    OPTIONAL.  Default 3.
 #
 # RUN EXAMPLES:
-#   ansible-playbook toolbox/backup/backup_database.yml -K -e target=1a -e db_name=Tenants
-#   ansible-playbook toolbox/backup/backup_database.yml -K -e target=1a -e db_name=Tenants -e backup_type=Snapshot
-#   ansible-playbook toolbox/backup/backup_database.yml -K -e target=1a -e db_name=Tenants -e backup_path=/backups/manual-1
+#   ansible-playbook toolbox/backup/backup_database.yml -e target=1a -e db_name=Tenants
+#   ansible-playbook toolbox/backup/backup_database.yml -e target=1a -e db_name=Tenants -e backup_type=Snapshot
 ##################################################################################################
 
 - name: Trigger an on-demand backup and wait for completion
   hosts: localhost
   connection: local
   gather_facts: false
-
   tasks:
-    - name: Validate inputs
-      ansible.builtin.assert:
-        that:
-          - target is defined
-          - db_name is defined
-        fail_msg: "Required: -e target=<node> -e db_name=<db>"
-
-    - name: Resolve defaults
+    - name: Resolve progress log path
       ansible.builtin.set_fact:
-        eff_backup_type: "{{ backup_type | default('Backup') }}"
-        eff_backup_path: "{{ backup_path | default('/backups/' ~ db_name ~ '-' ~ lookup('pipe', 'date +%Y%m%d-%H%M%S')) }}"
-        eff_timeout: "{{ (timeout | default(300)) | int }}"
-        eff_poll: "{{ (poll_interval | default(3)) | int }}"
-        backup_task_name: "manual-{{ lookup('pipe', 'date +%Y%m%d-%H%M%S') }}-{{ 9999 | random }}"
+        progress_log: "/tmp/ravendb-backup-{{ db_name }}-{{ lookup('pipe','date +%Y%m%d-%H%M%S') }}.log"
 
-    - name: Create a periodic-backup task (scheduled far in the future, won't auto-fire)
-      ansible.builtin.uri:
-        url: "https://{{ target }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/admin/periodic-backup"
-        method: POST
-        client_cert: "{{ cert_dir }}/client.pem"
-        ca_path: "{{ cert_ca_crt }}"
-        body_format: json
-        body:
-          Name: "{{ backup_task_name }}"
-          BackupType: "{{ eff_backup_type }}"
-          Disabled: false
-          FullBackupFrequency: "0 0 1 1 *"     # Jan 1 every year (far enough)
-          IncrementalBackupFrequency: null
-          LocalSettings:
-            FolderPath: "{{ eff_backup_path }}"
-            Disabled: false
-          S3Settings: null
-          AzureSettings: null
-          GoogleCloudSettings: null
-          FtpSettings: null
-          GlacierSettings: null
-        status_code: [200, 201]
-        return_content: true
-      register: task_create
-
-    - name: Extract TaskId
-      ansible.builtin.set_fact:
-        task_id: "{{ task_create.json.TaskId | int }}"
-
-    - name: Trigger the backup now
-      ansible.builtin.uri:
-        url: "https://{{ target }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/admin/backup/database?taskId={{ task_id }}"
-        method: POST
-        client_cert: "{{ cert_dir }}/client.pem"
-        ca_path: "{{ cert_ca_crt }}"
-        status_code: [200, 201]
-        return_content: true
-      register: trigger
-
-    - name: Extract OperationId
-      ansible.builtin.set_fact:
-        op_id: "{{ trigger.json.OperationId | int }}"
-
-    - name: Print plan
+    - name: Progress hint
       ansible.builtin.debug:
-        msg: "Triggered {{ eff_backup_type }} backup of {{ db_name }} on {{ target }} -> {{ eff_backup_path }}  (TaskId={{ task_id }}, OperationId={{ op_id }})"
+        msg:
+          - "Long-running operation -- this task will block until the backup completes (or times out)."
+          - "Watch progress live from another shell:   tail -F {{ progress_log }}"
 
-    - name: Wait for the backup operation to finish
-      ansible.builtin.uri:
-        url: "https://{{ target }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/operations/state?id={{ op_id }}"
-        method: GET
+    - ravendb_backup:
+        kind: backup
+        ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
-        ca_path: "{{ cert_ca_crt }}"
-        status_code: [200]
-      register: op_state
-      retries: "{{ ((eff_timeout | int) / (eff_poll | int)) | int }}"
-      delay: "{{ eff_poll }}"
-      until: op_state.json.Status in ['Completed', 'Faulted', 'Canceled']
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ target }}"
+        db_name: "{{ db_name }}"
+        backup_type: "{{ backup_type | default(omit) }}"
+        backup_path: "{{ backup_path | default(omit) }}"
+        timeout: "{{ timeout_secs | default(300) | int }}"
+        poll_interval: "{{ poll_interval | default(3) | int }}"
+        progress_log: "{{ progress_log }}"
+      register: r
 
-    - name: Delete the periodic-backup task (cleanup; best-effort)
-      ansible.builtin.uri:
-        url: "https://{{ target }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/admin/tasks?id={{ task_id }}&type=PeriodicBackup&taskName={{ backup_task_name | urlencode }}"
-        method: DELETE
-        client_cert: "{{ cert_dir }}/client.pem"
-        ca_path: "{{ cert_ca_crt }}"
-        status_code: [200, 204, 404]
-      failed_when: false
-
-    - name: Fail if backup did not complete cleanly
-      ansible.builtin.assert:
-        that:
-          - op_state.json.Status == 'Completed'
-        fail_msg: "Backup ended with Status={{ op_state.json.Status }}: {{ op_state.json | to_nice_json }}"
-
-    - name: Done
-      ansible.builtin.debug:
-        msg: "BACKED UP  {{ db_name }} ({{ eff_backup_type }}) on {{ target }} -> {{ eff_backup_path }} (TaskId={{ task_id }}, OperationId={{ op_id }})"
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
