@@ -1012,11 +1012,19 @@ def k_cross_cluster_cv_equality(p):
     db = p["db_name"]
     doc_ids = p["doc_ids"]
     assert_mode = bool(p["assert_mode"])
+    anchor = p.get("anchor")  # optional: if set, anchor's entries must be a SUBSET of every
+                              # other node's entries.  Used for hub-vs-sinks checks where
+                              # multi-node sinks add their own local dbId entry on receive
+                              # (RF>1 → local etag entry; RF=1 → no extra entry).  Hub's
+                              # upstream entry must survive intact on every sink.
 
     if not nodes or len(nodes) < 2:
         raise ValueError("kind=cross_cluster_cv_equality requires `nodes` with >=2 targets")
     if not doc_ids:
         raise ValueError("kind=cross_cluster_cv_equality requires `doc_ids` (non-empty list)")
+    if anchor and anchor not in nodes:
+        raise ValueError("kind=cross_cluster_cv_equality `anchor=%s` not in `nodes=%s`" %
+                         (anchor, nodes))
 
     def _parse_cv_set(cv_str):
         if not cv_str:
@@ -1058,15 +1066,27 @@ def k_cross_cluster_cv_equality(p):
                 lines.append("    %s  %s" % (t, info))
             continue
 
-        # Compare frozensets across all nodes.
-        parsed_sets = [per_node[t][1] for t in nodes]
-        if any(s != parsed_sets[0] for s in parsed_sets[1:]):
+        # Equality mode (anchor unset): all nodes' CV-entry sets are identical.
+        # Anchor mode (anchor set):       anchor's CV-entry set is a SUBSET of every other
+        #                                 node's set (extras on receivers allowed).
+        parsed_sets = {t: per_node[t][1] for t in nodes}
+        if anchor:
+            anchor_set = parsed_sets[anchor]
+            others_ok = all(anchor_set.issubset(parsed_sets[t]) for t in nodes if t != anchor)
+            doc_ok = others_ok
+        else:
+            first = parsed_sets[nodes[0]]
+            doc_ok = all(parsed_sets[t] == first for t in nodes[1:])
+
+        if not doc_ok:
             mismatched.append(doc_id)
             lines.append("  %-25s  MISMATCH" % doc_id)
             for t in nodes:
                 cv, parsed = per_node[t]
-                lines.append("    %s  cv='%s'  entries=%s" %
-                             (t, (cv or "")[:80], sorted(parsed) if parsed else "<empty>"))
+                tag = "  <-- anchor" if t == anchor else ""
+                lines.append("    %s  cv='%s'  entries=%s%s" %
+                             (t, (cv or "")[:80],
+                              sorted(parsed) if parsed else "<empty>", tag))
 
     lines.append("  checked %d doc(s); mismatched=%d  unreachable=%d" %
                  (len(doc_ids), len(mismatched), len(unreachable)))
@@ -1076,7 +1096,9 @@ def k_cross_cluster_cv_equality(p):
             "FAIL  cross-cluster CV equality broke on %d doc(s); unreachable on %d" %
             (len(mismatched), len(unreachable))])
     if assert_mode:
-        lines.append("PASS  every doc has the same CV-entry set across all %d cluster(s)" % len(nodes))
+        mode_desc = ("anchor=%s entries subset-of every node" % anchor) if anchor \
+                    else ("identical CV-entry set across all %d cluster(s)" % len(nodes))
+        lines.append("PASS  every doc satisfies cross-cluster CV check (%s)" % mode_desc)
     return lines
 
 
@@ -1212,6 +1234,7 @@ def main():
         id_prefix=dict(default=None),
         count=dict(type="int", default=None),
         doc_ids=dict(type="list", elements="str", default=None),
+        anchor=dict(default=None),  # cross_cluster_cv_equality: optional anchor node
         id_prefixes=dict(type="list", elements="str", default=None),
         sample_per_prefix=dict(type="int", default=None),
         # schema_version

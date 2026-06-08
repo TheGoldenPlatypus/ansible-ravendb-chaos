@@ -1,0 +1,43 @@
+##################################################################################################
+# toolbox/diagnostic/diagnostic_extension_stats_parity.yml
+#
+# Per-aspect parity for the three "extension" /stats fields that hang off documents
+# (attachments, counters, time-series).  Specifically:
+#   attachments  -> CountOfUniqueAttachments + CountOfAttachments
+#   counters     -> CountOfCounterEntries
+#   timeseries   -> CountOfTimeSeriesSegments
+#
+# Pairs with diagnostic_doc_count_parity (CountOfDocuments).  Info by default; pass
+# assert_mode=true to fail on drift.
+#
+# INPUTS:
+#   db_name      REQUIRED.
+#   nodes        REQUIRED.
+#   aspects      OPTIONAL.  CSV subset of [attachments,counters,timeseries].  Default: all three.
+#   assert_mode  OPTIONAL.  Default false.
+#
+# RUN EXAMPLES:
+#   ansible-playbook toolbox/diagnostic/diagnostic_extension_stats_parity.yml \
+#       -e db_name=db1 -e '{"nodes":["9a","9b","9c"]}'
+#
+#   ansible-playbook toolbox/diagnostic/diagnostic_extension_stats_parity.yml \
+#       -e db_name=db1 -e aspects=attachments,counters \
+#       -e '{"nodes":["9a","9b","9c"]}'
+##################################################################################################
+
+- name: Extension /stats parity across nodes (attachments / counters / time-series)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ravendb_diagnostic:
+        kind: extension_stats_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: "{{ db_name }}"
+        nodes: "{{ nodes }}"
+        aspects: "{{ aspects | default(omit) }}"
+        assert_mode: "{{ assert_mode | default(false) | bool }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
