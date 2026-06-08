@@ -1,86 +1,37 @@
 ##################################################################################################
 # toolbox/wait/wait_for_conflicts_resolved.yml
 #
-# Waits until /databases/{db}/replication/conflicts reports zero conflicts on every probed
-# node.  Use this after a heal-from-partition step where concurrent writes on both sides
-# created conflicts -- asserts the cluster's conflict resolver converges within a bounded
-# budget.
+# Waits until /databases/<db>/replication/conflicts reports zero conflicts on every probed
+# node.  Use after a heal-from-partition step where concurrent writes on both sides created
+# conflicts -- asserts the cluster's conflict resolver converges within a bounded budget.
 #
-# Note: this is NOT "no conflicts ever existed" -- the conflict count is expected to be
-# nonzero before this tool runs.  This tool asserts the resolution path converges to zero.
+# Note: this is NOT "no conflicts ever existed" -- conflict count is expected to be nonzero
+# before this tool runs.  It asserts the resolution path converges to zero.
 #
 # INPUTS:
-#   db_name        REQUIRED.  Database name.
+#   db_name        REQUIRED.
 #   nodes          REQUIRED.  JSON list of node names to watch.
-#   timeout        OPTIONAL.  Max wall-clock seconds.  Default 60.
-#   poll_interval  OPTIONAL.  Seconds between polls.  Default 2.
+#   timeout_secs   OPTIONAL.  Default 60.  (NOT `timeout` -- reserved Ansible variable name.)
+#   poll_interval  OPTIONAL.  Default 2.
 #
 # RUN EXAMPLE:
 #   ansible-playbook toolbox/wait/wait_for_conflicts_resolved.yml \
-#       -e db_name=Tenants -e timeout=90 -e '{"nodes":["1a","1b","1c"]}'
+#       -e db_name=Tenants -e timeout_secs=90 -e '{"nodes":["1a","1b","1c"]}'
 ##################################################################################################
 
 - name: Wait until /replication/conflicts is empty on every node
   hosts: localhost
   connection: local
   gather_facts: false
-
   tasks:
-    - name: Validate inputs
-      ansible.builtin.assert:
-        that:
-          - db_name is defined
-          - nodes is defined
-          - nodes is iterable
-          - (nodes | length) > 0
-        fail_msg: "Required: -e db_name=<db> -e '{\"nodes\":[\"1a\",\"1b\",\"1c\"]}'"
-
-    - name: Resolve params + initial state
-      ansible.builtin.set_fact:
-        eff_timeout: "{{ (timeout | default(60)) | int }}"
-        eff_poll: "{{ (poll_interval | default(2)) | int }}"
-        resolved: false
-        last_counts: {}
-
-    - name: Compute max attempts
-      ansible.builtin.set_fact:
-        max_attempts: "{{ ((eff_timeout | int) / (eff_poll | int)) | int }}"
-
-    - name: Classify nodes -- which ones actually have the DB
-      ansible.builtin.uri:
-        url: "https://{{ item }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/stats"
+    - ravendb_wait:
+        kind: conflicts_resolved
+        ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
-        ca_path: "{{ cert_ca_crt }}"
-        status_code: [200, 404, 500, 503]
-      register: classify
-      loop: "{{ nodes }}"
-      loop_control:
-        label: "{{ item }}"
-
-    - name: Compute conflict_set + skipped
-      ansible.builtin.set_fact:
-        conflict_set: "{{ classify.results | selectattr('status', '==', 200) | map(attribute='item') | list }}"
-        skipped_nodes: "{{ classify.results | rejectattr('status', '==', 200) | map(attribute='item') | list }}"
-
-    - name: Note any skipped nodes
-      ansible.builtin.debug:
-        msg: "SKIPPED (DB not present / unreachable): {{ skipped_nodes }}"
-      when: skipped_nodes | length > 0
-
-    - name: Fail if no node has the DB
-      ansible.builtin.assert:
-        that:
-          - conflict_set | length > 0
-        fail_msg: "No probed node has database '{{ db_name }}' -- nothing to wait on"
-
-    - name: Poll loop -- include a single-attempt tasks file up to max_attempts times
-      ansible.builtin.include_tasks: _wait_for_conflicts_resolved_attempt.yml
-      loop: "{{ range(max_attempts | int) | list }}"
-      loop_control:
-        loop_var: attempt_idx
-        label: "attempt {{ attempt_idx + 1 }}/{{ max_attempts }}"
-      no_log: "{{ quiet | default(true) | bool }}"
-
-    - name: Timeout verdict (only reached if resolution never fired meta:end_play)
-      ansible.builtin.fail:
-        msg: "TIMEOUT after {{ max_attempts }} attempts ({{ eff_timeout }}s) -- conflicts never resolved.  Last counts: {{ last_counts }}"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: "{{ db_name }}"
+        nodes: "{{ nodes }}"
+        timeout: "{{ timeout_secs | default(60) | int }}"
+        poll_interval: "{{ poll_interval | default(2) | int }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }

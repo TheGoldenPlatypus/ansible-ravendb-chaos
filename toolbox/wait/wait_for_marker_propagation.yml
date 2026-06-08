@@ -1,19 +1,19 @@
 ##################################################################################################
 # toolbox/wait/wait_for_marker_propagation.yml
 #
-# Write a uniquely-IDed marker doc on `source`, then poll every `targets` node until that
+# PUT a uniquely-IDed marker doc on `source`, then poll every node in `targets` until the
 # marker appears (or fail after the budget).  End-to-end "replication is flowing" check;
 # complements wait_for_quiescence (steady state) by proving the wire actually moves.
 #
 # INPUTS:
-#   db_name             REQUIRED.  Database name.
+#   db_name             REQUIRED.
 #   source              REQUIRED.  Node to PUT the marker on (e.g. 1a).
-#   targets             REQUIRED.  JSON list of nodes to poll for the marker (e.g. ["1b","1c"]).
-#   timeout_secs        OPTIONAL.  Default 60.  Per-target wait budget.
-#   marker_id_prefix    OPTIONAL.  Default "markers/".  Override when the source→target leg has
-#                                  a filter that wouldn't admit the default prefix.  E.g. for a
-#                                  sink filtered to "users/sink1/*", pass
-#                                  marker_id_prefix=users/sink1/marker- so the marker is admitted.
+#   targets             REQUIRED.  JSON list of nodes to poll (e.g. ["1b","1c"]).
+#   timeout_secs        OPTIONAL.  Default 60.
+#   marker_id_prefix    OPTIONAL.  Default "markers/".  Override when the source->target leg
+#                                  has a filter that wouldn't admit the default prefix
+#                                  (e.g. marker_id_prefix=users/sink1/marker- for a sink
+#                                  filtered to users/sink1/*).
 #
 # RUN EXAMPLE:
 #   ansible-playbook toolbox/wait/wait_for_marker_propagation.yml \
@@ -24,49 +24,16 @@
   hosts: localhost
   connection: local
   gather_facts: false
-
   tasks:
-    - name: Validate inputs
-      ansible.builtin.assert:
-        that:
-          - db_name is defined
-          - source is defined
-          - targets is defined
-          - targets is iterable
-          - (targets | length) > 0
-        fail_msg: "Required: -e db_name=<db> -e source=<node> -e '{\"targets\":[...]}'"
-
-    - name: Pick a unique marker id
-      ansible.builtin.set_fact:
-        marker_id: "{{ marker_id_prefix | default('markers/') }}{{ lookup('pipe', 'date +%s%N') }}-{{ 99999 | random }}"
-
-    - name: PUT the marker on {{ source }}
-      ansible.builtin.uri:
-        url: "https://{{ source }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/docs?id={{ marker_id | urlencode }}"
-        method: PUT
+    - ravendb_wait:
+        kind: marker_propagation
+        ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
-        ca_path: "{{ cert_ca_crt }}"
-        body_format: json
-        body:
-          "@metadata":
-            "@collection": "Markers"
-        status_code: [200, 201]
-
-    - name: Poll each target until the marker appears
-      ansible.builtin.uri:
-        url: "https://{{ item }}.{{ ravendb_domain }}:443/databases/{{ db_name }}/docs?id={{ marker_id | urlencode }}"
-        method: GET
-        client_cert: "{{ cert_dir }}/client.pem"
-        ca_path: "{{ cert_ca_crt }}"
-        status_code: [200, 404]
-      register: poll
-      retries: "{{ ((timeout_secs | default(60)) | int / 2) | int }}"
-      delay: 2
-      until: poll.status == 200
-      loop: "{{ targets }}"
-      loop_control:
-        label: "{{ item }}"
-
-    - name: Done
-      ansible.builtin.debug:
-        msg: "PASS  marker {{ marker_id }} propagated from {{ source }} -> {{ targets }}"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: "{{ db_name }}"
+        source: "{{ source }}"
+        targets: "{{ targets }}"
+        marker_id_prefix: "{{ marker_id_prefix | default(omit) }}"
+        timeout: "{{ timeout_secs | default(60) | int }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }

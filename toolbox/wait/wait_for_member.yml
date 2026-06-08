@@ -2,62 +2,38 @@
 # toolbox/wait/wait_for_member.yml
 #
 # Waits until a target node is a full Member of its cluster's database topology
-# (present in Members, absent from Promotables and Rehabs) on /databases/{db}/topology.
-# Use this after a chaos action has been undone, to wait for the node's rehab phase
-# to fully complete before measuring post-recovery state.
+# (present in Members, absent from Promotables and Rehabs) on /admin/databases?name=<db>.
+# Use after a chaos action has been undone to confirm the rehab phase actually finished
+# before measuring post-recovery state.
 #
-# Pairs with toolbox/wait/wait_for_rehab.yml: call wait_for_rehab.yml first to confirm the
-# node actually entered rehab (otherwise the test isn't exercising the rehab path),
-# then call this to wait for it to come back.
+# Pairs with toolbox/wait/wait_for_rehab.yml.
 #
 # INPUTS:
 #   cluster_leader  REQUIRED.  Container name of any node in the cluster to query (e.g. 1a).
 #   db_name         REQUIRED.  Database name whose topology we inspect.
-#   target          REQUIRED.  Container name of the node we expect to become Member (e.g. 1b).
-#                              Its cluster tag is derived as upper(target[-1]) by convention.
-#   target_tag      OPTIONAL.  Single-letter cluster tag override.  Pass this when the
-#                              container name doesn't follow the <id><letter> convention
-#                              (e.g. target=myextra needs an explicit target_tag=E).
-#   timeout_secs    OPTIONAL.  Default 300.  Total wait budget for rehab to finish.
+#   target          REQUIRED.  Node we expect to become Member (e.g. 1b).  Its cluster tag is
+#                              derived as upper(target[-1]) by convention.
+#   target_tag      OPTIONAL.  Override the auto-derived tag (e.g. target=myextra needs E).
+#   timeout_secs    OPTIONAL.  Default 300.
 #
 # RUN EXAMPLE:
-#   ansible-playbook toolbox/wait/wait_for_member.yml -K \
-#       -e cluster_leader=1a -e db_name=Tenants -e target=1b
+#   ansible-playbook toolbox/wait/wait_for_member.yml -e cluster_leader=1a -e db_name=Tenants -e target=1b
 ##################################################################################################
 
 - name: Wait until target rejoins as full Member
   hosts: localhost
   connection: local
   gather_facts: false
-
   tasks:
-    - name: Validate inputs
-      ansible.builtin.assert:
-        that:
-          - cluster_leader is defined
-          - db_name is defined
-          - target is defined
-        fail_msg: "Required: -e cluster_leader=<node> -e db_name=<db> -e target=<node>"
-
-    - name: Resolve target_tag (explicit override wins, else last char of target uppercased)
-      ansible.builtin.set_fact:
-        target_tag: "{{ target_tag | default(target[-1] | upper, true) }}"
-
-    - name: Poll {{ cluster_leader }}'s DatabaseRecord for {{ db_name }} until {{ target_tag }} is Member (not Promotable/Rehab)
-      ansible.builtin.uri:
-        url: "https://{{ cluster_leader }}.{{ ravendb_domain }}:443/admin/databases?name={{ db_name }}"
-        method: GET
+    - ravendb_wait:
+        kind: member
+        ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
-        ca_path: "{{ cert_ca_crt }}"
-        return_content: true
-      register: topo
-      retries: "{{ (timeout_secs | default(300) | int // 2) }}"
-      delay: 2
-      until: >-
-        target_tag in (topo.json.Topology.Members | default([]) | list)
-        and target_tag not in (topo.json.Topology.Promotables | default([]) | list)
-        and target_tag not in (topo.json.Topology.Rehabs | default([]) | list)
-
-    - name: Done
-      ansible.builtin.debug:
-        msg: "REHAB COMPLETE  {{ target }} (tag {{ target_tag }}) is back as Member on {{ db_name }}"
+        ca_cert: "{{ cert_ca_crt }}"
+        cluster_leader: "{{ cluster_leader }}"
+        db_name: "{{ db_name }}"
+        target: "{{ target }}"
+        target_tag: "{{ target_tag | default(omit) }}"
+        timeout: "{{ timeout_secs | default(300) | int }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }

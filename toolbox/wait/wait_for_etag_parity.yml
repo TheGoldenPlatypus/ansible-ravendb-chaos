@@ -1,121 +1,37 @@
 ##################################################################################################
 # toolbox/wait/wait_for_etag_parity.yml
 #
-# Per-node LastDatabaseEtag stability check.  Samples /stats.LastDatabaseEtag on every node,
-# waits a short window (3-5s), samples again, and passes when EVERY node's etag is identical
-# across the two reads.  That's the right post-workload signal: "no node has issued a new
-# write in the last window."
+# Per-node LastDatabaseEtag stability check.  Snapshots /stats.LastDatabaseEtag on every node,
+# waits poll_interval seconds, snapshots again -- passes when EVERY node's etag is identical
+# across the two reads ("no node has issued a new write in the last window").
 #
-# This is per-node stability, NOT cross-node parity.  LastDatabaseEtag is each node's own
-# local write counter -- comparing the value ACROSS nodes is meaningless (they'd only match
-# by coincidence).  But within a single node, the counter monotonically advances on every
-# write; if it's unchanged across two reads, that node has gone quiet.  When every node has
-# gone quiet, the cluster has drained.
-#
-# Loop semantics:
-#   1. Snapshot LastDatabaseEtag on each node.
-#   2. Sleep `poll_interval` seconds.
-#   3. Snapshot again.
-#   4. For each node: was the etag identical to the previous snapshot?
-#   5. All nodes stable -> exit 0.  Any node moved -> roll snapshot forward and repeat.
-#   6. Overall budget `timeout` enforced by the outer wall clock.
-#
-# Vs `wait_for_docs_drain.yml`: same per-node stillness shape, but compares the simple
-# LastDatabaseEtag integer instead of the full DatabaseChangeVector string -- one curl per
-# node per poll, much less log noise.
+# This is per-node stability, NOT cross-node parity -- LastDatabaseEtag is each node's local
+# write counter; comparing values across nodes is meaningless.  For cross-node parity of the
+# database change-vector, use wait_for_quiescence.yml.
 #
 # INPUTS:
-#   db_name        REQUIRED.  Database name.
+#   db_name        REQUIRED.
 #   nodes          REQUIRED.  JSON list of node names.
-#   timeout        OPTIONAL.  Max wall-clock seconds to wait for stability.  Default 180.
-#   poll_interval  OPTIONAL.  Seconds between the two snapshot reads in each cycle.  Default 3.
+#   timeout_secs   OPTIONAL.  Default 180.  (NOT `timeout` -- reserved Ansible variable name.)
+#   poll_interval  OPTIONAL.  Default 3.
 #
 # RUN EXAMPLE:
-#   ansible-playbook toolbox/wait/wait_for_etag_parity.yml \
-#       -e db_name=db1 -e '{"nodes":["1a","1b","1c"]}'
+#   ansible-playbook toolbox/wait/wait_for_etag_parity.yml -e db_name=db1 -e '{"nodes":["1a","1b","1c"]}'
 ##################################################################################################
 
-- name: Wait until /stats.LastDatabaseEtag is stable on every node (no movement across a window)
+- name: Wait until LastDatabaseEtag is stable on every node
   hosts: localhost
   connection: local
   gather_facts: false
-
   tasks:
-    - name: Validate inputs
-      ansible.builtin.assert:
-        that:
-          - db_name is defined
-          - nodes is defined
-          - nodes is iterable
-          - (nodes | length) > 0
-        fail_msg: "Required: -e db_name=<db> -e '{\"nodes\":[\"1a\",\"1b\",\"1c\"]}'"
-
-    - name: Resolve params
-      ansible.builtin.set_fact:
-        eff_timeout: "{{ (timeout | default(180)) | int }}"
-        eff_poll: "{{ (poll_interval | default(3)) | int }}"
-
-    # One shell invocation does the whole snapshot-sleep-resnapshot-compare loop.  Inside
-    # bash because state must survive between iterations -- ansible's retries/until pattern
-    # can't carry the "previous snapshot" forward.  Per node:
-    #   * read LastDatabaseEtag
-    #   * compare to the previous reading kept in a bash associative array
-    #   * report stable/moving per node; pass when ALL nodes are stable
-    - name: Poll per-node LastDatabaseEtag until every node is stable across two reads
-      ansible.builtin.shell:
-        # `declare -A` is a bashism; ansible's shell module defaults to /bin/sh (dash on Ubuntu).
-        executable: /bin/bash
-        cmd: |
-          set -u
-          SLEEP_SECS={{ eff_poll | int }}
-          MAX_WALL={{ eff_timeout | int }}
-          DEADLINE=$(( $(date +%s) + MAX_WALL ))
-
-          declare -A prev
-
-          read_etag() {
-            local n="$1"
-            local body
-            body=$(curl -sk --cert "{{ cert_dir }}/client.pem" --cacert "{{ cert_ca_crt }}" \
-              -w '\nHTTP_CODE:%{http_code}' \
-              "https://${n}.{{ ravendb_domain }}:443/databases/{{ db_name }}/stats" 2>/dev/null)
-            local code
-            code=$(echo "$body" | grep -oE '^HTTP_CODE:[0-9]+$' | awk -F: '{print $2}')
-            if [ "$code" != "200" ]; then echo "SKIP($code)"; return; fi
-            echo "$body" | grep -oE '"LastDatabaseEtag":[0-9]+' | head -1 | awk -F: '{print $2}'
-          }
-
-          # initial snapshot
-          for n in {{ nodes | join(' ') }}; do
-            prev[$n]=$(read_etag "$n")
-          done
-
-          while [ $(date +%s) -lt $DEADLINE ]; do
-            sleep $SLEEP_SECS
-            STABLE=1
-            REPORT=""
-            for n in {{ nodes | join(' ') }}; do
-              cur=$(read_etag "$n")
-              if [ "${prev[$n]}" = "$cur" ]; then
-                REPORT="$REPORT  $n:$cur=stable"
-              else
-                STABLE=0
-                REPORT="$REPORT  $n:${prev[$n]}->$cur"
-              fi
-              prev[$n]="$cur"
-            done
-            if [ "$STABLE" = "1" ]; then
-              echo "STABLE$REPORT"
-              exit 0
-            fi
-            echo "MOVING$REPORT" >&2
-          done
-
-          echo "TIMEOUT after ${MAX_WALL}s -- last snapshot:$REPORT" >&2
-          exit 1
-      register: probe
-      changed_when: false
-
-    - name: Show verdict
-      ansible.builtin.debug:
-        msg: "PASS  {{ probe.stdout }}"
+    - ravendb_wait:
+        kind: etag_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: "{{ db_name }}"
+        nodes: "{{ nodes }}"
+        timeout: "{{ timeout_secs | default(180) | int }}"
+        poll_interval: "{{ poll_interval | default(3) | int }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }

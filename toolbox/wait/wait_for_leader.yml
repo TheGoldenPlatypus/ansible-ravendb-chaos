@@ -4,20 +4,17 @@
 # Block until /cluster/topology reports a non-empty Leader on a reachable node.  Use after a
 # leader restart / kill to wait for the election to finish.
 #
-# Optional: pin to an expected leader tag.  Useful when you specifically want the new leader
-# to be a particular node (e.g. "expect any v_new node to win in a mid-roll cluster").
+# Optional: pin to an expected leader tag (e.g. "B").  Useful when you want a specific node
+# to win the election (e.g. "expect any v_new node to win in a mid-roll cluster").
 #
 # INPUTS:
-#   target           REQUIRED.  Any reachable node to query (e.g. 1b -- a known-up node).
+#   target           REQUIRED.  Any reachable node to query (e.g. 1b).
 #   timeout_secs     OPTIONAL.  Default 60.
 #   expected_leader  OPTIONAL.  Single-letter tag (e.g. "B").  If set, wait until the Leader
 #                               field contains this tag.  Otherwise any non-empty Leader passes.
 #
 # RUN EXAMPLES:
-#   # any leader will do
 #   ansible-playbook toolbox/wait/wait_for_leader.yml -e target=1b
-#
-#   # require the leader to be node tag B
 #   ansible-playbook toolbox/wait/wait_for_leader.yml -e target=1b -e expected_leader=B
 ##################################################################################################
 
@@ -25,36 +22,14 @@
   hosts: localhost
   connection: local
   gather_facts: false
-
   tasks:
-    - name: Validate inputs
-      ansible.builtin.assert:
-        that:
-          - target is defined
-        fail_msg: "Required: -e target=<node>"
-
-    - name: Resolve expected_leader (uppercased) and budget
-      ansible.builtin.set_fact:
-        expected_leader_upper: "{{ (expected_leader | upper) if expected_leader is defined else '' }}"
-        eff_timeout: "{{ (timeout_secs | default(60)) | int }}"
-
-    - name: Poll /cluster/topology on {{ target }} until Leader satisfies the predicate
-      ansible.builtin.uri:
-        url: "https://{{ target }}.{{ ravendb_domain }}:443/cluster/topology"
+    - ravendb_wait:
+        kind: leader
+        ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
-        ca_path: "{{ cert_ca_crt }}"
-        status_code: [200]
-      register: topo
-      retries: "{{ ((eff_timeout | int) / 2) | int }}"
-      delay: 2
-      until: >-
-        (topo.json.Leader | default('')) != ''
-        and (expected_leader is not defined
-             or (expected_leader_upper in (topo.json.Leader | default(''))))
-
-    - name: Done
-      ansible.builtin.debug:
-        msg: >-
-          LEADER  {{ topo.json.Leader }}
-          {{ '(matched expected_leader=' ~ expected_leader_upper ~ ')' if expected_leader is defined else '' }}
-          queried via {{ target }}
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ target }}"
+        expected_leader: "{{ expected_leader | default(omit) }}"
+        timeout: "{{ timeout_secs | default(60) | int }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
