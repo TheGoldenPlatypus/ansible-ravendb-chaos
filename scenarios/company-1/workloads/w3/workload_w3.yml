@@ -1,0 +1,31 @@
+# Wrapper around workload_w3.sh -- see the .sh for the workload logic.
+# Required: target, db_name, duration_secs, id_prefix, pool_size
+# Optional: writers (default 8, per RV-1 spec)
+#           collection (default HotDocs)
+#
+# Example:
+#   ansible-playbook scenarios/company-1/workloads/w3/workload_w3.yml \
+#     -e target=1a -e db_name=db1 -e duration_secs=300 -e id_prefix=hot -e pool_size=1000
+
+- name: W-3 concurrent churn races (RV-1 Phase 2)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Run workload_w3.sh
+      ansible.builtin.command: "bash {{ playbook_dir }}/workload_w3.sh"
+      environment:
+        TARGET:        "{{ target }}"
+        DB_NAME:       "{{ db_name }}"
+        DURATION_SECS: "{{ duration_secs }}"
+        ID_PREFIX:     "{{ id_prefix }}"
+        POOL_SIZE:     "{{ pool_size }}"
+        WRITERS:       "{{ writers    | default(8) }}"
+        COLLECTION:    "{{ collection | default('HotDocs') }}"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      register: out
+
+    - ansible.builtin.debug:
+        msg: "{{ out.stdout_lines }}"

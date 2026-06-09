@@ -1,0 +1,1060 @@
+TASK [Print the final cluster layout (tag / container / url per cluster)] ******
+ok: [localhost] => {
+    "msg": [
+        "================================================================",
+        "  Formed 1 cluster(s) with 3 node(s) (on hubsinknet)",
+        "================================================================",
+        "",
+        "  Cluster 1",
+        "    tag   container   url",
+        "    A     1a          https://1a.hubsink.test:443",
+        "    B     1b          https://1b.hubsink.test:443",
+        "    C     1c          https://1c.hubsink.test:443",
+        "",
+        "================================================================"
+    ]
+}
+
+PLAY RECAP *********************************************************************
+1a                         : ok=2    changed=1    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+1b                         : ok=2    changed=1    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+1c                         : ok=2    changed=1    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+localhost                  : ok=16   changed=2    unreachable=0    failed=0    skipped=2    rescued=0    ignored=0   
+
+
+[1;36m[20:08:24] rv1[0m
+
+PLAY [Stop a background workload via its pidfile] ******************************
+
+TASK [Validate inputs] *********************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [TERM (then KILL after grace) the pid in /tmp/w1-1a-db1-w1.pid] ***********
+changed: [localhost]
+
+TASK [Done] ********************************************************************
+ok: [localhost] => {
+    "msg": "WORKLOAD ALREADY EXITED  no pidfile at /tmp/w1-1a-db1-w1.pid"
+}
+
+PLAY [Stop a background workload via its pidfile] ******************************
+
+TASK [Validate inputs] *********************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [TERM (then KILL after grace) the pid in /tmp/w1-1a-db1-w2.pid] ***********
+changed: [localhost]
+
+TASK [Done] ********************************************************************
+ok: [localhost] => {
+    "msg": "WORKLOAD ALREADY EXITED  no pidfile at /tmp/w1-1a-db1-w2.pid"
+}
+
+PLAY [Stop a background workload via its pidfile] ******************************
+
+TASK [Validate inputs] *********************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [TERM (then KILL after grace) the pid in /tmp/w1-1a-db1-w3.pid] ***********
+changed: [localhost]
+
+TASK [Done] ********************************************************************
+ok: [localhost] => {
+    "msg": "WORKLOAD ALREADY EXITED  no pidfile at /tmp/w1-1a-db1-w3.pid"
+}
+
+PLAY [Stop a background workload via its pidfile] ******************************
+
+TASK [Validate inputs] *********************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [TERM (then KILL after grace) the pid in /tmp/w1-1a-db1-w4.pid] ***********
+changed: [localhost]
+
+TASK [Done] ********************************************************************
+ok: [localhost] => {
+    "msg": "WORKLOAD ALREADY EXITED  no pidfile at /tmp/w1-1a-db1-w4.pid"
+}
+
+PLAY [Stop a background workload via its pidfile] ******************************
+
+TASK [Validate inputs] *********************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [TERM (then KILL after grace) the pid in /tmp/w3-1a-db1.pid] **************
+changed: [localhost]
+
+TASK [Done] ********************************************************************
+ok: [localhost] => {
+    "msg": "WORKLOAD ALREADY EXITED  no pidfile at /tmp/w3-1a-db1.pid"
+}
+
+PLAY [Stop a background workload via its pidfile] ******************************
+
+TASK [Validate inputs] *********************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [TERM (then KILL after grace) the pid in /tmp/w7-1a-db1.pid] **************
+changed: [localhost]
+
+TASK [Done] ********************************************************************
+ok: [localhost] => {
+    "msg": "WORKLOAD ALREADY EXITED  no pidfile at /tmp/w7-1a-db1.pid"
+}
+
+PLAY [Stop a background workload via its pidfile] ******************************
+
+TASK [Validate inputs] *********************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [TERM (then KILL after grace) the pid in /tmp/w7r-1a-db1.pid] *************
+changed: [localhost]
+
+TASK [Done] ********************************************************************
+ok: [localhost] => {
+    "msg": "WORKLOAD ALREADY EXITED  no pidfile at /tmp/w7r-1a-db1.pid"
+}
+
+PLAY [RV-1 pre -- validate inputs + show plan] *********************************
+
+TASK [Validate inputs] *********************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "RV-1  v_old=6.2.15  v_new_build=/mnt/c/dev/hub-sink/ansible-ravendb-chaos/builds/raven-pr22875.deb  
+    order=['1a', '1b', '1c'] phase1_seed=500x2 phase2_hot=50x3 writers=8 dur=30s phase3_doc=users/hot dur=60s"
+}
+
+PLAY [Ensure ravendb python client is available on the controller] *************
+
+TASK [Gathering Facts] *********************************************************
+ok: [localhost]
+
+TASK [Probe existing venv for ravendb module] **********************************
+ok: [localhost]
+
+TASK [Reuse existing venv -- skip the prereqs role] ****************************
+ok: [localhost]
+
+TASK [Install ravendb python client prerequisites (one-time / forced)] *********
+skipping: [localhost]
+
+PLAY [Create a database via the ravendb.ravendb.database module] ***************
+
+TASK [Validate inputs] *********************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Create database] *********************************************************
+changed: [localhost]
+
+TASK [Done] ********************************************************************
+ok: [localhost] => {
+    "msg": "CREATED  db1 on cluster reachable via 1a (replication_factor=3)"
+}
+
+PLAY [RV-1 step 1 -- configure keep-all revisions + seed 50k v_62 revs] ********
+
+TASK [ravendb_revisions] *******************************************************
+changed: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "REVISIONS configured on 1a/db1 -- MinimumRevisionsToKeep=100000000"
+}
+
+TASK [ravendb_writes] **********************************************************
+changed: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "WROTE 1000/1000 PUTs to 1a/db1 (500 docs x 2 revisions each, id prefix 'seed', collection 'MicroDocs')"
+}
+
+TASK [ravendb_wait] ************************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "STABLE -- LastDatabaseEtag unchanged across 3 node(s) (skipped=[], took 0.0s)",
+        "  sample 1 (20:09:02):",
+        "    1a  2000",
+        "    1b  2000",
+        "    1c  2000",
+        "  sample 2 (20:09:02):",
+        "    1a  2000",
+        "    1b  2000",
+        "    1c  2000"
+    ]
+}
+
+PLAY [RV-1 step 2 -- T0 baseline (3 nodes on v_62, quiet)] *********************
+
+TASK [ravendb_diagnostic] ******************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "schema/build version per node:",
+        "  1a  6.2.15",
+        "  1b  6.2.15",
+        "  1c  6.2.15"
+    ]
+}
+
+TASK [ravendb_diagnostic] ******************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "/stats parity  db=db1  nodes=['1a', '1b', '1c']",
+        "field                                  1a ,        1b ,        1c  status",
+        "CountOfAttachments                      0 ,         0 ,         0  OK",
+        "CountOfConflicts                        0 ,         0 ,         0  OK",
+        "CountOfCounterEntries                   0 ,         0 ,         0  OK (info)",
+        "CountOfDocuments                      500 ,       500 ,       500  OK",
+        "CountOfDocumentsConflicts               0 ,         0 ,         0  OK",
+        "CountOfRemoteAttachments                0 ,         0 ,         0  OK",
+        "CountOfRevisionDocuments             1000 ,      1000 ,      1000  OK",
+        "CountOfTimeSeriesDeletedRanges          0 ,         0 ,         0  OK",
+        "CountOfTimeSeriesSegments               0 ,         0 ,         0  OK (info)",
+        "CountOfTombstones                       0 ,         0 ,         0  OK",
+        "CountOfUniqueAttachments                0 ,         0 ,         0  OK",
+        "SizeOnDisk                      167903232 , 167903232 , 167903232  info",
+        "PASS  every asserted field is parity-equal across ['1a', '1b', '1c']"
+    ]
+}
+
+PLAY [RV-1 step 3 -- launch W-1 x 4 writers in background] *********************
+
+TASK [Launch W-1 writer {{ item }} (background, async)] ************************
+[WARNING]: Found variable using reserved name: timeout
+changed: [localhost] => (item=1)
+changed: [localhost] => (item=2)
+changed: [localhost] => (item=3)
+changed: [localhost] => (item=4)
+
+PLAY [Wait for a background workload's pidfile to appear] **********************
+
+TASK [Validate inputs] *********************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Wait for /tmp/w1-1a-db1-w1.pid to appear] ********************************
+ok: [localhost]
+
+TASK [Done] ********************************************************************
+ok: [localhost] => {
+    "msg": "WORKLOAD STARTED  pidfile present at /tmp/w1-1a-db1-w1.pid"
+}
+
+PLAY [Wait for a background workload's pidfile to appear] **********************
+
+TASK [Validate inputs] *********************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Wait for /tmp/w1-1a-db1-w2.pid to appear] ********************************
+ok: [localhost]
+
+TASK [Done] ********************************************************************
+ok: [localhost] => {
+    "msg": "WORKLOAD STARTED  pidfile present at /tmp/w1-1a-db1-w2.pid"
+}
+
+PLAY [Wait for a background workload's pidfile to appear] **********************
+
+TASK [Validate inputs] *********************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Wait for /tmp/w1-1a-db1-w3.pid to appear] ********************************
+ok: [localhost]
+
+TASK [Done] ********************************************************************
+ok: [localhost] => {
+    "msg": "WORKLOAD STARTED  pidfile present at /tmp/w1-1a-db1-w3.pid"
+}
+
+PLAY [Wait for a background workload's pidfile to appear] **********************
+
+TASK [Validate inputs] *********************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Wait for /tmp/w1-1a-db1-w4.pid to appear] ********************************
+ok: [localhost]
+
+TASK [Done] ********************************************************************
+ok: [localhost] => {
+    "msg": "WORKLOAD STARTED  pidfile present at /tmp/w1-1a-db1-w4.pid"
+}
+
+PLAY [RV-1 step 4 -- upgrade 1a (full schema chain) + mixed checkpoint] ********
+
+TASK [Upgrade 1a + wait_for_member] ********************************************
+ASYNC POLL on localhost: jid=j950145418630.2373765 started=1 finished=0
+ASYNC OK on localhost: jid=j950145418630.2373765
+changed: [localhost]
+
+PLAY [RV-1 step 4 -- mid-roll light checkpoint + delay] ************************
+
+TASK [ravendb_wait] ************************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "MARKER PROPAGATED -- 'rv1/marker-post1a-1780765807419167694-81182' reached every target ['1b', '1c'] from 1a (took 0.1s)"
+}
+
+TASK [ravendb_diagnostic] ******************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "schema/build version per node:",
+        "  1a  7.2.3-custom-72",
+        "  1b  6.2.15",
+        "  1c  6.2.15"
+    ]
+}
+
+TASK [Pause before upgrading 1b] ***********************************************
+skipping: [localhost]
+
+PLAY [RV-1 step 5 -- upgrade 1b + mixed checkpoint] ****************************
+
+TASK [Upgrade 1b + wait_for_member] ********************************************
+ASYNC POLL on localhost: jid=j113815620800.2418162 started=1 finished=0
+ASYNC POLL on localhost: jid=j113815620800.2418162 started=1 finished=0
+ASYNC OK on localhost: jid=j113815620800.2418162
+changed: [localhost]
+
+PLAY [RV-1 step 5 -- mid-roll light checkpoint + delay] ************************
+
+TASK [ravendb_wait] ************************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "MARKER PROPAGATED -- 'rv1/marker-post1b-1780765901954139182-65715' reached every target ['1b', '1c'] from 1a (took 0.1s)"
+}
+
+TASK [ravendb_diagnostic] ******************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "schema/build version per node:",
+        "  1a  7.2.3-custom-72",
+        "  1b  7.2.3-custom-72",
+        "  1c  6.2.15"
+    ]
+}
+
+TASK [Pause before upgrading 1c] ***********************************************
+skipping: [localhost]
+
+PLAY [RV-1 step 6 -- upgrade 1c + stop W-1 + quiet] ****************************
+
+TASK [Upgrade 1c + wait_for_member] ********************************************
+ASYNC POLL on localhost: jid=j886747630588.2583522 started=1 finished=0
+ASYNC POLL on localhost: jid=j886747630588.2583522 started=1 finished=0
+ASYNC OK on localhost: jid=j886747630588.2583522
+changed: [localhost]
+
+TASK [ravendb_diagnostic] ******************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "schema/build version per node:",
+        "  1a  7.2.3-custom-72",
+        "  1b  7.2.3-custom-72",
+        "  1c  7.2.3-custom-72"
+    ]
+}
+
+PLAY [Assert a background workload is still alive (pidfile + kill -0)] *********
+
+TASK [Validate inputs] *********************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Probe pidfile + recorded PID] ********************************************
+ok: [localhost]
+
+TASK [Assert workload is alive] ************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "WORKLOAD ALIVE  pidfile=/tmp/w1-1a-db1-w1.pid  ALIVE pid=2373118"
+}
+
+PLAY [Assert a background workload is still alive (pidfile + kill -0)] *********
+
+TASK [Validate inputs] *********************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Probe pidfile + recorded PID] ********************************************
+ok: [localhost]
+
+TASK [Assert workload is alive] ************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "WORKLOAD ALIVE  pidfile=/tmp/w1-1a-db1-w2.pid  ALIVE pid=2373223"
+}
+
+PLAY [Assert a background workload is still alive (pidfile + kill -0)] *********
+
+TASK [Validate inputs] *********************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Probe pidfile + recorded PID] ********************************************
+ok: [localhost]
+
+TASK [Assert workload is alive] ************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "WORKLOAD ALIVE  pidfile=/tmp/w1-1a-db1-w3.pid  ALIVE pid=2373337"
+}
+
+PLAY [Assert a background workload is still alive (pidfile + kill -0)] *********
+
+TASK [Validate inputs] *********************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Probe pidfile + recorded PID] ********************************************
+ok: [localhost]
+
+TASK [Assert workload is alive] ************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "WORKLOAD ALIVE  pidfile=/tmp/w1-1a-db1-w4.pid  ALIVE pid=2373354"
+}
+
+PLAY [Stop a background workload via its pidfile] ******************************
+
+TASK [Validate inputs] *********************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [TERM (then KILL after grace) the pid in /tmp/w1-1a-db1-w1.pid] ***********
+changed: [localhost]
+
+TASK [Done] ********************************************************************
+ok: [localhost] => {
+    "msg": "WORKLOAD STOPPED  pid=2373118  pidfile=/tmp/w1-1a-db1-w1.pid"
+}
+
+PLAY [Stop a background workload via its pidfile] ******************************
+
+TASK [Validate inputs] *********************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [TERM (then KILL after grace) the pid in /tmp/w1-1a-db1-w2.pid] ***********
+changed: [localhost]
+
+TASK [Done] ********************************************************************
+ok: [localhost] => {
+    "msg": "WORKLOAD STOPPED  pid=2373223  pidfile=/tmp/w1-1a-db1-w2.pid"
+}
+
+PLAY [Stop a background workload via its pidfile] ******************************
+
+TASK [Validate inputs] *********************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [TERM (then KILL after grace) the pid in /tmp/w1-1a-db1-w3.pid] ***********
+changed: [localhost]
+
+TASK [Done] ********************************************************************
+ok: [localhost] => {
+    "msg": "WORKLOAD STOPPED  pid=2373337  pidfile=/tmp/w1-1a-db1-w3.pid"
+}
+
+PLAY [Stop a background workload via its pidfile] ******************************
+
+TASK [Validate inputs] *********************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [TERM (then KILL after grace) the pid in /tmp/w1-1a-db1-w4.pid] ***********
+changed: [localhost]
+
+TASK [Done] ********************************************************************
+ok: [localhost] => {
+    "msg": "WORKLOAD STOPPED  pid=2373354  pidfile=/tmp/w1-1a-db1-w4.pid"
+}
+
+PLAY [RV-1 step 6 -- post-W-1-stop drain + tombstone settle] *******************
+
+TASK [ravendb_wait] ************************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "DRAINED -- DatabaseChangeVector unchanged across 3 node(s) (skipped=[], took 0.0s)",
+        "  sample 1 (20:13:26):",
+        "    1a  B:2741-8wdpqzztj0ywFUqz3CdcwQ, A:2740-NdemjlNA0kqQdOjCpJjNCg, C:2741-f0/NmQKnUk+AuIGjo5tSFQ",
+        "    1b  B:2741-8wdpqzztj0ywFUqz3CdcwQ, A:2740-NdemjlNA0kqQdOjCpJjNCg, C:2741-f0/NmQKnUk+AuIGjo5tSFQ",
+        "    1c  B:2741-8wdpqzztj0ywFUqz3CdcwQ, A:2741-NdemjlNA0kqQdOjCpJjNCg, C:2739-f0/NmQKnUk+AuIGjo5tSFQ",
+        "  sample 2 (20:13:26):",
+        "    1a  B:2741-8wdpqzztj0ywFUqz3CdcwQ, A:2740-NdemjlNA0kqQdOjCpJjNCg, C:2741-f0/NmQKnUk+AuIGjo5tSFQ",
+        "    1b  B:2741-8wdpqzztj0ywFUqz3CdcwQ, A:2740-NdemjlNA0kqQdOjCpJjNCg, C:2741-f0/NmQKnUk+AuIGjo5tSFQ",
+        "    1c  B:2741-8wdpqzztj0ywFUqz3CdcwQ, A:2741-NdemjlNA0kqQdOjCpJjNCg, C:2739-f0/NmQKnUk+AuIGjo5tSFQ"
+    ]
+}
+
+TASK [ravendb_wait] ************************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "STABLE -- LastDatabaseEtag unchanged across 3 node(s) (skipped=[], took 0.0s)",
+        "  sample 1 (20:13:27):",
+        "    1a  2741",
+        "    1b  2741",
+        "    1c  2741",
+        "  sample 2 (20:13:27):",
+        "    1a  2741",
+        "    1b  2741",
+        "    1c  2741"
+    ]
+}
+
+TASK [ravendb_wait] ************************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "PARITY -- fields ['CountOfTombstones'] match across 3 node(s) (skipped=[], took 0.0s):",
+        "  CountOfTombstones = 28"
+    ]
+}
+
+PLAY [RV-1 step 7 -- phase-1 final asserts (I-1, I-2, I-3, I-4, I-8 + schema parity)] ***
+
+TASK [ravendb_diagnostic] ******************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "/stats parity  db=db1  nodes=['1a', '1b', '1c']",
+        "field                                  1a ,        1b ,        1c  status",
+        "CountOfAttachments                      0 ,         0 ,         0  OK",
+        "CountOfConflicts                        0 ,         0 ,         0  OK",
+        "CountOfCounterEntries                   0 ,         0 ,         0  OK (info)",
+        "CountOfDocuments                      538 ,       538 ,       538  OK",
+        "CountOfDocumentsConflicts               0 ,         0 ,         0  OK",
+        "CountOfRemoteAttachments                0 ,         0 ,         0  OK",
+        "CountOfRevisionDocuments             1369 ,      1369 ,      1369  OK",
+        "CountOfTimeSeriesDeletedRanges          0 ,         0 ,         0  OK",
+        "CountOfTimeSeriesSegments               0 ,         0 ,         0  OK (info)",
+        "CountOfTombstones                      28 ,        28 ,        28  OK",
+        "CountOfUniqueAttachments                0 ,         0 ,         0  OK",
+        "SizeOnDisk                      167903232 , 302120960 , 167903232  info",
+        "PASS  every asserted field is parity-equal across ['1a', '1b', '1c']"
+    ]
+}
+
+TASK [ravendb_diagnostic] ******************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "revision-count parity: 10 id(s) across ['1a', '1b', '1c']",
+        "per-id counts (first 10): {'seed/0': [3, 3, 3], 'seed/1': [3, 3, 3], 'seed/2': [2, 2, 2], 'seed/3': [2, 2, 2], 
+                                    'seed/4': [3, 3, 3], 'seed/5': [2, 2, 2], 'seed/6': [4, 4, 4], 'seed/7': [2, 2, 2], 
+                                    'seed/8': [4, 4, 4], 'seed/9': [3, 3, 3]}",
+        "  mismatched: 0",
+        "PASS  per-id revision counts agree across nodes"
+    ]
+}
+
+TASK [ravendb_diagnostic] ******************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "orphan revisions adopted per node:",
+        "  1a  0",
+        "  1b  0",
+        "  1c  0",
+        "PASS  no orphan revisions on any node"
+    ]
+}
+
+TASK [ravendb_diagnostic] ******************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "schema/build version per node:",
+        "  1a  7.2.3-custom-72",
+        "  1b  7.2.3-custom-72",
+        "  1c  7.2.3-custom-72",
+        "DatabaseRecord.SupportedFeatures (via 1a): ['ThrowRevisionKeyTooBigFix']"
+    ]
+}
+
+TASK [ravendb_diagnostic] ******************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "BASELINE CAPTURED  /mnt/c/dev/hub-sink/ansible-ravendb-chaos/scenarios/company-1/RV1/../../../captures/size-baseline-rv1.json",
+        "  1a  167903232 bytes",
+        "  1b  302120960 bytes",
+        "  1c  167903232 bytes"
+    ]
+}
+
+PLAY [RV-1 step 8 -- pre-seed hot pool (50 x 3 revs)] **************************
+
+TASK [ravendb_writes] **********************************************************
+changed: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "WROTE 150/150 PUTs to 1a/db1 (50 docs x 3 revisions each, id prefix 'hot', collection 'HotDocs')"
+}
+
+TASK [ravendb_wait] ************************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "STABLE -- LastDatabaseEtag unchanged across 3 node(s) (skipped=[], took 0.0s)",
+        "  sample 1 (20:13:35):",
+        "    1a  3042",
+        "    1b  3042",
+        "    1c  3042",
+        "  sample 2 (20:13:35):",
+        "    1a  3042",
+        "    1b  3042",
+        "    1c  3042"
+    ]
+}
+
+PLAY [W-3 concurrent churn races (RV-1 Phase 2)] *******************************
+
+TASK [Run workload_w3.sh] ******************************************************
+changed: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "W-3 starting  1a/db1  writers=8  pool=hot/0..49  duration=30s",
+        "  W-3 worker 5  iterations=113",
+        "  W-3 worker 2  iterations=113",
+        "  W-3 worker 1  iterations=115",
+        "  W-3 worker 8  iterations=114",
+        "  W-3 worker 4  iterations=114",
+        "  W-3 worker 7  iterations=114",
+        "  W-3 worker 3  iterations=115",
+        "  W-3 worker 6  iterations=112",
+        "W-3 DONE  1a/db1  writers=8  duration=30s"
+    ]
+}
+
+PLAY [RV-1 step 9 -- post-W-3 cooldown + drain + tombstone settle] *************
+
+TASK [Pause for controller-side TIME_WAIT recycle] *****************************
+Pausing for 5 seconds
+(ctrl+C then 'C' = continue early, ctrl+C then 'A' = abort)
+ok: [localhost]
+
+TASK [ravendb_wait] ************************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "DRAINED -- DatabaseChangeVector unchanged across 3 node(s) (skipped=[], took 0.0s)",
+        "  sample 1 (20:14:10):",
+        "    1a  B:12579-8wdpqzztj0ywFUqz3CdcwQ, A:13747-NdemjlNA0kqQdOjCpJjNCg, C:12582-f0/NmQKnUk+AuIGjo5tSFQ",
+        "    1b  B:12579-8wdpqzztj0ywFUqz3CdcwQ, A:13747-NdemjlNA0kqQdOjCpJjNCg, C:12584-f0/NmQKnUk+AuIGjo5tSFQ",
+        "    1c  B:12585-8wdpqzztj0ywFUqz3CdcwQ, A:13747-NdemjlNA0kqQdOjCpJjNCg, C:12582-f0/NmQKnUk+AuIGjo5tSFQ",
+        "  sample 2 (20:14:10):",
+        "    1a  B:12579-8wdpqzztj0ywFUqz3CdcwQ, A:13747-NdemjlNA0kqQdOjCpJjNCg, C:12582-f0/NmQKnUk+AuIGjo5tSFQ",
+        "    1b  B:12579-8wdpqzztj0ywFUqz3CdcwQ, A:13747-NdemjlNA0kqQdOjCpJjNCg, C:12584-f0/NmQKnUk+AuIGjo5tSFQ",
+        "    1c  B:12585-8wdpqzztj0ywFUqz3CdcwQ, A:13747-NdemjlNA0kqQdOjCpJjNCg, C:12582-f0/NmQKnUk+AuIGjo5tSFQ"
+    ]
+}
+
+TASK [ravendb_wait] ************************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "PARITY -- fields ['CountOfTombstones'] match across 3 node(s) (skipped=[], took 0.0s):",
+        "  CountOfTombstones = 798"
+    ]
+}
+
+PLAY [RV-1 step 10 -- phase-2 checkpoint (no duplicates, no orphans)] **********
+
+TASK [ravendb_diagnostic] ******************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "/stats parity  db=db1  nodes=['1a', '1b', '1c']",
+        "field                                  1a ,        1b ,        1c  status",
+        "CountOfAttachments                    783 ,       783 ,       783  OK",
+        "CountOfConflicts                        0 ,         0 ,         0  OK",
+        "CountOfCounterEntries                   0 ,         0 ,         0  OK (info)",
+        "CountOfDocuments                      588 ,       588 ,       588  OK",
+        "CountOfDocumentsConflicts               0 ,         0 ,         0  OK",
+        "CountOfRemoteAttachments                0 ,         0 ,         0  OK",
+        "CountOfRevisionDocuments             5291 ,      5291 ,      5291  OK",
+        "CountOfTimeSeriesDeletedRanges          0 ,         0 ,         0  OK",
+        "CountOfTimeSeriesSegments               0 ,         0 ,         0  OK (info)",
+        "CountOfTombstones                     798 ,       798 ,       798  OK",
+        "CountOfUniqueAttachments              756 ,       756 ,       756  OK",
+        "SizeOnDisk                      335675392 , 335675392 , 335675392  info",
+        "PASS  every asserted field is parity-equal across ['1a', '1b', '1c']"
+    ]
+}
+
+TASK [ravendb_diagnostic] ******************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "revision-count parity: 10 id(s) across ['1a', '1b', '1c']",
+        " per-id counts (first 10): {'hot/0': [66, 66, 66], 'hot/1': [67, 67, 67], 'hot/2': [88, 88, 88], 
+                                     'hot/3': [78, 78, 78], 'hot/4': [82, 82, 82], 'hot/5': [52, 52, 52], 
+                                     'hot/6': [73, 73, 73], 'hot/7': [94, 94, 94], 'hot/8': [109, 109, 109], 
+                                     'hot/9': [82, 82, 82]}",
+        "  mismatched: 0",
+        "PASS  per-id revision counts agree across nodes"
+    ]
+}
+
+TASK [ravendb_diagnostic] ******************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "orphan revisions adopted per node:",
+        "  1a  0",
+        "  1b  0",
+        "  1c  0",
+        "PASS  no orphan revisions on any node"
+    ]
+}
+
+PLAY [RV-1 step 11 -- launch W-7 writer + reader (background)] *****************
+
+TASK [Launch W-7 writer (single loop, background async)] ***********************
+changed: [localhost]
+
+TASK [Launch W-7 reader (latency + voron sampler, background async)] ***********
+changed: [localhost]
+
+PLAY [Wait for a background workload's pidfile to appear] **********************
+
+TASK [Validate inputs] *********************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Wait for /tmp/w7-1a-db1.pid to appear] ***********************************
+ok: [localhost]
+
+TASK [Done] ********************************************************************
+ok: [localhost] => {
+    "msg": "WORKLOAD STARTED  pidfile present at /tmp/w7-1a-db1.pid"
+}
+
+PLAY [Wait for a background workload's pidfile to appear] **********************
+
+TASK [Validate inputs] *********************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Wait for /tmp/w7r-1a-db1.pid to appear] **********************************
+ok: [localhost]
+
+TASK [Done] ********************************************************************
+ok: [localhost] => {
+    "msg": "WORKLOAD STARTED  pidfile present at /tmp/w7r-1a-db1.pid"
+}
+
+PLAY [RV-1 step 11 -- wait for W-7 writer + reader to finish] ******************
+
+TASK [Poll W-7 writer (fast-fail on crash, clean-exit on natural finish)] ******
+FAILED - RETRYING: [localhost]: Poll W-7 writer (fast-fail on crash, clean-exit on natural finish) (72 retries left).
+FAILED - RETRYING: [localhost]: Poll W-7 writer (fast-fail on crash, clean-exit on natural finish) (71 retries left).
+FAILED - RETRYING: [localhost]: Poll W-7 writer (fast-fail on crash, clean-exit on natural finish) (70 retries left).
+FAILED - RETRYING: [localhost]: Poll W-7 writer (fast-fail on crash, clean-exit on natural finish) (69 retries left).
+FAILED - RETRYING: [localhost]: Poll W-7 writer (fast-fail on crash, clean-exit on natural finish) (68 retries left).
+FAILED - RETRYING: [localhost]: Poll W-7 writer (fast-fail on crash, clean-exit on natural finish) (67 retries left).
+FAILED - RETRYING: [localhost]: Poll W-7 writer (fast-fail on crash, clean-exit on natural finish) (66 retries left).
+FAILED - RETRYING: [localhost]: Poll W-7 writer (fast-fail on crash, clean-exit on natural finish) (65 retries left).
+FAILED - RETRYING: [localhost]: Poll W-7 writer (fast-fail on crash, clean-exit on natural finish) (64 retries left).
+FAILED - RETRYING: [localhost]: Poll W-7 writer (fast-fail on crash, clean-exit on natural finish) (63 retries left).
+FAILED - RETRYING: [localhost]: Poll W-7 writer (fast-fail on crash, clean-exit on natural finish) (62 retries left).
+FAILED - RETRYING: [localhost]: Poll W-7 writer (fast-fail on crash, clean-exit on natural finish) (61 retries left).
+ok: [localhost]
+
+TASK [Poll W-7 reader (fast-fail on crash, clean-exit on natural finish)] ******
+ok: [localhost]
+
+TASK [Show W-7 reader log tail] ************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "W-7 reader log tail:
+    # W-7 reader log  1a/db1  doc=users/hot  started=2026-06-06T17:14:12Z
+    2026-06-06T17:14:12Z  history_fetch  http=200  elapsed_ms=19
+    2026-06-06T17:14:12Z  stats_snapshot  \"SizeInBytes\":335675392  \"CountOfRevisionDocuments\":5297
+    2026-06-06T17:14:43Z  history_fetch  http=200  elapsed_ms=49"
+}
+
+TASK [ravendb_wait] ************************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "STABLE -- LastDatabaseEtag unchanged across 3 node(s) (skipped=[], took 0.0s)",
+        "  sample 1 (20:15:16):",
+        "    1a  15970",
+        "    1b  15198",
+        "    1c  15197",
+        "  sample 2 (20:15:16):",
+        "    1a  15970",
+        "    1b  15198",
+        "    1c  15197"
+    ]
+}
+
+TASK [ravendb_wait] ************************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "PARITY -- fields ['CountOfTombstones'] match across 3 node(s) (skipped=[], took 155.3s):",
+        "  CountOfTombstones = 0"
+    ]
+}
+
+PLAY [RV-1 step 12 -- phase-3 checkpoint] **************************************
+
+TASK [ravendb_diagnostic] ******************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "/stats parity  db=db1  nodes=['1a', '1b', '1c']",
+        "field                                  1a ,        1b ,        1c  status",
+        "CountOfAttachments                    783 ,       783 ,       783  OK",
+        "CountOfConflicts                        0 ,         0 ,         0  OK",
+        "CountOfCounterEntries                   0 ,         0 ,         0  OK (info)",
+        "CountOfDocuments                      589 ,       589 ,       589  OK",
+        "CountOfDocumentsConflicts               0 ,         0 ,         0  OK",
+        "CountOfRemoteAttachments                0 ,         0 ,         0  OK",
+        "CountOfRevisionDocuments             6402 ,      6402 ,      6402  OK",
+        "CountOfTimeSeriesDeletedRanges          0 ,         0 ,         0  OK",
+        "CountOfTimeSeriesSegments               0 ,         0 ,         0  OK (info)",
+        "CountOfTombstones                       0 ,         0 ,         0  OK",
+        "CountOfUniqueAttachments              756 ,       756 ,       756  OK",
+        "SizeOnDisk                      335675392 , 335675392 , 335675392  info",
+        "PASS  every asserted field is parity-equal across ['1a', '1b', '1c']"
+    ]
+}
+
+TASK [ravendb_diagnostic] ******************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "revision-count parity: 1 id(s) across ['1a', '1b', '1c']",
+        "  per-id counts (first 10): {'users/hot': [1111, 1111, 1111]}",
+        "  mismatched: 0",
+        "PASS  per-id revision counts agree across nodes"
+    ]
+}
+
+TASK [ravendb_diagnostic] ******************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "orphan revisions adopted per node:",
+        "  1a  0",
+        "  1b  0",
+        "  1c  0",
+        "PASS  no orphan revisions on any node"
+    ]
+}
+
+TASK [ravendb_diagnostic] ******************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "size envelope check vs /mnt/c/dev/hub-sink/ansible-ravendb-chaos/scenarios/company-1/RV1/../../../captures/size-baseline-rv1.json:",
+        "  1a      baseline=167903232  current=335675392  growth=+99.9%",
+        "  1b      baseline=302120960  current=335675392  growth=+11.1%",
+        "  1c      baseline=167903232  current=335675392  growth=+99.9%"
+    ]
+}
+
+PLAY [RV-1 step 13 -- phase-4 count-parity sweep (seed + hot + single hot doc)] ***
+
+TASK [ravendb_diagnostic] ******************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "revision-count parity: 10 id(s) across ['1a', '1b', '1c']",
+        "per-id counts (first 10): {'seed/0': [3, 3, 3], 'seed/1': [3, 3, 3], 'seed/2': [2, 2, 2], 'seed/3': [2, 2, 2], 
+                                    'seed/4': [3, 3, 3], 'seed/5': [2, 2, 2], 'seed/6': [4, 4, 4], 'seed/7': [2, 2, 2], 
+                                    'seed/8': [4, 4, 4], 'seed/9': [3, 3, 3]}",
+        "  mismatched: 0",
+        "PASS  per-id revision counts agree across nodes"
+    ]
+}
+
+TASK [ravendb_diagnostic] ******************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "revision-count parity: 10 id(s) across ['1a', '1b', '1c']",
+        "  per-id counts (first 10): {'hot/0': [66, 66, 66], 'hot/1': [67, 67, 67], 'hot/2': [88, 88, 88], 
+                                      'hot/3': [78, 78, 78], 'hot/4': [82, 82, 82], 'hot/5': [52, 52, 52], 
+                                      'hot/6': [73, 73, 73], 'hot/7': [94, 94, 94], 'hot/8': [109, 109, 109], 
+                                      'hot/9': [82, 82, 82]}",
+        "  mismatched: 0",
+        "PASS  per-id revision counts agree across nodes"
+    ]
+}
+
+TASK [ravendb_diagnostic] ******************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "revision-count parity: 1 id(s) across ['1a', '1b', '1c']",
+        "  per-id counts (first 10): {'users/hot': [1111, 1111, 1111]}",
+        "  mismatched: 0",
+        "PASS  per-id revision counts agree across nodes"
+    ]
+}
+
+PLAY [RV-1 step 14 -- final size envelope (informational) + DONE] **************
+
+TASK [ravendb_diagnostic] ******************************************************
+ok: [localhost]
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": [
+        "size envelope check vs /mnt/c/dev/hub-sink/ansible-ravendb-chaos/scenarios/company-1/RV1/../../../captures/size-baseline-rv1.json:",
+        "  1a      baseline=167903232  current=335675392  growth=+99.9%",
+        "  1b      baseline=302120960  current=335675392  growth=+11.1%",
+        "  1c      baseline=167903232  current=335675392  growth=+99.9%"
+    ]
+}
+
+TASK [ansible.builtin.debug] ***************************************************
+ok: [localhost] => {
+    "msg": "RV-1 PASS  cluster=[1a,1b,1c]  db=db1 phase 1 (rolling upgrade + W-1) + phase 2 (W-3 churn races) + phase 3 (W-7 1M-rev single doc) + phase 4 (count-parity sweep) all held.  W-7 reader log: /tmp/w7-reader-1a-db1.log"
+}
+
+PLAY RECAP *********************************************************************
+localhost                  : ok=155  changed=22   unreachable=0    failed=0    skipped=3    rescued=0    ignored=0   
+
+
+[1;36m[20:18:01] RV-1 done[0m
