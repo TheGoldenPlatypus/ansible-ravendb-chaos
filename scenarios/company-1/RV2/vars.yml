@@ -9,28 +9,37 @@ db_name: db1
 src_cluster_id:  1
 tgt_cluster_id:  2
 
-# 9 source nodes, letters a..i.  The 3 shards map to disjoint trios of these nodes.
-src_nodes:   ["1a", "1b", "1c", "1d", "1e", "1f", "1g", "1h", "1i"]
-src_leader:  "1a"
+# 9 source nodes, letters a..i.  Derived from src_cluster_id so parallel runs
+# (-e src_cluster_id=7) get nodes 7a..7i instead of always 1a..1i.
+src_nodes:
+  - "{{ src_cluster_id }}a"
+  - "{{ src_cluster_id }}b"
+  - "{{ src_cluster_id }}c"
+  - "{{ src_cluster_id }}d"
+  - "{{ src_cluster_id }}e"
+  - "{{ src_cluster_id }}f"
+  - "{{ src_cluster_id }}g"
+  - "{{ src_cluster_id }}h"
+  - "{{ src_cluster_id }}i"
+src_leader: "{{ src_cluster_id }}a"
 
-# Per-shard node assignment (matches src_nodes letters A..I).  Each shard has 3 replicas;
-# scenario rolls each shard's replicas one at a time in phase (a).
+# Per-shard node assignment.  Each shard has 3 replicas; phase (a) rolls each shard's
+# replicas one at a time.  The letter buckets are container tags and don't depend on the
+# cluster id.
 shard_topology:
-  "0": ["A", "B", "C"]    # Sx -> 1a, 1b, 1c
-  "1": ["D", "E", "F"]    # Sy -> 1d, 1e, 1f
-  "2": ["G", "H", "I"]    # Sz -> 1g, 1h, 1i
+  "0": ["A", "B", "C"]    # Sx -> <src>a, <src>b, <src>c
+  "1": ["D", "E", "F"]    # Sy -> <src>d, <src>e, <src>f
+  "2": ["G", "H", "I"]    # Sz -> <src>g, <src>h, <src>i
 
 # Per-shard container names (parallel to shard_topology, used by upgrade loops).
 shard_nodes:
-  "0": ["1a", "1b", "1c"]
-  "1": ["1d", "1e", "1f"]
-  "2": ["1g", "1h", "1i"]
+  "0": ["{{ src_cluster_id }}a", "{{ src_cluster_id }}b", "{{ src_cluster_id }}c"]
+  "1": ["{{ src_cluster_id }}d", "{{ src_cluster_id }}e", "{{ src_cluster_id }}f"]
+  "2": ["{{ src_cluster_id }}g", "{{ src_cluster_id }}h", "{{ src_cluster_id }}i"]
 
-# Target: a single v_new node holding a fresh non-sharded DB.  Cluster 2 has 9 nodes
-# provisioned but we only form a 1-node cluster and use 2a for the target -- the other 8
-# stay idle (overprovisioning kept to one knob in run.sh).
-tgt_node:    "2a"
-tgt_leader:  "2a"
+# Target: a single v_new node holding a fresh non-sharded DB.
+tgt_node:   "{{ tgt_cluster_id }}a"
+tgt_leader: "{{ tgt_cluster_id }}a"
 
 # Peer-query map for wait_for_member during the rolling upgrade.  Next-letter wrap within
 # the source cluster.  Build via a single Jinja expression so templated keys actually
