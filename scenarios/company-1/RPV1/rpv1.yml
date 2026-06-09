@@ -1007,9 +1007,21 @@
           - "{{ sink2_id | default(3) }}b"
           - "{{ sink2_id | default(3) }}c"
         require_parity: true
-        db_name: db1
-        cluster_leader: "{{ hub_id | default(1) }}a"
         assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # After the rolling upgrade is complete, confirm the new build's features
+    # actually flipped on for the database.
+    - name: "Endpoint: read DatabaseRecord.SupportedFeatures (via hub leader)"
+      ravendb_diagnostic:
+        kind: supported_features
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
       register: r
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }

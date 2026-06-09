@@ -508,9 +508,21 @@
         ca_cert: "{{ cert_ca_crt }}"
         nodes: "{{ src_nodes }}"
         require_parity: true
-        db_name: db1
-        cluster_leader: "{{ src_leader }}"
         assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # After the rolling upgrade, confirm the new build's features actually
+    # flipped on for the database.
+    - name: Read DatabaseRecord.SupportedFeatures (via src leader)
+      ravendb_diagnostic:
+        kind: supported_features
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ src_leader }}"
+        db_name: db1
       register: r
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
