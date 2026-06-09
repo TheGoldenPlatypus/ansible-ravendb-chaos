@@ -6,8 +6,8 @@
 # ... &) actually started before the scenario moves on to chaos steps.
 #
 # INPUTS:
-#   pidfile  REQUIRED.  Absolute path to the workload's pidfile (e.g. /tmp/w1-1a-db1.pid).
-#   timeout  OPTIONAL.  Default 30 seconds.
+#   pidfile      REQUIRED.  Absolute path to the workload's pidfile (e.g. /tmp/w1-1a-db1.pid).
+#   timeout_secs OPTIONAL.  Default 30 seconds.
 #
 # RUN EXAMPLE:
 #   ansible-playbook toolbox/wait/wait_for_workload_started.yml \
@@ -30,7 +30,7 @@
       ansible.builtin.wait_for:
         path: "{{ pidfile }}"
         state: present
-        timeout: "{{ timeout | default(30) | int }}"
+        timeout: "{{ timeout_secs | default(30) | int }}"
 
     - name: Done
       ansible.builtin.debug:

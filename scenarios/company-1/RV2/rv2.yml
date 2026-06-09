@@ -61,13 +61,15 @@
   gather_facts: false
   vars_files: [vars.yml]
   tasks:
-    - ansible.builtin.assert:
+    - name: Validate inputs
+      ansible.builtin.assert:
         that:
           - v_old is defined
           - v_new_build is defined
         fail_msg: "Required: -e v_old=<6.2.x version> -e v_new_build=<path to v_new .deb>"
 
-    - ansible.builtin.debug:
+    - name: Show RV-2 plan
+      ansible.builtin.debug:
         msg: >-
           RV-2  v_old={{ v_old }}  v_new_build={{ v_new_build }}
           src=[{{ src_nodes | join(',') }}]  tgt={{ tgt_node }}
@@ -93,7 +95,8 @@
         db_name: db1
         shards: "{{ shard_topology }}"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # Default revisions config on the source so the seed's 3-revision history is retained.
     - name: "Configure default revisions on source leader/db1"
@@ -104,7 +107,8 @@
         target: "{{ src_leader }}"
         db_name: db1
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
 - ansible.builtin.import_playbook: ../../../toolbox/db/create_database.yml
   vars: { cluster_leader: "{{ tgt_leader | default('2a') }}", db_name: db1, replication_factor: 1 }
@@ -123,7 +127,8 @@
         target: "{{ tgt_leader }}"
         db_name: db1
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # Seed: 30k docs x 3 revisions on the source leader.  Sharding hashes each docId, so the
     # writes distribute roughly evenly (~10k per shard) without us having to target shards
@@ -141,7 +146,8 @@
         count: "{{ seed_count | default(30000) | int }}"
         revs_per_doc: "{{ seed_revs_per_doc | default(3) | int }}"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
 
 # ----- step 2: phase (a) -- start W-1; sharding spreads its writes across all 3 shards --------
@@ -167,7 +173,7 @@
       poll: 0
 
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
-  vars: { pidfile: "/tmp/w1-{{ src_leader | default('1a') }}-db1.pid", timeout: 30 }
+  vars: { pidfile: "/tmp/w1-{{ src_leader | default('1a') }}-db1.pid", timeout_secs: 30 }
 
 
 # ----- step 3: phase (a) -- upgrade shard Sx one replica at a time (1a, 1b, 1c) + checkpoint --
@@ -204,9 +210,11 @@
         ca_cert: "{{ cert_ca_crt }}"
         nodes: "{{ shard_nodes['0'] }}"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
-    - ansible.builtin.pause:
+    - name: Pause before next shard upgrade
+      ansible.builtin.pause:
         seconds: "{{ upgrade_delay_secs | default(30) | int }}"
       when: (upgrade_delay_secs | default(30) | int) > 0
 
@@ -245,9 +253,11 @@
         ca_cert: "{{ cert_ca_crt }}"
         nodes: "{{ shard_nodes['1'] }}"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
-    - ansible.builtin.pause:
+    - name: Pause before next shard upgrade
+      ansible.builtin.pause:
         seconds: "{{ upgrade_delay_secs | default(30) | int }}"
       when: (upgrade_delay_secs | default(30) | int) > 0
 
@@ -286,7 +296,8 @@
         ca_cert: "{{ cert_ca_crt }}"
         nodes: "{{ shard_nodes['2'] }}"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
 
 # ----- step 6: phase (a) -- stop the writer, drain every shard, run the per-shard asserts -----
@@ -315,7 +326,8 @@
         nodes: "{{ shard_nodes['0'] }}"
         timeout: "{{ drain_budget_secs | default(180) | int }}"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: Drain shard Sy
       ravendb_wait:
@@ -327,7 +339,8 @@
         nodes: "{{ shard_nodes['1'] }}"
         timeout: "{{ drain_budget_secs | default(180) | int }}"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: Drain shard Sz
       ravendb_wait:
@@ -339,7 +352,8 @@
         nodes: "{{ shard_nodes['2'] }}"
         timeout: "{{ drain_budget_secs | default(180) | int }}"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # Tombstone cleanup runs on a per-node timer; without fresh activity it won't converge
     # on its own within 5 minutes, so trigger it explicitly.  The sharded cleanup endpoint
@@ -358,7 +372,8 @@
       loop: "{{ shard_topology | dict2items | subelements('value') }}"
       loop_control:
         label: "shard {{ item.0.key }} via nodeTag={{ item.1 }}"
-    - ansible.builtin.debug:
+    - name: Show tombstones/cleanup result per (shard, replica)
+      ansible.builtin.debug:
         msg: "tombstones/cleanup shard {{ cr.item.0.key }} nodeTag={{ cr.item.1 }} -> HTTP {{ cr.status }}  cleaned={{ (cr.json or {}).Value | default('?') }}"
       loop: "{{ cleanup_results.results }}"
       loop_control:
@@ -380,7 +395,8 @@
         timeout: "{{ tombstone_settle_timeout | default(300) | int }}"
         poll_interval: 3
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: Sy tombstone settle
       ravendb_wait:
@@ -394,7 +410,8 @@
         timeout: "{{ tombstone_settle_timeout | default(300) | int }}"
         poll_interval: 3
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: Sz tombstone settle
       ravendb_wait:
@@ -408,7 +425,8 @@
         timeout: "{{ tombstone_settle_timeout | default(300) | int }}"
         poll_interval: 3
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # /stats parity within each shard -- the three replicas of a shard should agree on
     # everything once the shard is drained.
@@ -422,7 +440,8 @@
         nodes: "{{ shard_nodes['0'] }}"
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: Sy stats parity
       ravendb_diagnostic:
@@ -434,7 +453,8 @@
         nodes: "{{ shard_nodes['1'] }}"
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: Sz stats parity
       ravendb_diagnostic:
@@ -446,7 +466,8 @@
         nodes: "{{ shard_nodes['2'] }}"
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # Per-doc revision-count parity + an orphan-revisions check, per shard.  The sample size
     # is kept small on purpose -- a sparse probe is the only practical way at this scale.
@@ -462,7 +483,8 @@
         count: "{{ parity_probe_count | default(50) | int }}"
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: Sx orphan revisions
       ravendb_diagnostic:
@@ -474,7 +496,8 @@
         nodes: "{{ shard_nodes['0'] }}"
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # Every source node should now report the same new-build schema version.
     - name: All 9 source nodes on v_new (schema parity)
@@ -489,7 +512,8 @@
         cluster_leader: "{{ src_leader }}"
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
 
 # ----- step 7: phase (b) -- export the sharded source to a .ravendbdump file -------------------
@@ -510,7 +534,8 @@
         db_name: db1
         dump_path: "{{ smuggler_dump_path }}"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
 
 # ----- step 8: phase (b) -- import the dump into the non-sharded target ------------------------
@@ -531,7 +556,8 @@
         db_name: db1
         dump_path: "{{ smuggler_dump_path }}"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
 
 # ----- step 9: phase (b) -- source-aggregate vs target parity + check the revision form -------
@@ -554,7 +580,8 @@
         target: "{{ src_leader }}"
         db_name: db1
       register: src_count
-    - ansible.builtin.debug: { msg: "{{ src_count.msg }}" }
+    - name: Show source doc count
+      ansible.builtin.debug: { msg: "{{ src_count.msg }}" }
 
     - name: Target doc count
       ravendb_diagnostic:
@@ -565,7 +592,8 @@
         target: "{{ tgt_leader }}"
         db_name: db1
       register: tgt_count
-    - ansible.builtin.debug: { msg: "{{ tgt_count.msg }}" }
+    - name: Show target doc count
+      ansible.builtin.debug: { msg: "{{ tgt_count.msg }}" }
 
     # Per-doc revision-count parity across the seeded probe set.  Only the target needs to be
     # probed here (the source was already verified per-shard in step 6).  The target's per-doc
@@ -583,7 +611,8 @@
         count: "{{ parity_probe_count | default(50) | int }}"
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # The smuggler import re-keys everything through the public API, so target revisions land
     # in the new build's hashed form regardless of what shape they had on each source shard.
@@ -601,7 +630,8 @@
         expect: split
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
 
 - name: RV-2 -- DONE
@@ -610,7 +640,8 @@
   gather_facts: false
   vars_files: [vars.yml]
   tasks:
-    - ansible.builtin.debug:
+    - name: Show RV-2 PASS banner
+      ansible.builtin.debug:
         msg: >-
           RV-2 PASS  src=[{{ src_nodes | join(',') }}] tgt={{ tgt_node }} db=db1
           phase (a) sharded internal rolling upgrade + phase (b) sharded -> non-sharded

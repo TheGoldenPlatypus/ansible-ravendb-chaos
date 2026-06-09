@@ -58,12 +58,14 @@
   gather_facts: false
   vars_files: [vars.yml]
   tasks:
-    - ansible.builtin.assert:
+    - name: Validate inputs
+      ansible.builtin.assert:
         that:
           - v_new_build is defined
         fail_msg: "Required: -e v_new_build=<path to v_new .deb>"
 
-    - ansible.builtin.debug:
+    - name: Show RV-3 plan
+      ansible.builtin.debug:
         msg: >-
           RV-3  v_new={{ v_new_build }}
           shd-src=[{{ src_sharded_nodes | join(',') }}]
@@ -94,7 +96,8 @@
         target: "{{ nonshd_src_leader }}"
         db_name: db1
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # Half 1 of the mixed-form seed: import the legacy-form fixture (revisions originally
     # written by the old build).  This is REQUIRED -- without it the seed is new-build-only
@@ -104,7 +107,8 @@
       ansible.builtin.stat:
         path: "{{ lookup('env', 'PWD') }}/scenarios/company-1/RV3/fixtures/legacy-revs.ravendbdump"
       register: legacy_fixture
-    - ansible.builtin.assert:
+    - name: Assert legacy-revs fixture present
+      ansible.builtin.assert:
         that: legacy_fixture.stat.exists
         fail_msg: >-
           Missing legacy-revs.ravendbdump fixture.  RV-3 requires a mix of legacy-form and
@@ -121,7 +125,8 @@
         db_name: db1
         dump_path: "{{ lookup('env', 'PWD') }}/scenarios/company-1/RV3/fixtures/legacy-revs.ravendbdump"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # Half 2 of the mixed-form seed: fresh writes on top, which land in the new build's form.
     - name: "Phase (a) seed half 2: write phase_a_seed_prefix/* on 2a/db1 (hashed-form, x revs)"
@@ -137,7 +142,8 @@
         count: "{{ phase_a_seed_count | int }}"
         revs_per_doc: "{{ phase_a_seed_revs_per_doc | int }}"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
 
 # ----- step 2: phase (a) -- dump the non-sharded source to a file on the controller ------------
@@ -158,7 +164,8 @@
         db_name: db1
         dump_path: "{{ phase_a_dump_path }}"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
 
 # ----- step 3: phase (a) -- create the sharded target on cluster 3 and import the dump --------
@@ -179,7 +186,8 @@
         db_name: db1
         shards: "{{ shard_topology }}"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Phase (a) configure default revisions on sharded import target"
       ravendb_revisions:
@@ -189,7 +197,8 @@
         target: "{{ sharded_tgt_leader }}"
         db_name: db1
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Phase (a) smuggler-import phase_a_dump into sharded target cluster 3"
       ravendb_smuggler:
@@ -201,7 +210,8 @@
         db_name: db1
         dump_path: "{{ phase_a_dump_path }}"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
 
 # ----- step 4: phase (a) checkpoint -- non-sharded source vs sharded target agree ---------------
@@ -226,7 +236,8 @@
         nodes: "{{ shard_nodes_tgt['0'] }}"
         timeout: "{{ drain_budget_secs | default(180) | int }}"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: Drain sharded target Sy
       ravendb_wait:
@@ -238,7 +249,8 @@
         nodes: "{{ shard_nodes_tgt['1'] }}"
         timeout: "{{ drain_budget_secs | default(180) | int }}"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: Drain sharded target Sz
       ravendb_wait:
@@ -250,7 +262,8 @@
         nodes: "{{ shard_nodes_tgt['2'] }}"
         timeout: "{{ drain_budget_secs | default(180) | int }}"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # Doc-count parity between the non-sharded source and the sharded target.
     # /stats on the sharded leader transparently aggregates the per-shard totals.
@@ -263,7 +276,8 @@
         target: "{{ nonshd_src_leader }}"
         db_name: db1
       register: phase_a_src_count
-    - ansible.builtin.debug: { msg: "{{ phase_a_src_count.msg }}" }
+    - name: Show phase (a) source doc count
+      ansible.builtin.debug: { msg: "{{ phase_a_src_count.msg }}" }
 
     - name: Target (sharded aggregate) doc count
       ravendb_diagnostic:
@@ -274,7 +288,8 @@
         target: "{{ sharded_tgt_leader }}"
         db_name: db1
       register: phase_a_tgt_count
-    - ansible.builtin.debug: { msg: "{{ phase_a_tgt_count.msg }}" }
+    - name: Show phase (a) target doc count
+      ansible.builtin.debug: { msg: "{{ phase_a_tgt_count.msg }}" }
 
     - name: Assert phase (a) doc count parity (smuggler routes every doc -- exact match)
       ansible.builtin.assert:
@@ -297,7 +312,8 @@
         count: "{{ parity_probe_count | int }}"
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # Revision-form check: the smuggler import re-keys everything through the public API,
     # so revisions on the target should all be in the new build's hashed form.
@@ -313,7 +329,8 @@
         expect: split
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
 
 # ----- step 5: phase (b) -- create the sharded source on cluster 1 and seed it mixed-form ------
@@ -334,7 +351,8 @@
         db_name: db1
         shards: "{{ shard_topology }}"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Phase (b) configure default revisions on sharded source cluster 1"
       ravendb_revisions:
@@ -344,7 +362,8 @@
         target: "{{ src_sharded_leader }}"
         db_name: db1
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # Same mixed-form recipe as phase (a): legacy fixture first, then fresh writes.  The
     # fixture's existence was already asserted in step 1.
@@ -358,7 +377,8 @@
         db_name: db1
         dump_path: "{{ lookup('env', 'PWD') }}/scenarios/company-1/RV3/fixtures/legacy-revs.ravendbdump"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Phase (b) seed half 2: write phase_b_seed_prefix/* on sharded source (hashed-form, x revs)"
       ravendb_writes:
@@ -373,7 +393,8 @@
         count: "{{ phase_b_seed_count | int }}"
         revs_per_doc: "{{ phase_b_seed_revs_per_doc | int }}"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
 
 # ----- step 6: phase (b) -- create the ETL target db and wire up Raven-ETL from source to it ---
@@ -401,7 +422,8 @@
         target: "{{ etl_tgt_leader }}"
         db_name: db1
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Phase (b) configure Raven-ETL task on sharded source -> ETL target cluster 4"
       ravendb_tasks:
@@ -417,7 +439,8 @@
           - "https://{{ etl_tgt_leader }}.{{ ravendb_domain }}:443"
         connection_string_name: "{{ etl_connection_string }}"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
 
 # ----- step 7: phase (b) -- run W-1 against the sharded source while ETL drains in the back ----
@@ -444,7 +467,7 @@
       poll: 0
 
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
-  vars: { pidfile: "/tmp/w1-{{ src_sharded_leader | default('1a') }}-db1.pid", timeout: 30 }
+  vars: { pidfile: "/tmp/w1-{{ src_sharded_leader | default('1a') }}-db1.pid", timeout_secs: 30 }
 
 # Catch the "launched but immediately crashed" case.  Without this check, the wait-for-finish
 # in step 8 would see an empty pidfile (from the crashed process cleaning up) and report
@@ -476,7 +499,8 @@
         echo "TIMEOUT after {{ phase_b_w1_duration_secs | int + 300 }}s"; exit 124
       register: w1_poll
       changed_when: false
-    - ansible.builtin.debug: { msg: "W-1 status: {{ w1_poll.stdout }}" }
+    - name: Show W-1 status
+      ansible.builtin.debug: { msg: "W-1 status: {{ w1_poll.stdout }}" }
 
     # Wait until the ETL target's doc count catches up to the sharded source's aggregate.
     # The wait module's doc_count_match kind uses the same sharded-aware aggregator as the
@@ -494,7 +518,8 @@
         target_db_name: db1
         timeout: "{{ etl_drain_budget_secs | int }}"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
 
 # ----- step 9: phase (b) -- dump the source at the drained moment + restore into cluster 5 -----
@@ -518,7 +543,8 @@
         nodes: "{{ shard_nodes_src['0'] }}"
         timeout: "{{ drain_budget_secs | default(180) | int }}"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: Drain source shard Sy
       ravendb_wait:
@@ -530,7 +556,8 @@
         nodes: "{{ shard_nodes_src['1'] }}"
         timeout: "{{ drain_budget_secs | default(180) | int }}"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: Drain source shard Sz
       ravendb_wait:
@@ -542,7 +569,8 @@
         nodes: "{{ shard_nodes_src['2'] }}"
         timeout: "{{ drain_budget_secs | default(180) | int }}"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # No tombstone-cleanup trigger here on purpose.  Triggering cleanup while ETL is live
     # creates per-replica drift: the ETL mentor advances its consumer checkpoint while its
@@ -564,7 +592,8 @@
         db_name: db1
         dump_path: "{{ phase_b_dump_path }}"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: Create backup-comparison target db1
       ansible.builtin.command:
@@ -585,7 +614,8 @@
         db_name: db1
         dump_path: "{{ phase_b_dump_path }}"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
 
 # ----- step 10: phase (b) 3-way cross-check -- source aggregate, ETL target, restored copy -----
@@ -605,7 +635,8 @@
         target: "{{ src_sharded_leader }}"
         db_name: db1
       register: shd_src_count
-    - ansible.builtin.debug: { msg: "{{ shd_src_count.msg }}" }
+    - name: Show sharded source aggregate doc count
+      ansible.builtin.debug: { msg: "{{ shd_src_count.msg }}" }
 
     - name: ETL target doc count
       ravendb_diagnostic:
@@ -616,7 +647,8 @@
         target: "{{ etl_tgt_leader }}"
         db_name: db1
       register: etl_count
-    - ansible.builtin.debug: { msg: "{{ etl_count.msg }}" }
+    - name: Show ETL target doc count
+      ansible.builtin.debug: { msg: "{{ etl_count.msg }}" }
 
     - name: Backup-restored comparison target doc count
       ravendb_diagnostic:
@@ -627,7 +659,8 @@
         target: "{{ bkp_cmp_leader }}"
         db_name: db1
       register: bkp_count
-    - ansible.builtin.debug: { msg: "{{ bkp_count.msg }}" }
+    - name: Show backup-restored target doc count
+      ansible.builtin.debug: { msg: "{{ bkp_count.msg }}" }
 
     - name: Extract integer counts from the three msgs
       ansible.builtin.set_fact:
@@ -646,36 +679,26 @@
         success_msg: >-
           3-WAY CROSS-CHECK PASS  src=etl=bkp={{ src_n }}
 
-    # Per-doc revision-count parity on both the ETL target and the backup-restored target
-    # (sampled probe set).  If doc counts match but per-doc revision counts disagree,
-    # that's an ETL or smuggler bug worth investigating.
-    - name: Per-doc revision count parity on the ETL target (sampled)
+    # Per-doc revision-count parity ACROSS the ETL target and the backup-restored target
+    # (sampled probe set).  Doc counts already matched above; this checks revisions.
+    # Note: Raven ETL by default doesn't carry revisions -- if this fails with ETL showing
+    # [0] while bkp-cmp shows the actual rev counts, the ETL task config needs revisions
+    # enabled, OR Karmel's spec needs to be updated to acknowledge ETL-revisions are
+    # intentionally not part of the 3-way equality.
+    - name: Per-doc revision-count parity ETL tgt vs bkp-cmp tgt (must match)
       ravendb_diagnostic:
         kind: revision_count_parity
         ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
         ca_cert: "{{ cert_ca_crt }}"
         db_name: db1
-        nodes: ["{{ etl_tgt_leader }}"]
+        nodes: ["{{ etl_tgt_leader }}", "{{ bkp_cmp_leader }}"]
         id_prefix: "{{ phase_b_seed_prefix }}"
         count: "{{ parity_probe_count | int }}"
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
-
-    - name: Per-doc revision count parity on the bkp-cmp target (sampled)
-      ravendb_diagnostic:
-        kind: revision_count_parity
-        ravendb_domain: "{{ ravendb_domain }}"
-        client_cert: "{{ cert_dir }}/client.pem"
-        ca_cert: "{{ cert_ca_crt }}"
-        db_name: db1
-        nodes: ["{{ bkp_cmp_leader }}"]
-        id_prefix: "{{ phase_b_seed_prefix }}"
-        count: "{{ parity_probe_count | int }}"
-        assert_mode: true
-      register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
 
 - name: RV-3 -- DONE
@@ -684,7 +707,8 @@
   gather_facts: false
   vars_files: [vars.yml]
   tasks:
-    - ansible.builtin.debug:
+    - name: Show RV-3 PASS banner
+      ansible.builtin.debug:
         msg: >-
           RV-3 PASS  shd-src=[{{ src_sharded_nodes | join(',') }}]  non-src={{ nonshd_src_node }}
           shd-tgt=[{{ sharded_tgt_nodes | join(',') }}]

@@ -143,7 +143,8 @@
           Orders:   { keep: 50, max_age_secs: 7200 }
           Internal: { keep: 25, max_age_secs: 21600 }
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Configure per-collection revisions on sink-1 2a/db1 (Users/Orders/Internal)"
       ravendb_revisions:
@@ -157,7 +158,8 @@
           Orders:   { keep: 50, max_age_secs: 7200 }
           Internal: { keep: 25, max_age_secs: 21600 }
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Configure per-collection revisions on sink-2 3a/db1 (Users/Orders/Internal)"
       ravendb_revisions:
@@ -171,7 +173,8 @@
           Orders:   { keep: 50, max_age_secs: 7200 }
           Internal: { keep: 25, max_age_secs: 21600 }
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
 
 # ----- step 2: wire the filtered pull-replication from the hub down to both sinks ------------
@@ -206,7 +209,8 @@
           }}
         replication_certs_dir: "{{ playbook_dir }}/../../../replication-certs"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Attach sink-1 + sink-2 pull tasks to hub topology"
       ravendb_tasks:
@@ -232,7 +236,8 @@
           }}
         replication_certs_dir: "{{ playbook_dir }}/../../../replication-certs"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
 
 # ----- step 3: seed the hub with seven prefix buckets and wait for the filter to drain --------
@@ -244,7 +249,7 @@
   vars_files: [vars.yml]
   tasks:
     # Users collection -- 3 buckets
-    - name: "Seed users/sink1/* on hub 1a/db1 (count=bucket_users_sink1, 1 rev)"
+    - name: "Seed users/sink1/* on hub 1a/db1 (count={{ bucket_users_sink1 }}, 1 rev)"
       ravendb_writes:
         kind: docs_revisions
         ravendb_domain: "{{ ravendb_domain }}"
@@ -257,9 +262,10 @@
         count: "{{ bucket_users_sink1 | default(2000) | int }}"
         revs_per_doc: 1
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
-    - name: "Seed users/sink2/* on hub 1a/db1 (count=bucket_users_sink2, 1 rev)"
+    - name: "Seed users/sink2/* on hub 1a/db1 (count={{ bucket_users_sink2 }}, 1 rev)"
       ravendb_writes:
         kind: docs_revisions
         ravendb_domain: "{{ ravendb_domain }}"
@@ -272,9 +278,10 @@
         count: "{{ bucket_users_sink2 | default(2000) | int }}"
         revs_per_doc: 1
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
-    - name: "Seed users/hub/* on hub 1a/db1 (count=bucket_users_hub, 1 rev)"
+    - name: "Seed users/hub/* on hub 1a/db1 (count={{ bucket_users_hub }}, 1 rev)"
       ravendb_writes:
         kind: docs_revisions
         ravendb_domain: "{{ ravendb_domain }}"
@@ -287,10 +294,11 @@
         count: "{{ bucket_users_hub | default(2000) | int }}"
         revs_per_doc: 1
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # Orders collection -- 3 buckets
-    - name: "Seed orders/sink1/* on hub 1a/db1 (count=bucket_orders_sink1, 1 rev)"
+    - name: "Seed orders/sink1/* on hub 1a/db1 (count={{ bucket_orders_sink1 }}, 1 rev)"
       ravendb_writes:
         kind: docs_revisions
         ravendb_domain: "{{ ravendb_domain }}"
@@ -303,9 +311,10 @@
         count: "{{ bucket_orders_sink1 | default(2000) | int }}"
         revs_per_doc: 1
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
-    - name: "Seed orders/sink2/* on hub 1a/db1 (count=bucket_orders_sink2, 1 rev)"
+    - name: "Seed orders/sink2/* on hub 1a/db1 (count={{ bucket_orders_sink2 }}, 1 rev)"
       ravendb_writes:
         kind: docs_revisions
         ravendb_domain: "{{ ravendb_domain }}"
@@ -318,9 +327,10 @@
         count: "{{ bucket_orders_sink2 | default(2000) | int }}"
         revs_per_doc: 1
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
-    - name: "Seed orders/hub/* on hub 1a/db1 (count=bucket_orders_hub, 1 rev)"
+    - name: "Seed orders/hub/* on hub 1a/db1 (count={{ bucket_orders_hub }}, 1 rev)"
       ravendb_writes:
         kind: docs_revisions
         ravendb_domain: "{{ ravendb_domain }}"
@@ -333,10 +343,11 @@
         count: "{{ bucket_orders_hub | default(2000) | int }}"
         revs_per_doc: 1
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # Internal collection
-    - name: "Seed Internal/* on hub 1a/db1 (count=bucket_internal, 1 rev)"
+    - name: "Seed Internal/* on hub 1a/db1 (count={{ bucket_internal }}, 1 rev)"
       ravendb_writes:
         kind: docs_revisions
         ravendb_domain: "{{ ravendb_domain }}"
@@ -349,7 +360,8 @@
         count: "{{ bucket_internal | default(3000) | int }}"
         revs_per_doc: 1
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # Wait for Hub itself to settle
     - name: "Wait for hub a/b/c quiescence after seed"
@@ -362,7 +374,8 @@
         nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
         timeout: "{{ quiesce_budget_secs | default(1200) | int }}"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # Confirm the filtered pull is actually flowing: a marker document under each sink's
     # allowed prefix should make it from the hub to that sink's cluster.
@@ -378,7 +391,8 @@
         marker_id_prefix: "users/sink1/marker-"
         timeout: "{{ filter_drain_budget_secs | default(600) | int }}"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Wait for users/sink2/marker-* propagation hub -> sink-2 a/b/c"
       ravendb_wait:
@@ -392,7 +406,8 @@
         marker_id_prefix: "users/sink2/marker-"
         timeout: "{{ filter_drain_budget_secs | default(600) | int }}"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
 
 # ----- step 4: baseline checkpoint while the topology is still quiet on the old binary -------
@@ -415,7 +430,8 @@
         allowed_prefixes: ["users/sink1/", "orders/sink1/"]
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "T0: assert filter compliance on sink-2 (allowed users/sink2/, orders/sink2/)"
       ravendb_diagnostic:
@@ -428,7 +444,8 @@
         allowed_prefixes: ["users/sink2/", "orders/sink2/"]
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # All 9 nodes should still be on the old binary at this point.
     - name: "T0: dump schema version on all 9 nodes (expect all v_old)"
@@ -448,7 +465,8 @@
           - "{{ sink2_id | default(3) }}b"
           - "{{ sink2_id | default(3) }}c"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # Sink-routed buckets have to be present on the matching sink.
     - name: "T0: assert users/sink1 doc-id-set parity across sink-1 a/b/c"
@@ -463,7 +481,8 @@
         count: "{{ parity_probe_count | default(50) | int }}"
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "T0: assert users/sink2 doc-id-set parity across sink-2 a/b/c"
       ravendb_diagnostic:
@@ -477,7 +496,8 @@
         count: "{{ parity_probe_count | default(50) | int }}"
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # One /stats parity check per cluster while everything is still quiet.
     - name: "T0: assert /stats parity across hub a/b/c"
@@ -490,7 +510,8 @@
         nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "T0: assert /stats parity across sink-1 a/b/c"
       ravendb_diagnostic:
@@ -502,7 +523,8 @@
         nodes: ["{{ sink1_id | default(2) }}a", "{{ sink1_id | default(2) }}b", "{{ sink1_id | default(2) }}c"]
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "T0: assert /stats parity across sink-2 a/b/c"
       ravendb_diagnostic:
@@ -514,7 +536,8 @@
         nodes: ["{{ sink2_id | default(3) }}a", "{{ sink2_id | default(3) }}b", "{{ sink2_id | default(3) }}c"]
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
 
 # ----- step 5: start the two background hub-side workloads that run through the upgrade ------
@@ -554,12 +577,12 @@
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
   vars:
     pidfile: "/tmp/w1-{{ hub_id | default(1) }}a-db1.pid"
-    timeout: 30
+    timeout_secs: 30
 
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
   vars:
     pidfile: "/tmp/w2-{{ hub_id | default(1) }}a-db1.pid"
-    timeout: 30
+    timeout_secs: 30
 
 
 # ----- step 6: upgrade the first batch of three nodes (default variant A: sink-1) ------------
@@ -570,7 +593,8 @@
   gather_facts: false
   vars_files: [vars.yml]
   tasks:
-    - ansible.builtin.debug:
+    - name: Announce upgrade step 1 banner
+      ansible.builtin.debug:
         msg: "==== step 6 -- upgrade step 1 ({{ upgrade_step_1 }}) ===="
 
     - name: Upgrade each node + wait for member
@@ -615,7 +639,8 @@
         marker_id_prefix: "users/sink1/marker-"
         timeout: 120
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Checkpoint A: wait for users/sink2/marker-* propagation hub -> sink-2 a/b/c"
       ravendb_wait:
@@ -629,7 +654,8 @@
         marker_id_prefix: "users/sink2/marker-"
         timeout: 120
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # Mixed binaries are expected here -- the first batch is on the new binary, the other
     # two batches are still on the old one.
@@ -650,7 +676,8 @@
           - "{{ sink2_id | default(3) }}b"
           - "{{ sink2_id | default(3) }}c"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # Filter compliance on each sink -- catches a routing regression introduced by the upgrade.
     - name: "Checkpoint A: assert filter compliance on sink-1"
@@ -664,7 +691,8 @@
         allowed_prefixes: ["users/sink1/", "orders/sink1/"]
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Checkpoint A: assert filter compliance on sink-2"
       ravendb_diagnostic:
@@ -677,7 +705,8 @@
         allowed_prefixes: ["users/sink2/", "orders/sink2/"]
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # No documents belonging to one sink should ever show up on the other sink.
     - name: "Checkpoint A: assert cross-sink isolation on sink-1 (no users/sink2 or orders/sink2)"
@@ -691,7 +720,8 @@
         forbidden_prefixes: ["users/sink2/", "orders/sink2/"]
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Checkpoint A: assert cross-sink isolation on sink-2 (no users/sink1 or orders/sink1)"
       ravendb_diagnostic:
@@ -704,7 +734,8 @@
         forbidden_prefixes: ["users/sink1/", "orders/sink1/"]
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # Check the just-upgraded nodes are still quiet on the legacy change-vector lane (no
     # rows showing the new '|' delimiter on samples from any of the seven buckets).
@@ -719,7 +750,8 @@
         id_prefixes: ["users/sink1", "orders/sink1", "users/sink2", "orders/sink2", "users/hub", "orders/hub", "Internal"]
         sample_per_prefix: "{{ lane_inert_sample_per_prefix | default(25) | int }}"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
 
 # ----- step 8: upgrade the second batch of three nodes (default variant A: the hub) ----------
@@ -730,7 +762,8 @@
   gather_facts: false
   vars_files: [vars.yml]
   tasks:
-    - ansible.builtin.debug:
+    - name: Announce upgrade step 2 banner
+      ansible.builtin.debug:
         msg: "==== step 8 -- upgrade step 2 ({{ upgrade_step_2 }}) ===="
 
     - name: Upgrade each node + wait for member
@@ -773,7 +806,8 @@
         marker_id_prefix: "users/sink1/marker-"
         timeout: 120
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Checkpoint B: wait for users/sink2/marker-* propagation hub -> sink-2 a/b/c"
       ravendb_wait:
@@ -787,7 +821,8 @@
         marker_id_prefix: "users/sink2/marker-"
         timeout: 120
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Checkpoint B: dump schema version on all 9 nodes (mixed binaries expected)"
       ravendb_diagnostic:
@@ -806,7 +841,8 @@
           - "{{ sink2_id | default(3) }}b"
           - "{{ sink2_id | default(3) }}c"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Checkpoint B: assert filter compliance on sink-1"
       ravendb_diagnostic:
@@ -819,7 +855,8 @@
         allowed_prefixes: ["users/sink1/", "orders/sink1/"]
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Checkpoint B: assert filter compliance on sink-2"
       ravendb_diagnostic:
@@ -832,7 +869,8 @@
         allowed_prefixes: ["users/sink2/", "orders/sink2/"]
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Checkpoint B: assert cross-sink isolation on sink-1"
       ravendb_diagnostic:
@@ -845,7 +883,8 @@
         forbidden_prefixes: ["users/sink2/", "orders/sink2/"]
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Checkpoint B: assert cross-sink isolation on sink-2"
       ravendb_diagnostic:
@@ -858,7 +897,8 @@
         forbidden_prefixes: ["users/sink1/", "orders/sink1/"]
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # Same legacy-lane check, but now across every node that has been upgraded so far
     # (the union of the first two batches).
@@ -873,7 +913,8 @@
         id_prefixes: ["users/sink1", "orders/sink1", "users/sink2", "orders/sink2", "users/hub", "orders/hub", "Internal"]
         sample_per_prefix: "{{ lane_inert_sample_per_prefix | default(25) | int }}"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
 
 # ----- step 10: upgrade the final batch of three nodes (default variant A: sink-2) -----------
@@ -884,7 +925,8 @@
   gather_facts: false
   vars_files: [vars.yml]
   tasks:
-    - ansible.builtin.debug:
+    - name: Announce upgrade step 3 banner
+      ansible.builtin.debug:
         msg: "==== step 10 -- upgrade step 3 ({{ upgrade_step_3 }}) ===="
 
     - name: Upgrade each node + wait for member
@@ -929,7 +971,8 @@
         marker_id_prefix: "users/sink1/marker-"
         timeout: 120
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Endpoint: wait for users/sink2/marker-* propagation hub -> sink-2 a/b/c"
       ravendb_wait:
@@ -943,7 +986,8 @@
         marker_id_prefix: "users/sink2/marker-"
         timeout: 120
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # Every node should now report the new binary version.
     - name: "Endpoint: assert schema version parity across all 9 nodes (all v_new)"
@@ -967,7 +1011,8 @@
         cluster_leader: "{{ hub_id | default(1) }}a"
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # Filter compliance still holds.
     - name: "Endpoint: assert filter compliance on sink-1"
@@ -981,7 +1026,8 @@
         allowed_prefixes: ["users/sink1/", "orders/sink1/"]
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Endpoint: assert filter compliance on sink-2"
       ravendb_diagnostic:
@@ -994,7 +1040,8 @@
         allowed_prefixes: ["users/sink2/", "orders/sink2/"]
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # No cross-sink leak at the endpoint either.
     - name: "Endpoint: assert cross-sink isolation on sink-1"
@@ -1008,7 +1055,8 @@
         forbidden_prefixes: ["users/sink2/", "orders/sink2/"]
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Endpoint: assert cross-sink isolation on sink-2"
       ravendb_diagnostic:
@@ -1021,7 +1069,8 @@
         forbidden_prefixes: ["users/sink1/", "orders/sink1/"]
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # NOTE: no legacy-lane check at the endpoint.  The legacy-lane check only matters while
     # there are mixed-binary connections; at this point everything is on the new binary so
@@ -1039,7 +1088,8 @@
         receiver_nodes: ["{{ sink1_id | default(2) }}a", "{{ sink1_id | default(2) }}b", "{{ sink1_id | default(2) }}c"]
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Endpoint I-13b: assert CV-boundary order-side hub -> sink-2"
       ravendb_diagnostic:
@@ -1052,7 +1102,8 @@
         receiver_nodes: ["{{ sink2_id | default(3) }}a", "{{ sink2_id | default(3) }}b", "{{ sink2_id | default(3) }}c"]
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
 
 # ----- step 12: stop the workloads, wait for everything to drain, and run the strict asserts -
@@ -1088,7 +1139,8 @@
         nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
         timeout: "{{ quiesce_budget_secs | default(1200) | int }}"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Final: wait for etag parity across sink-1 a/b/c (quiet drain)"
       ravendb_wait:
@@ -1100,7 +1152,8 @@
         nodes: ["{{ sink1_id | default(2) }}a", "{{ sink1_id | default(2) }}b", "{{ sink1_id | default(2) }}c"]
         timeout: "{{ quiesce_budget_secs | default(1200) | int }}"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Final: wait for etag parity across sink-2 a/b/c (quiet drain)"
       ravendb_wait:
@@ -1112,7 +1165,8 @@
         nodes: ["{{ sink2_id | default(3) }}a", "{{ sink2_id | default(3) }}b", "{{ sink2_id | default(3) }}c"]
         timeout: "{{ quiesce_budget_secs | default(1200) | int }}"
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # Per-cluster tombstone convergence -- background cleanup runs on its own timer, so we
     # wait until the per-node tombstone counts have settled before we assert on them.
@@ -1128,7 +1182,8 @@
         timeout: "{{ tombstone_settle_timeout_secs | default(300) | int }}"
         poll_interval: 3
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Final: wait for tombstone-count convergence across sink-1 a/b/c"
       ravendb_wait:
@@ -1142,7 +1197,8 @@
         timeout: "{{ tombstone_settle_timeout_secs | default(300) | int }}"
         poll_interval: 3
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Final: wait for tombstone-count convergence across sink-2 a/b/c"
       ravendb_wait:
@@ -1156,7 +1212,8 @@
         timeout: "{{ tombstone_settle_timeout_secs | default(300) | int }}"
         poll_interval: 3
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # Per-cluster /stats parity now that everything is quiet.
     - name: "Final: assert /stats parity across hub a/b/c (I-1+I-5+I-6)"
@@ -1169,7 +1226,8 @@
         nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Final: assert /stats parity across sink-1 a/b/c"
       ravendb_diagnostic:
@@ -1181,7 +1239,8 @@
         nodes: ["{{ sink1_id | default(2) }}a", "{{ sink1_id | default(2) }}b", "{{ sink1_id | default(2) }}c"]
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Final: assert /stats parity across sink-2 a/b/c"
       ravendb_diagnostic:
@@ -1193,7 +1252,8 @@
         nodes: ["{{ sink2_id | default(3) }}a", "{{ sink2_id | default(3) }}b", "{{ sink2_id | default(3) }}c"]
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # Per-bucket revision-count parity -- each bucket is checked on its owning cluster --
     # plus an orphan-revisions sweep on the hub.
@@ -1209,7 +1269,8 @@
         count: "{{ parity_probe_count | default(50) | int }}"
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Final: assert revision-count parity for orders/hub/* across hub a/b/c"
       ravendb_diagnostic:
@@ -1223,7 +1284,8 @@
         count: "{{ parity_probe_count | default(50) | int }}"
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Final: assert revision-count parity for Internal/* across hub a/b/c"
       ravendb_diagnostic:
@@ -1237,7 +1299,8 @@
         count: "{{ parity_probe_count | default(50) | int }}"
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Final: assert revision-count parity for users/sink1/* across sink-1 a/b/c"
       ravendb_diagnostic:
@@ -1251,7 +1314,8 @@
         count: "{{ parity_probe_count | default(50) | int }}"
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Final: assert revision-count parity for orders/sink1/* across sink-1 a/b/c"
       ravendb_diagnostic:
@@ -1265,7 +1329,8 @@
         count: "{{ parity_probe_count | default(50) | int }}"
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Final: assert revision-count parity for users/sink2/* across sink-2 a/b/c"
       ravendb_diagnostic:
@@ -1279,7 +1344,8 @@
         count: "{{ parity_probe_count | default(50) | int }}"
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Final: assert revision-count parity for orders/sink2/* across sink-2 a/b/c"
       ravendb_diagnostic:
@@ -1293,7 +1359,8 @@
         count: "{{ parity_probe_count | default(50) | int }}"
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Final: assert no orphan revisions on hub a/b/c (I-4)"
       ravendb_diagnostic:
@@ -1305,7 +1372,8 @@
         nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # Per-bucket doc-id-set parity: each of the seven buckets is checked on the cluster
     # that owns it.
@@ -1321,7 +1389,8 @@
         count: "{{ parity_probe_count | default(50) | int }}"
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Final: assert orders/sink1 doc-id-set parity across sink-1 a/b/c"
       ravendb_diagnostic:
@@ -1335,7 +1404,8 @@
         count: "{{ parity_probe_count | default(50) | int }}"
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Final: assert users/sink2 doc-id-set parity across sink-2 a/b/c"
       ravendb_diagnostic:
@@ -1349,7 +1419,8 @@
         count: "{{ parity_probe_count | default(50) | int }}"
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Final: assert orders/sink2 doc-id-set parity across sink-2 a/b/c"
       ravendb_diagnostic:
@@ -1363,7 +1434,8 @@
         count: "{{ parity_probe_count | default(50) | int }}"
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Final: assert users/hub doc-id-set parity across hub a/b/c"
       ravendb_diagnostic:
@@ -1377,7 +1449,8 @@
         count: "{{ parity_probe_count | default(50) | int }}"
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Final: assert orders/hub doc-id-set parity across hub a/b/c"
       ravendb_diagnostic:
@@ -1391,7 +1464,8 @@
         count: "{{ parity_probe_count | default(50) | int }}"
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Final: assert Internal doc-id-set parity across hub a/b/c"
       ravendb_diagnostic:
@@ -1405,7 +1479,8 @@
         count: "{{ parity_probe_count | default(50) | int }}"
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # Filter compliance on each sink at the very end.
     - name: "Final: assert filter compliance on sink-1"
@@ -1419,7 +1494,8 @@
         allowed_prefixes: ["users/sink1/", "orders/sink1/"]
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Final: assert filter compliance on sink-2"
       ravendb_diagnostic:
@@ -1432,7 +1508,8 @@
         allowed_prefixes: ["users/sink2/", "orders/sink2/"]
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # No documents belonging to one sink should ever show up on the other sink.
     - name: "Final: assert cross-sink isolation on sink-1"
@@ -1446,7 +1523,8 @@
         forbidden_prefixes: ["users/sink2/", "orders/sink2/"]
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     - name: "Final: assert cross-sink isolation on sink-2"
       ravendb_diagnostic:
@@ -1459,7 +1537,8 @@
         forbidden_prefixes: ["users/sink1/", "orders/sink1/"]
         assert_mode: true
       register: r
-    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
 
 - name: RPV-1 -- DONE
@@ -1468,7 +1547,8 @@
   gather_facts: false
   vars_files: [vars.yml]
   tasks:
-    - ansible.builtin.debug:
+    - name: Show RPV-1 PASS banner
+      ansible.builtin.debug:
         msg: >-
           RPV-1 PASS  hub=[{{ hub_id | default(1) }}a,{{ hub_id | default(1) }}b,{{ hub_id | default(1) }}c]
           sink-1=[{{ sink1_id | default(2) }}a,{{ sink1_id | default(2) }}b,{{ sink1_id | default(2) }}c]
