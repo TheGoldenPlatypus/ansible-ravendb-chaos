@@ -16,7 +16,12 @@ def k_docs(p):
     count = p["count"]
     body_tag = p["body_tag"]
 
-    ok = 0
+    if not count or count < 1:
+        raise ValueError("kind=docs requires `count` >= 1 (got %r) -- "
+                         "writing 0 docs and reporting success would be a vacuous PASS"
+                         % count)
+
+    failures = []
     for n in range(count):
         doc_id = "%s/%d" % (prefix, n)
         path = "/databases/%s/docs?id=%s" % (db, quote(doc_id))
@@ -27,12 +32,16 @@ def k_docs(p):
             body["tag"] = body_tag
         status, _ = request("PUT", target, p["ravendb_domain"], path,
                             p["client_cert"], p["ca_cert"], body=body)
-        if status in (200, 201):
-            ok += 1
+        if status not in (200, 201):
+            failures.append("%s -> HTTP %s" % (doc_id, status))
+
+    if failures:
+        raise RuntimeError("k_docs: %d/%d PUTs failed on %s/%s: %s" %
+                           (len(failures), count, target, db, failures[:10]))
 
     suffix = ", body_tag='%s'" % body_tag if body_tag else ""
     return "WROTE %d/%d docs to %s/%s (id prefix '%s'%s)" % (
-        ok, count, target, db, prefix, suffix)
+        count, count, target, db, prefix, suffix)
 
 
 def k_docs_freeform(p):
@@ -40,7 +49,10 @@ def k_docs_freeform(p):
     db = p["db_name"]
     count = p["count"]
 
-    ok = 0
+    if not count or count < 1:
+        raise ValueError("kind=docs_freeform requires `count` >= 1 (got %r)" % count)
+
+    failures = []
     for n in range(count):
         doc_id = uuid.uuid4().hex
         path = "/databases/%s/docs?id=%s" % (db, doc_id)
@@ -50,11 +62,15 @@ def k_docs_freeform(p):
         }
         status, _ = request("PUT", target, p["ravendb_domain"], path,
                             p["client_cert"], p["ca_cert"], body=body)
-        if status in (200, 201):
-            ok += 1
+        if status not in (200, 201):
+            failures.append("%s -> HTTP %s" % (doc_id, status))
+
+    if failures:
+        raise RuntimeError("k_docs_freeform: %d/%d PUTs failed on %s/%s: %s" %
+                           (len(failures), count, target, db, failures[:10]))
 
     return "WROTE %d/%d freeform docs (random uuid ids) to %s/%s" % (
-        ok, count, target, db)
+        count, count, target, db)
 
 
 def k_docs_revisions(p):
@@ -64,9 +80,14 @@ def k_docs_revisions(p):
     revs = p["revs_per_doc"]
     prefix = p["id_prefix"] or "seed"
     collection = p["collection"] or "MicroDocs"
-    total = count * revs
 
-    ok = 0
+    if not count or count < 1:
+        raise ValueError("kind=docs_revisions requires `count` >= 1 (got %r)" % count)
+    if not revs or revs < 1:
+        raise ValueError("kind=docs_revisions requires `revs_per_doc` >= 1 (got %r)" % revs)
+
+    total = count * revs
+    failures = []
     for v in range(1, revs + 1):
         for n in range(count):
             doc_id = "%s/%d" % (prefix, n)
@@ -78,12 +99,16 @@ def k_docs_revisions(p):
             }
             status, _ = request("PUT", target, p["ravendb_domain"], path,
                                 p["client_cert"], p["ca_cert"], body=body)
-            if status in (200, 201):
-                ok += 1
+            if status not in (200, 201):
+                failures.append("%s rev=%d -> HTTP %s" % (doc_id, v, status))
+
+    if failures:
+        raise RuntimeError("k_docs_revisions: %d/%d PUTs failed on %s/%s: %s" %
+                           (len(failures), total, target, db, failures[:10]))
 
     return ("WROTE %d/%d PUTs to %s/%s "
             "(%d docs x %d revisions each, id prefix '%s', collection '%s')" % (
-        ok, total, target, db, count, revs, prefix, collection))
+        total, total, target, db, count, revs, prefix, collection))
 
 
 def k_docs_interleaved(p):
@@ -93,8 +118,10 @@ def k_docs_interleaved(p):
     prefixes = p["prefixes"]
     if not prefixes:
         raise ValueError("kind=docs_interleaved requires `prefixes` (non-empty list)")
+    if not count or count < 1:
+        raise ValueError("kind=docs_interleaved requires `count` >= 1 (got %r)" % count)
 
-    ok = 0
+    failures = []
     for n in range(count):
         which = prefixes[n % len(prefixes)]
         seq = n // len(prefixes)
@@ -103,11 +130,15 @@ def k_docs_interleaved(p):
         body = {"@metadata": {"@collection": "MicroDocs"}}
         status, _ = request("PUT", target, p["ravendb_domain"], path,
                             p["client_cert"], p["ca_cert"], body=body)
-        if status in (200, 201):
-            ok += 1
+        if status not in (200, 201):
+            failures.append("%s -> HTTP %s" % (doc_id, status))
+
+    if failures:
+        raise RuntimeError("k_docs_interleaved: %d/%d PUTs failed on %s/%s: %s" %
+                           (len(failures), count, target, db, failures[:10]))
 
     return "WROTE %d/%d docs to %s/%s (round-robin across prefixes %s)" % (
-        ok, count, target, db, prefixes)
+        count, count, target, db, prefixes)
 
 
 def k_attachments(p):
@@ -117,7 +148,10 @@ def k_attachments(p):
     doc_prefix = p["doc_id_prefix"] or "micro/doc"
     att_name = p["attachment_name"] or "data"
 
-    ok = 0
+    if not count or count < 1:
+        raise ValueError("kind=attachments requires `count` >= 1 (got %r)" % count)
+
+    failures = []
     for n in range(count):
         doc_id = "%s/%d" % (doc_prefix, n)
         name = "%s/%d" % (att_name, n)
@@ -126,12 +160,16 @@ def k_attachments(p):
             db, quote(doc_id), quote(name))
         status, _ = request("PUT", target, p["ravendb_domain"], path,
                             p["client_cert"], p["ca_cert"], body=payload)
-        if status in (200, 201, 204):
-            ok += 1
+        if status not in (200, 201, 204):
+            failures.append("%s -> HTTP %s" % (name, status))
+
+    if failures:
+        raise RuntimeError("k_attachments: %d/%d PUTs failed on %s/%s: %s" %
+                           (len(failures), count, target, db, failures[:10]))
 
     return ("WROTE %d/%d attachments to %s/%s "
             "(docs '%s/0..%d', names '%s/0..%d')" % (
-        ok, count, target, db,
+        count, count, target, db,
         doc_prefix, count - 1, att_name, count - 1))
 
 
@@ -143,6 +181,12 @@ def k_counters(p):
     delta = p["delta"]
     repeat = p["repeat"]
 
+    if not doc_id:
+        raise ValueError("kind=counters requires `doc_id`")
+    if not repeat or repeat < 1:
+        raise ValueError("kind=counters requires `repeat` >= 1 (got %r) -- "
+                         "0 calls = no counter change = vacuous PASS" % repeat)
+
     body = {"Documents": [{
         "DocumentId": doc_id,
         "Operations": [{
@@ -153,12 +197,16 @@ def k_counters(p):
     }]}
     path = "/databases/%s/counters" % db
 
-    ok = 0
-    for _ in range(repeat):
+    failures = []
+    for i in range(repeat):
         status, _b = request("POST", target, p["ravendb_domain"], path,
                              p["client_cert"], p["ca_cert"], body=body)
-        if status in (200, 201, 204):
-            ok += 1
+        if status not in (200, 201, 204):
+            failures.append("call #%d -> HTTP %s" % (i, status))
+
+    if failures:
+        raise RuntimeError("k_counters: %d/%d POSTs failed on %s/%s/%s: %s" %
+                           (len(failures), repeat, target, db, doc_id, failures[:10]))
 
     total_change = delta * repeat
     return ("INCREMENTED counter '%s' on %s by %+d "
@@ -172,6 +220,9 @@ def k_timeseries(p):
     doc_id = p["doc_id"]
     name = p["ts_name"] or "Heartrate"
 
+    if not doc_id:
+        raise ValueError("kind=timeseries requires `doc_id`")
+
     # Delete-range mode.
     if p["delete_from"] and p["delete_to"]:
         body = {"Name": name, "Deletes": [{
@@ -179,24 +230,32 @@ def k_timeseries(p):
             "To": p["delete_to"],
         }]}
         path = "/databases/%s/timeseries?docId=%s" % (db, quote(doc_id))
-        status, _ = request("POST", target, p["ravendb_domain"], path,
-                            p["client_cert"], p["ca_cert"], body=body)
+        status, resp = request("POST", target, p["ravendb_domain"], path,
+                               p["client_cert"], p["ca_cert"], body=body)
+        if status not in (200, 201, 204):
+            raise RuntimeError(
+                "k_timeseries delete-range on %s/%s/%s [%s..%s] failed: HTTP %s body=%s"
+                % (target, db, doc_id, p["delete_from"], p["delete_to"],
+                   status, (resp or b"")[:300]))
         return ("DELETED timeseries '%s' range [%s .. %s] on doc %s "
                 "(HTTP %d) on %s/%s" % (
             name, p["delete_from"], p["delete_to"], doc_id, status, target, db))
 
     # Append mode.
+    count = p["count"]
+    interval = p["interval_seconds"]
+    if not count or count < 1:
+        raise ValueError("kind=timeseries (append) requires `count` >= 1 (got %r)" % count)
+
     if p["start_timestamp"]:
         start = datetime.datetime.strptime(
             p["start_timestamp"], "%Y-%m-%dT%H:%M:%S.%fZ")
     else:
         start = datetime.datetime.utcnow() - datetime.timedelta(hours=1)
 
-    count = p["count"]
-    interval = p["interval_seconds"]
     path = "/databases/%s/timeseries?docId=%s" % (db, quote(doc_id))
 
-    ok = 0
+    failures = []
     for n in range(count):
         ts = start + datetime.timedelta(seconds=n * interval)
         body = {"Name": name, "Appends": [{
@@ -206,12 +265,16 @@ def k_timeseries(p):
         }]}
         status, _ = request("POST", target, p["ravendb_domain"], path,
                             p["client_cert"], p["ca_cert"], body=body)
-        if status in (200, 201, 204):
-            ok += 1
+        if status not in (200, 201, 204):
+            failures.append("entry #%d -> HTTP %s" % (n, status))
+
+    if failures:
+        raise RuntimeError("k_timeseries append: %d/%d entries failed on %s/%s/%s: %s" %
+                           (len(failures), count, target, db, doc_id, failures[:10]))
 
     return ("APPENDED %d/%d timeseries '%s' entries to doc %s "
             "(every %ds starting %s) on %s/%s" % (
-        ok, count, name, doc_id, interval,
+        count, count, name, doc_id, interval,
         start.strftime("%Y-%m-%dT%H:%M:%SZ"), target, db))
 
 
@@ -228,6 +291,9 @@ def k_delete(p):
     else:
         raise ValueError("kind=delete requires `ids` OR (`id_prefix` and `count`)")
 
+    if not ids:
+        raise ValueError("kind=delete got an empty `ids` list -- 0 deletes = vacuous PASS")
+
     ok = 0
     errors = []
     for doc_id in ids:
@@ -240,8 +306,10 @@ def k_delete(p):
             errors.append("%s -> HTTP %s" % (doc_id, status))
 
     if errors:
-        return ("DELETE on %s/%s: %d/%d returned 204; %d unexpected: %s" %
-                (target, db, ok, len(ids), len(errors), errors))
+        raise RuntimeError(
+            "k_delete on %s/%s: %d/%d returned 204; %d unexpected: %s"
+            % (target, db, ok, len(ids), len(errors), errors[:10]))
+
     return "DELETE on %s/%s: %d/%d returned 204 (Raven does not distinguish missing vs deleted)" % (
         target, db, ok, len(ids))
 
@@ -252,10 +320,19 @@ def k_restore_revision(p):
     doc_id = p["doc_id"]
     revision_cv = p["revision_cv"]
 
+    if not doc_id:
+        raise ValueError("kind=restore_revision requires `doc_id`")
+    if not revision_cv:
+        raise ValueError("kind=restore_revision requires `revision_cv`")
+
     cv_encoded = quote(revision_cv, safe="")
     get_path = "/databases/%s/revisions?changeVector=%s" % (db, cv_encoded)
-    status, body_bytes = request("GET", target, p["ravendb_domain"], get_path,
-                                 p["client_cert"], p["ca_cert"])
+    get_status, body_bytes = request("GET", target, p["ravendb_domain"], get_path,
+                                     p["client_cert"], p["ca_cert"])
+    if get_status != 200:
+        raise RuntimeError(
+            "k_restore_revision: GET revision cv=%s on %s/%s failed: HTTP %s"
+            % (revision_cv, target, db, get_status))
     results = json.loads(body_bytes).get("Results", [])
     if not results:
         raise ValueError("no revision found for cv=%s on %s" % (revision_cv, doc_id))
@@ -264,6 +341,10 @@ def k_restore_revision(p):
     put_path = "/databases/%s/docs?id=%s" % (db, quote(doc_id))
     put_status, _ = request("PUT", target, p["ravendb_domain"], put_path,
                             p["client_cert"], p["ca_cert"], body=revision_body)
+    if put_status not in (200, 201):
+        raise RuntimeError(
+            "k_restore_revision: PUT %s on %s/%s failed: HTTP %s"
+            % (doc_id, target, db, put_status))
 
     return "RESTORED revision %s as live doc %s on %s/%s (PUT HTTP %d)" % (
         revision_cv, doc_id, target, db, put_status)
