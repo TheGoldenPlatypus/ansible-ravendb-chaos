@@ -5,12 +5,28 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 
+# Test-only escape hatch: if a target appears in this dict, its mapped URL is
+# used VERBATIM instead of composing https://<target>.<domain>:443.  Production
+# leaves this empty.  Integration tests (which spin embedded RavenDB servers on
+# random ports) populate it like:
+#     TARGET_URL_OVERRIDES["1a"] = "http://127.0.0.1:46181"
+# When the override is http://, SSL setup is skipped (no cert needed).
+TARGET_URL_OVERRIDES: dict = {}
+
+
 def request(method, target, domain, path, client_cert, ca_cert,
             body=None, content_type=None, timeout=30):
-    url = "https://" + target + "." + domain + ":443" + path
-
-    ctx = ssl.create_default_context(cafile=ca_cert)
-    ctx.load_cert_chain(certfile=client_cert)
+    override = TARGET_URL_OVERRIDES.get(target)
+    if override:
+        url = override.rstrip("/") + path
+        ctx = None
+        if url.startswith("https://"):
+            ctx = ssl.create_default_context(cafile=ca_cert)
+            ctx.load_cert_chain(certfile=client_cert)
+    else:
+        url = "https://" + target + "." + domain + ":443" + path
+        ctx = ssl.create_default_context(cafile=ca_cert)
+        ctx.load_cert_chain(certfile=client_cert)
 
     data = None
     headers = {}
@@ -26,8 +42,12 @@ def request(method, target, domain, path, client_cert, ca_cert,
 
     req = Request(url, data=data, method=method, headers=headers)
     try:
-        with urlopen(req, context=ctx, timeout=timeout) as response:
-            return response.status, response.read()
+        if ctx is not None:
+            with urlopen(req, context=ctx, timeout=timeout) as response:
+                return response.status, response.read()
+        else:
+            with urlopen(req, timeout=timeout) as response:
+                return response.status, response.read()
     except HTTPError as e:
         return e.code, e.read()
 
