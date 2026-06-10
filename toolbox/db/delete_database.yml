@@ -111,10 +111,21 @@
       loop: "{{ hostvars['localhost'].cluster_peers }}"
       when: target_mode | default('docker') == 'docker'
 
-    - name: (docker) rm -rf the database's on-disk dir inside each peer
+    # rm + verify in one shell so a silent rm failure (read-only mount,
+    # permission denied, dir held open) can't leave stale db data behind that
+    # would let the next create_database silently inherit old change-vector
+    # state and break test isolation.
+    - name: (docker) rm -rf the database's on-disk dir inside each peer (with verify)
       community.docker.docker_container_exec:
         container: "{{ item }}"
-        command: rm -rf {{ data_dir | default('/var/lib/ravendb/data') }}/Databases/{{ db_name }}
+        command: >
+          bash -lc 'rm -rf "{{ data_dir | default("/var/lib/ravendb/data") }}/Databases/{{ db_name }}";
+                    if [ -e "{{ data_dir | default("/var/lib/ravendb/data") }}/Databases/{{ db_name }}" ]; then
+                      echo "FAIL: db dir still present after rm -rf on {{ item }}" >&2;
+                      exit 1;
+                    fi'
+      register: _wipe_result
+      failed_when: _wipe_result.rc != 0
       loop: "{{ hostvars['localhost'].cluster_peers }}"
       when: target_mode | default('docker') == 'docker'
 
