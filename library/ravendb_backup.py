@@ -58,12 +58,20 @@ def wait_for_operation(p, target, base_path, op_id, timeout, interval, progress_
 
 
 def get_backup_status(p, target, db, task_id):
+    """Returns the Status dict, or None ONLY when the task has never produced a
+    backup yet (200 with Status=null).  Any other failure (4xx/5xx/network)
+    raises RuntimeError so the polling loop doesn't mistake a server error for
+    'still in progress' and run out its budget on nothing."""
     status_path = "/periodic-backup/status?name=%s&taskId=%d" % (quote(db), task_id)
     status, body = request("GET", target, p["ravendb_domain"], status_path,
                            p["client_cert"], p["ca_cert"])
     if status != 200:
-        return None
+        raise RuntimeError(
+            "get_backup_status: %s/%s taskId=%d returned HTTP %d body=%s -- "
+            "can't distinguish in-progress from real server failure"
+            % (target, db, task_id, status, (body or b"")[:300]))
     data = json.loads(body)
+    # 200 with Status=null is legitimate: task created, no backup has run yet.
     return data.get("Status") or None
 
 
