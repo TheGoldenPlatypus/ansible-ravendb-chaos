@@ -40,6 +40,17 @@ def _resolve_shard_for_tag(p, target, tag):
 
 
 def classify_nodes(p, nodes):
+    """Classify each probe node by whether it hosts the database.
+
+    Distinguishes three outcomes per node:
+      - 200          -> hosts the db (flat); add to host_map.
+      - 500 sharded  -> hosts the db (sharded); resolve shard then add.
+      - connection   -> UNREACHABLE; raise loud (do NOT silently skip --
+                        unreachable conflated with 'wrong cluster' is the
+                        root cause of vacuous waits passing on dead clusters).
+      - other HTTP   -> genuinely doesn't host the db (404 etc.); add to
+                        skipped.  Caller decides whether that's tolerable.
+    """
     domain = p["ravendb_domain"]
     db = p["db_name"]
     path = "/databases/%s/stats" % db
@@ -47,9 +58,14 @@ def classify_nodes(p, nodes):
                                p["client_cert"], p["ca_cert"])
     host_map = {}
     skipped = []
+    unreachable = []
     sharded_probe_needed = []
     for target, status, body in results:
-        if status == 200:
+        if status is None:
+            # request_per_node caught a non-HTTP exception (socket timeout,
+            # SSL, DNS, connection refused).  'body' here is the repr().
+            unreachable.append("%s: %s" % (target, body))
+        elif status == 200:
             host_map[target] = None
         elif status == 500 and b"nodeTag is mandatory" in (body or b""):
             sharded_probe_needed.append(target)
@@ -58,17 +74,31 @@ def classify_nodes(p, nodes):
 
     for target in sharded_probe_needed:
         tag = target[-1].upper()
-        shard_id = _resolve_shard_for_tag(p, target, tag)
+        try:
+            shard_id = _resolve_shard_for_tag(p, target, tag)
+        except Exception as e:
+            unreachable.append("%s: shard resolve failed: %r" % (target, e))
+            continue
         if shard_id is None:
             skipped.append(target)
             continue
         per = "/databases/%s/stats?nodeTag=%s&shardNumber=%s" % (db, tag, shard_id)
-        s, _ = request("GET", target, p["ravendb_domain"], per,
-                       p["client_cert"], p["ca_cert"])
+        try:
+            s, _ = request("GET", target, p["ravendb_domain"], per,
+                           p["client_cert"], p["ca_cert"])
+        except Exception as e:
+            unreachable.append("%s: sharded stats probe failed: %r" % (target, e))
+            continue
         if s == 200:
             host_map[target] = shard_id
         else:
             skipped.append(target)
+
+    if unreachable:
+        raise RuntimeError(
+            "classify_nodes: %d/%d probe node(s) unreachable: %s -- "
+            "can't proceed with a wait on partial coverage (vacuous PASS risk)"
+            % (len(unreachable), len(nodes), unreachable))
 
     return host_map, skipped
 
@@ -191,8 +221,23 @@ def k_rehab(p):
 
 
 def snapshot_stats_field(p, nodes_or_map, field):
+    """Sample `field` from /stats on every node in nodes_or_map.
+
+    HARDENED: every probed node must respond 200, and the field must be
+    present in the response.  Any HTTP failure, connection error, or missing
+    field raises RuntimeError -- silently dropping failed nodes from the
+    snapshot is the bug that lets `all(prev.get(n) == current.get(n) for n in
+    has_db)` become vacuously True on `snap == {}` and pass a wait against a
+    dead cluster.
+
+    Returns a dict {target: field_value} where field_value may be a value the
+    server returned (including legitimate None if the field is actually null
+    -- but field absence is reported separately as a failure).
+    """
     db = p["db_name"]
     snap = {}
+    failures = []
+
     if isinstance(nodes_or_map, dict):
         for target, shard_id in nodes_or_map.items():
             if shard_id is None:
@@ -200,19 +245,52 @@ def snapshot_stats_field(p, nodes_or_map, field):
             else:
                 tag = target[-1].upper()
                 path = "/databases/%s/stats?nodeTag=%s&shardNumber=%s" % (db, tag, shard_id)
-            s, b = request("GET", target, p["ravendb_domain"], path,
-                           p["client_cert"], p["ca_cert"])
-            if s == 200:
-                snap[target] = json.loads(b).get(field)
-        return snap
-
-    # legacy plain-list path -- non-sharded only
-    path = "/databases/%s/stats" % db
-    results = request_per_node("GET", nodes_or_map, p["ravendb_domain"], path,
+            try:
+                s, b = request("GET", target, p["ravendb_domain"], path,
                                p["client_cert"], p["ca_cert"])
-    for target, status, body in results:
-        if status == 200:
-            snap[target] = json.loads(body).get(field)
+            except Exception as e:
+                failures.append("%s: connection error %r" % (target, e))
+                continue
+            if s != 200:
+                failures.append("%s: HTTP %d" % (target, s))
+                continue
+            data = json.loads(b)
+            if field not in data:
+                failures.append("%s: response has no '%s' field" % (target, field))
+                continue
+            snap[target] = data[field]
+    else:
+        # legacy plain-list path -- non-sharded only
+        path = "/databases/%s/stats" % db
+        results = request_per_node("GET", nodes_or_map, p["ravendb_domain"], path,
+                                   p["client_cert"], p["ca_cert"])
+        for target, status, body in results:
+            if status is None:
+                failures.append("%s: connection error %s" % (target, body))
+                continue
+            if status != 200:
+                failures.append("%s: HTTP %d" % (target, status))
+                continue
+            data = json.loads(body)
+            if field not in data:
+                failures.append("%s: response has no '%s' field" % (target, field))
+                continue
+            snap[target] = data[field]
+
+    if failures:
+        raise RuntimeError(
+            "snapshot_stats_field('%s') failed on %d/%d node(s): %s -- "
+            "can't proceed with a wait on partial coverage (would silently "
+            "PASS via all([])==True against a dead cluster)"
+            % (field, len(failures), len(nodes_or_map), failures))
+
+    if not snap:
+        # Defensive: nodes_or_map was empty AND no failures.  The classify_nodes
+        # guard upstream should already block this, but never trust.
+        raise RuntimeError(
+            "snapshot_stats_field('%s'): 0 nodes contributed data -- "
+            "vacuous PASS would be a silent false negative" % field)
+
     return snap
 
 
@@ -232,6 +310,11 @@ def k_etag_parity(p):
         nonlocal prev, prev_time
         current = snapshot_stats_field(p, has_db, "LastDatabaseEtag")
         current_time = now_hms()
+        if not has_db:
+            # defense in depth: classify_nodes already raises if has_db is
+            # empty, but if any future caller bypasses that, refuse to PASS
+            # via all([])==True.
+            raise RuntimeError("k_etag_parity: has_db is empty -- vacuous PASS guard")
         stable = all(prev.get(n) == current.get(n) for n in has_db)
         snapshots = (prev_time, prev, current_time, current)
         if stable:
@@ -276,6 +359,8 @@ def k_docs_drain(p):
         nonlocal prev, prev_time
         current = snapshot_stats_field(p, has_db, "DatabaseChangeVector")
         current_time = now_hms()
+        if not has_db:
+            raise RuntimeError("k_docs_drain: has_db is empty -- vacuous PASS guard")
         stable = all(prev.get(n) == current.get(n) for n in has_db)
         snapshots = (prev_time, prev, current_time, current)
         if stable:
@@ -315,6 +400,15 @@ def k_quiescence(p):
 
     def predicate():
         current = snapshot_stats_field(p, has_db, "DatabaseChangeVector")
+        if not current:
+            raise RuntimeError("k_quiescence: snapshot is empty -- vacuous PASS guard")
+        # Reject 'all None / all empty string' as a false convergence: that
+        # means every node returned a missing/empty CV, not that they agree.
+        if all((v is None or v == "") for v in current.values()):
+            raise RuntimeError(
+                "k_quiescence: every node returned a missing/empty "
+                "DatabaseChangeVector %s -- can't claim convergence on "
+                "empty data" % current)
         unique = set(current.values())
         if len(unique) == 1:
             return True, current
@@ -348,6 +442,10 @@ def k_stats_field_parity(p):
         per_field = {}
         for field in fields:
             per_field[field] = snapshot_stats_field(p, has_db, field)
+            if not per_field[field]:
+                raise RuntimeError(
+                    "k_stats_field_parity: snapshot for '%s' is empty -- "
+                    "vacuous PASS guard" % field)
 
         drift = []
         for field in fields:
@@ -390,14 +488,32 @@ def k_conflicts_resolved(p):
         results = request_per_node("GET", targets, p["ravendb_domain"], path,
                                    p["client_cert"], p["ca_cert"])
         counts = {}
+        failures = []
         for target, status, body in results:
+            if status is None:
+                failures.append("%s: connection error %s" % (target, body))
+                continue
             if status != 200:
-                counts[target] = "HTTP %s" % status
+                failures.append("%s: HTTP %d" % (target, status))
                 continue
             data = json.loads(body)
             counts[target] = data.get("TotalResults", len(data.get("Results") or []))
 
-        all_zero = all(isinstance(v, int) and v == 0 for v in counts.values())
+        if failures:
+            # Don't pretend a network error is 'conflicts still present' --
+            # that masks unreachable nodes as 'not converged' and burns the
+            # entire timeout budget.  Raise loud immediately.
+            raise RuntimeError(
+                "k_conflicts_resolved: %d/%d node(s) failed during conflict "
+                "probe: %s -- can't verify resolution on partial coverage"
+                % (len(failures), len(targets), failures))
+
+        if not counts:
+            raise RuntimeError(
+                "k_conflicts_resolved: 0 nodes contributed conflict counts -- "
+                "vacuous PASS guard")
+
+        all_zero = all(v == 0 for v in counts.values())
         if all_zero:
             return True, counts
         return False, counts
@@ -436,9 +552,23 @@ def k_marker_propagation(p):
             return True, "all targets received"
         results = request_per_node("GET", list(pending), p["ravendb_domain"], get_path,
                                    p["client_cert"], p["ca_cert"])
-        for target, status, _body in results:
+        unreachable = []
+        for target, status, body in results:
+            if status is None:
+                # Connection error.  We're polling, so it MIGHT recover, but
+                # if every retry sees the same network failure we'd spin to
+                # timeout and misattribute the cause as 'marker did not
+                # propagate'.  Raise loud now -- a wait kind running against
+                # a dead target is meaningless.
+                unreachable.append("%s: %s" % (target, body))
+                continue
             if status == 200:
                 pending.discard(target)
+        if unreachable:
+            raise RuntimeError(
+                "k_marker_propagation: %d target(s) unreachable: %s -- "
+                "can't verify marker propagation to dead nodes"
+                % (len(unreachable), unreachable))
         if not pending:
             return True, "all targets received"
         return False, "still waiting on %s" % sorted(pending)
@@ -461,9 +591,20 @@ def k_doc_count_match(p):
     timeout    = p["timeout"]
 
     def _aggregate_count(target, db):
+        """Return CountOfDocuments aggregated across all shards (sharded
+        clusters) or directly from /stats (flat).  Raises loud on:
+          - any unreachable shard (orphan shard with no members or stats
+            probe failure -- silently excluding it would let doc counts
+            'match' on incomplete coverage);
+          - any HTTP/connection failure on the top-level probe."""
         path = "/databases/%s/stats" % db
-        status, body = request("GET", target, p["ravendb_domain"], path,
-                               p["client_cert"], p["ca_cert"])
+        try:
+            status, body = request("GET", target, p["ravendb_domain"], path,
+                                   p["client_cert"], p["ca_cert"])
+        except Exception as e:
+            raise RuntimeError(
+                "_aggregate_count: %s/%s top-level /stats unreachable: %r"
+                % (target, db, e))
         if status == 200:
             return json.loads(body).get("CountOfDocuments")
         if status == 500 and b"nodeTag is mandatory" in body:
@@ -471,27 +612,51 @@ def k_doc_count_match(p):
                            "/admin/databases?name=%s" % db,
                            p["client_cert"], p["ca_cert"])
             if s != 200:
-                return None
+                raise RuntimeError(
+                    "_aggregate_count: %s/%s /admin/databases probe failed: HTTP %d"
+                    % (target, db, s))
             sharding = (json.loads(b).get("Sharding") or {})
             shards = sharding.get("Shards") or {}
+            if not shards:
+                raise RuntimeError(
+                    "_aggregate_count: %s/%s reports sharded layout but Shards "
+                    "dict is empty -- cluster topology is broken" % (target, db))
             total = 0
+            orphans = []
+            shard_failures = []
             for shard_id, shard_rec in shards.items():
                 members = shard_rec.get("Members") or []
                 if not members:
+                    # ORPHAN shard.  Old code silently excluded these from the
+                    # total -- which is exactly how a chaos-killed shard node
+                    # could let the aggregate 'match' on remaining shards.
+                    orphans.append(shard_id)
                     continue
                 per = "/databases/%s/stats?nodeTag=%s&shardNumber=%s" % (db, members[0], shard_id)
                 s2, b2 = request("GET", target, p["ravendb_domain"], per,
                                  p["client_cert"], p["ca_cert"])
-                if s2 == 200:
-                    total += json.loads(b2).get("CountOfDocuments") or 0
+                if s2 != 200:
+                    shard_failures.append("shard %s -> HTTP %d" % (shard_id, s2))
+                    continue
+                total += json.loads(b2).get("CountOfDocuments") or 0
+            if orphans:
+                raise RuntimeError(
+                    "_aggregate_count: %s/%s has orphan shard(s) %s with no "
+                    "Members -- can't claim doc count match while shards are "
+                    "down" % (target, db, orphans))
+            if shard_failures:
+                raise RuntimeError(
+                    "_aggregate_count: %s/%s shard probe(s) failed: %s -- "
+                    "can't claim doc count match on partial coverage"
+                    % (target, db, shard_failures))
             return total
-        return None
+        raise RuntimeError(
+            "_aggregate_count: %s/%s /stats returned HTTP %d -- unexpected"
+            % (target, db, status))
 
     def predicate():
         s = _aggregate_count(src_target, src_db)
         t = _aggregate_count(tgt_target, tgt_db)
-        if s is None or t is None:
-            return False, "src=%s tgt=%s (incomplete)" % (s, t)
         if s == t:
             return True, "src=%d == tgt=%d" % (s, t)
         return False, "src=%d  tgt=%d  diff=%d" % (s, t, s - t)
