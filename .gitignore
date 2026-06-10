@@ -24,3 +24,9 @@ captures/
 
 # RavenDB .debs built by scripts/build_ravendb_pr.sh
 builds/
+
+# Python bytecode + test caches
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
