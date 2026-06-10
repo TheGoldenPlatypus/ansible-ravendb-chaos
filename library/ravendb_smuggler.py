@@ -60,6 +60,12 @@ def k_export(p):
     if status != 200:
         raise RuntimeError("smuggler export returned HTTP %d" % status)
 
+    if not body_bytes:
+        raise RuntimeError(
+            "smuggler export: %s/%s returned HTTP 200 with empty body -- "
+            "refusing to write a 0-byte dump that would silently pass on import"
+            % (target, db))
+
     out_dir = os.path.dirname(dump_path)
     if out_dir and not os.path.isdir(out_dir):
         os.makedirs(out_dir)
@@ -74,17 +80,29 @@ def k_import(p):
     target = p["target"]
     db = p["db_name"]
     dump_path = p["dump_path"]
-    skip_if_missing = bool(p["skip_if_missing"])
 
     if not dump_path:
         raise ValueError("kind=import requires `dump_path`")
 
+    # Hard-fail on a missing dump file.  Previous versions accepted a
+    # `skip_if_missing=true` escape hatch that turned absence into a soft PASS;
+    # that hid configuration mistakes (wrong path, dump never produced) behind
+    # a "SKIPPED ..." message.  Scenarios that genuinely need to no-op on
+    # absence should gate the call upstream with an explicit `when:` test in
+    # the playbook instead of asking the kind to lie about success.
     if not os.path.isfile(dump_path):
-        if skip_if_missing:
-            return ("SKIPPED smuggler import: dump file not found at %s "
-                    "(skip_if_missing=true)" % dump_path)
-        raise ValueError("dump file not found at %s "
-                         "(pass skip_if_missing=true to make absence a no-op)" % dump_path)
+        raise FileNotFoundError(
+            "smuggler import: dump file not found at %s -- "
+            "scenarios must gate this call with an explicit when-clause if "
+            "absence is expected; the kind will not claim success on a no-op"
+            % dump_path)
+
+    dump_size = os.path.getsize(dump_path)
+    if dump_size == 0:
+        raise RuntimeError(
+            "smuggler import: dump file %s is 0 bytes -- "
+            "refusing to import an empty payload that would silently pass"
+            % dump_path)
 
     with open(dump_path, "rb") as f:
         dump_bytes = f.read()
@@ -95,11 +113,13 @@ def k_import(p):
     )
 
     import_path = "/databases/%s/smuggler/import" % db
-    status, _ = request("POST", target, p["ravendb_domain"], import_path,
-                        p["client_cert"], p["ca_cert"],
-                        body=body, content_type=content_type)
+    status, resp = request("POST", target, p["ravendb_domain"], import_path,
+                           p["client_cert"], p["ca_cert"],
+                           body=body, content_type=content_type)
     if status != 200:
-        raise RuntimeError("smuggler import returned HTTP %d" % status)
+        raise RuntimeError(
+            "smuggler import returned HTTP %d on %s/%s: body=%s"
+            % (status, target, db, (resp or b"")[:300]))
 
     return ("IMPORTED %s -> %s/%s (%d bytes, HTTP 200)" %
             (os.path.basename(dump_path), target, db, len(dump_bytes)))
@@ -120,8 +140,6 @@ def main():
         target=dict(required=True),
         db_name=dict(required=True),
         dump_path=dict(type="path", required=True),
-        # import only
-        skip_if_missing=dict(type="bool", default=False),
     ))
 
     handler = KINDS[module.params["kind"]]

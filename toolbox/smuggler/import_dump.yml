@@ -15,23 +15,19 @@
 #     non-sharded).
 #
 # INPUTS:
-#   target            REQUIRED.  Container/host to import into (typically the cluster leader).
-#   db_name           REQUIRED.  Existing database name -- create it BEFORE calling this.
-#   dump_path         REQUIRED.  Absolute path on the controller to the .ravendbdump file.
-#   skip_if_missing   OPTIONAL.  Default false.  When true, a missing dump_path becomes a
-#                                no-op (prints SKIP and exits ok).  Useful for scenarios
-#                                that reference an optional fixture file that may not yet
-#                                exist in every checkout.
+#   target     REQUIRED.  Container/host to import into (typically the cluster leader).
+#   db_name    REQUIRED.  Existing database name -- create it BEFORE calling this.
+#   dump_path  REQUIRED.  Absolute path on the controller to the .ravendbdump file.
+#              Hard-required: a missing or 0-byte file is a loud failure, not a silent
+#              skip.  If a scenario legitimately needs to no-op on absence, gate the
+#              import with an Ansible `when:` test in the calling playbook (e.g.
+#              `when: lookup('file', dump_path, errors='ignore')`) -- don't ask the
+#              kind to lie about success.
 #
-# RUN EXAMPLES:
+# RUN EXAMPLE:
 #   ansible-playbook toolbox/smuggler/import_dump.yml \
 #       -e target=1a -e db_name=db1 \
 #       -e dump_path=$PWD/scenarios/company-1/RP1/fixtures/legacy-counter.ravendbdump
-#
-#   ansible-playbook toolbox/smuggler/import_dump.yml \
-#       -e target=1a -e db_name=db1 \
-#       -e dump_path=$PWD/scenarios/company-1/RP1/fixtures/legacy-counter.ravendbdump \
-#       -e skip_if_missing=true
 ##################################################################################################
 
 - name: Smuggler-import a .ravendbdump file into an existing database
@@ -47,6 +43,5 @@
         target: "{{ target }}"
         db_name: "{{ db_name }}"
         dump_path: "{{ dump_path }}"
-        skip_if_missing: "{{ skip_if_missing | default(false) | bool }}"
       register: r
     - ansible.builtin.debug: { msg: "{{ r.msg }}" }
