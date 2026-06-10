@@ -6,14 +6,13 @@
 #   require_parity      -- every node must report the same FullVersion.
 #   expected_version    -- every node's FullVersion must contain this substring (e.g. "6.2").
 #
-# When db_name is set, also fetches DatabaseRecord.SupportedFeatures and prints it.
+# For the DatabaseRecord.SupportedFeatures dump (used after rolling upgrades to confirm the
+# new build's features actually flipped on for a database), see diagnostic_supported_features.yml.
 #
 # INPUTS:
 #   nodes               REQUIRED.  JSON list of node names.
 #   require_parity      OPTIONAL.  Default false.
 #   expected_version    OPTIONAL.  Substring (e.g. "6.2").
-#   db_name             OPTIONAL.  If set, also fetch DatabaseRecord.SupportedFeatures.
-#   cluster_leader      OPTIONAL.  Default = nodes[0].  Used for the DatabaseRecord fetch.
 #   assert_mode         OPTIONAL.  Default false.  Required to make require_parity / expected_version fail.
 #
 # RUN EXAMPLES:
@@ -36,8 +35,6 @@
         nodes: "{{ nodes }}"
         require_parity: "{{ require_parity | default(false) | bool }}"
         expected_version: "{{ expected_version | default(omit) }}"
-        db_name: "{{ db_name | default(omit) }}"
-        cluster_leader: "{{ cluster_leader | default(omit) }}"
         assert_mode: "{{ assert_mode | default(false) | bool }}"
       register: r
     - ansible.builtin.debug: { msg: "{{ r.msg }}" }
