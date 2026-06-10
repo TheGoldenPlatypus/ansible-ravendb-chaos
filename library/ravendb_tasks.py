@@ -52,7 +52,9 @@ def hub_task_exists(p, hub_url, db, task_name):
     return False
 
 
-def sink_task_exists(p, sink_leader, db, sink_id):
+def sink_task_lookup(p, sink_leader, db, sink_id):
+    """Return the PullReplicationAsSink task entry matching this sink_id, or
+    None.  Raises on unreachable leader or unexpected HTTP status."""
     path = "/databases/%s/tasks" % db
     status, body = request("GET", sink_leader, p["ravendb_domain"], path,
                            p["client_cert"], p["ca_cert"])
@@ -61,9 +63,14 @@ def sink_task_exists(p, sink_leader, db, sink_id):
     expected_name = "cluster%s-to-hub" % sink_id
     ongoing = json.loads(body).get("OngoingTasks") or []
     for entry in ongoing:
-        if entry.get("TaskType") == "PullReplicationAsSink" and entry.get("TaskName") == expected_name:
-            return True
-    return False
+        if (entry.get("TaskType") == "PullReplicationAsSink"
+                and entry.get("TaskName") == expected_name):
+            return entry
+    return None
+
+
+def sink_task_exists(p, sink_leader, db, sink_id):
+    return sink_task_lookup(p, sink_leader, db, sink_id) is not None
 
 
 def k_define_hub(p):
@@ -171,8 +178,25 @@ def k_attach_sinks(p):
             raise RuntimeError("create connection string on %s failed: HTTP %d" %
                                (sink_leader, status))
 
-        if sink_task_exists(p, sink_leader, db, sink_id_str):
-            attached.append("%s (already present)" % sink_id_str)
+        existing = sink_task_lookup(p, sink_leader, db, sink_id_str)
+        if existing is not None:
+            # Don't silently re-use a half-broken task.  Verify state +
+            # connection string match expectations BEFORE claiming "attached".
+            state = existing.get("TaskState")
+            existing_cs = existing.get("ConnectionStringName")
+            problems = []
+            if state not in (None, "Enabled"):   # None = older Raven server, treat as ok
+                problems.append("TaskState=%r" % state)
+            if existing_cs and existing_cs != conn_name:
+                problems.append("ConnectionStringName=%r (expected %r)"
+                                % (existing_cs, conn_name))
+            if problems:
+                raise RuntimeError(
+                    "k_attach_sinks: sink-pull task on cluster %s is already "
+                    "present but unhealthy: %s -- refusing to claim 'attached' "
+                    "on a broken task.  Delete the task and re-run, or fix "
+                    "manually." % (sink_id_str, problems))
+            attached.append("%s (already present, verified healthy)" % sink_id_str)
             continue
 
         pfx_b64 = read_pfx_b64(certs_dir, sink_id_str)
@@ -406,17 +430,25 @@ def k_setup_etl(p):
         raise RuntimeError("create ETL task on %s failed: HTTP %d  body=%s" %
                            (source_leader, status, body[:300]))
 
-    task_id = None
-    try:
-        task_id = json.loads(body).get("TaskId")
-    except Exception:
-        pass
-    if task_id is not None:
-        toggle = "/databases/%s/admin/tasks/state?key=%d&type=RavenEtl&disable=%s"
-        for flag in ("true", "false"):
-            request("POST", source_leader, p["ravendb_domain"],
-                    toggle % (source_db, task_id, flag),
-                    p["client_cert"], p["ca_cert"])
+    # Don't swallow JSON parse errors -- if the server responded 200/201 but with
+    # garbage, that's a bug worth surfacing, not silently skipping the toggle step.
+    parsed = json.loads(body)
+    task_id = parsed.get("TaskId")
+    if task_id is None:
+        raise RuntimeError(
+            "k_setup_etl: ETL task creation on %s/%s returned no TaskId in body=%s -- "
+            "can't perform the disable/enable cycle, won't claim success"
+            % (source_leader, source_db, body[:300]))
+
+    toggle = "/databases/%s/admin/tasks/state?key=%d&type=RavenEtl&disable=%s"
+    for flag in ("true", "false"):
+        t_status, t_body = request("POST", source_leader, p["ravendb_domain"],
+                                   toggle % (source_db, task_id, flag),
+                                   p["client_cert"], p["ca_cert"])
+        if t_status not in (200, 201, 204):
+            raise RuntimeError(
+                "k_setup_etl: toggle disable=%s on taskId=%d failed: HTTP %d body=%s"
+                % (flag, task_id, t_status, (t_body or b"")[:300]))
 
     return ("ETL configured -- task '%s' on %s/%s pushes %s -> %s/%s via %s" %
             (task_name, source_leader, source_db,
