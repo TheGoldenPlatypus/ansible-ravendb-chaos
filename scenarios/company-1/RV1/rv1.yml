@@ -280,6 +280,19 @@
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
+    - name: "Mid-roll: assert zero orphan revisions on a/b/c (I-4)"
+      ravendb_diagnostic:
+        kind: orphan_revisions
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
     - name: Pause before upgrading {{ cluster_id | default(1) }}b
       ansible.builtin.pause:
         seconds: "{{ upgrade_delay_secs | default(60) | int }}"
@@ -338,6 +351,22 @@
         client_cert: "{{ cert_dir }}/client.pem"
         ca_cert: "{{ cert_ca_crt }}"
         nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # I-4 mid-roll: same as after 1a -- orphan revisions must stay at zero across any
+    # mixed-binary state.  See step-4 comment for why count/revision parity are
+    # deferred to step 7's quiet final checkpoint.
+    - name: "Mid-roll: assert zero orphan revisions on a/b/c (I-4)"
+      ravendb_diagnostic:
+        kind: orphan_revisions
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+        assert_mode: true
       register: r
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
@@ -865,6 +894,54 @@
       register: r
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Phase-3 read-latency drift check (per the plan: "no monotonic latency growth > 2x
+    # baseline").  W-7 reader logs one `history_fetch elapsed_ms=N` per sample (default
+    # 30s) into /tmp/w7-reader-1a-db1.log.  Compute the mean elapsed_ms over the FIRST
+    # quarter of samples vs the LAST quarter and assert the ratio <= 2.0.  Mean (not
+    # p99) because at default sample rate over 60 min we only get ~120 samples; p99
+    # would be 1 point, too noisy for a stable threshold.
+    - name: "Phase 3 checkpoint: assert W-7 reader p99 latency drift <= 2x baseline"
+      ansible.builtin.shell: |
+        set -eu
+        log=/tmp/w7-reader-{{ cluster_id | default(1) }}a-db1.log
+        if [ ! -s "$log" ]; then
+          echo "FAIL  W-7 reader log $log is missing or empty"; exit 1
+        fi
+
+        # All elapsed_ms values from history_fetch lines, in order.
+        readarray -t samples < <(awk '/history_fetch/ {
+          if (match($0, /elapsed_ms=([0-9]+)/, m)) print m[1]
+        }' "$log")
+
+        n=${#samples[@]}
+        if [ "$n" -lt 8 ]; then
+          echo "FAIL  too few latency samples ($n) to compute first/last-quarter means"
+          exit 1
+        fi
+
+        q=$(( n / 4 ))
+        first_mean=$(printf '%s\n' "${samples[@]:0:$q}" | awk '{s+=$1} END{printf "%.1f", s/NR}')
+        last_mean=$(printf '%s\n'  "${samples[@]: -$q}" | awk '{s+=$1} END{printf "%.1f", s/NR}')
+        ratio=$(awk -v a="$last_mean" -v b="$first_mean" 'BEGIN{ printf "%.3f", a/b }')
+
+        echo "latency drift check"
+        echo "  total samples: $n  (quarter window = $q samples)"
+        echo "  first-quarter mean elapsed_ms: $first_mean"
+        echo "  last-quarter  mean elapsed_ms: $last_mean"
+        echo "  ratio (last / first):          $ratio (must be <= 2.0)"
+
+        bad=$(awk -v r="$ratio" 'BEGIN{ print (r > 2.0) ? 1 : 0 }')
+        if [ "$bad" = "1" ]; then
+          echo "FAIL  phase-3 read latency drifted > 2x baseline -- regression"
+          exit 1
+        fi
+        echo "PASS  read latency within 2x baseline across the phase-3 window"
+      register: w7_latency_drift
+      changed_when: false
+    - name: Show W-7 latency drift result
+      ansible.builtin.debug:
+        msg: "{{ w7_latency_drift.stdout_lines }}"
 
 
 # ----- step 13: phase-4 sweep -- revision-count parity across every pool we wrote -------------
