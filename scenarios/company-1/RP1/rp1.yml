@@ -898,28 +898,31 @@
   connection: local
   gather_facts: false
   vars:
-    family_doc_ids:
-      - "users/sink1/family/doc/0"
-      - "users/sink1/family/rev/0"
-      - "users/sink1/family/att/0"
-      - "users/sink1/family/cnt/0"
-      - "users/sink1/family/ts/0"
-      - "users/sink1/family/tsdel/0"
-      - "users/sink1/family/conflict/0"
+    family_doc_updates:
+      - { id: "users/sink1/family/doc/0",      collection: "MicroDocs" }
+      - { id: "users/sink1/family/rev/0",      collection: "Users" }
+      - { id: "users/sink1/family/att/0",      collection: "MicroDocs" }
+      - { id: "users/sink1/family/cnt/0",      collection: "MicroDocs" }
+      - { id: "users/sink1/family/ts/0",       collection: "MicroDocs" }
+      - { id: "users/sink1/family/tsdel/0",    collection: "MicroDocs" }
+      - { id: "users/sink1/family/conflict/0", collection: "Users" }
+    family_doc_ids: "{{ family_doc_updates | map(attribute='id') | list }}"
   tasks:
-    - name: "Local PUT each family doc on sink-B (re-PUT with a local-update marker body)"
+    - name: "Local PUT each family doc on sink-B (re-PUT with a marker body, matching original collection)"
       ansible.builtin.uri:
-        url: "https://{{ sink_id | default(2) }}b.{{ ravendb_domain }}:443/databases/db1/docs?id={{ item }}"
+        url: "https://{{ sink_id | default(2) }}b.{{ ravendb_domain }}:443/databases/db1/docs?id={{ item.id }}"
         method: PUT
         body_format: json
         body:
           local_update_marker: "from-sink-B"
           "@metadata":
-            "@collection": "Users"
+            "@collection": "{{ item.collection }}"
         client_cert: "{{ cert_dir }}/client.pem"
         ca_path: "{{ cert_ca_crt }}"
         status_code: [200, 201]
-      loop: "{{ family_doc_ids }}"
+      loop: "{{ family_doc_updates }}"
+      loop_control:
+        label: "{{ item.id }} ({{ item.collection }})"
 
     - name: "Wait for sink etag parity to settle after local SB updates"
       ravendb_wait:
