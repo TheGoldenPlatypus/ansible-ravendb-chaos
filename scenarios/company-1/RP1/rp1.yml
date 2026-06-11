@@ -124,8 +124,8 @@
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
 
-# ----- step 3: baseline snapshot before any data is written -----------------------------------
-- name: RP-1 step 3 -- baseline change-vector capture (hub + sink, pre-seed)
+# ----- pre-step 2: wipe capture dir so step 3 below starts on a clean slate -------------------
+- name: RP-1 capture-dir reset (pre-seed cleanup)
   hosts: localhost
   connection: local
   gather_facts: false
@@ -134,25 +134,6 @@
       ansible.builtin.file:
         path: "{{ playbook_dir }}/capture"
         state: absent
-    - name: Create capture/baseline directory
-      ansible.builtin.file:
-        path: "{{ playbook_dir }}/capture/baseline"
-        state: directory
-
-    - name: "Capture baseline change vectors on hub + sink leaders"
-      ravendb_diagnostic:
-        kind: capture_cv
-        ravendb_domain: "{{ ravendb_domain }}"
-        client_cert: "{{ cert_dir }}/client.pem"
-        ca_cert: "{{ cert_ca_crt }}"
-        db_name: db1
-        nodes:
-          - "{{ hub_id | default(1) }}a"
-          - "{{ sink_id | default(2) }}a"
-        output_dir: "{{ playbook_dir }}/capture/baseline"
-      register: r
-    - name: Show result
-      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
 
 # ----- step 2: seed the hub with users, orders, and one of every replication-item type --------
@@ -528,6 +509,37 @@
         db_name: db1
         allowed_prefixes: ["users/sink1/", "sink1-local/"]
         assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ----- step 3: baseline CV snapshot AFTER the post-seed drain ---------------------------------
+# Per the RP-1 spec recipe: step 3 captures the baseline AFTER step 2 (seed + drain) and
+# BEFORE step 4 (burst).  Capturing pre-seed is useless -- the DB is empty so the diff at
+# step 6 has nothing to compare against.  Captured here, the step 6 diff shows what the
+# step 4 burst specifically added.
+- name: RP-1 step 3 -- baseline change-vector capture (hub + sink, post-seed, pre-burst)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Create capture/baseline directory
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/capture/baseline"
+        state: directory
+
+    - name: "Capture baseline change vectors on hub + sink leaders"
+      ravendb_diagnostic:
+        kind: capture_cv
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes:
+          - "{{ hub_id | default(1) }}a"
+          - "{{ sink_id | default(2) }}a"
+        output_dir: "{{ playbook_dir }}/capture/baseline"
       register: r
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
