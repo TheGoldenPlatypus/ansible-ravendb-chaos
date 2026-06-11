@@ -13,8 +13,8 @@
 # systemd unit with Restart=on-failure).  If your scenario needs to control the restart
 # timing, pair this with toolbox/wait/wait_for_member.yml afterwards.
 #
-# DOCKER MODE ONLY (no _ssh variant yet).  All EMR scenarios are docker-only; if/when we wire
-# EMR against bare-metal VMs, add toolbox/service/hard_kill_ravendb_ssh.yml that uses
+# DOCKER MODE ONLY (no _ssh variant yet).  All company-1 scenarios are docker-only; if/when we wire
+# company-1 against bare-metal VMs, add toolbox/service/hard_kill_ravendb_ssh.yml that uses
 # delegate_to + sudo pkill -9 -f Raven.Server (or `systemctl kill -s SIGKILL ravendb`).
 #
 # INPUTS:

@@ -782,7 +782,7 @@
 
     # I-13(a) item CV shape: walk the per-family inventory on the sink leader.  Builds that
     # keep the lane dormant (PR-22875) need expect=raw -- flip back if testing those.
-    - name: "Assert per-family inventory item CV split shape on sink leader"
+    - name: "Assert per-family inventory item CV split shape on sink leader (I-13a)"
       ravendb_diagnostic:
         kind: stored_item_cv_split
         ravendb_domain: "{{ ravendb_domain }}"
@@ -791,7 +791,7 @@
         db_name: db1
         target: "{{ sink_id | default(2) }}a"
         expect: split
-        doc_ids:
+        doc_ids: &family_doc_ids
           - "users/sink1/family/doc/0"
           - "users/sink1/family/rev/0"
           - "users/sink1/family/att/0"
@@ -799,6 +799,24 @@
           - "users/sink1/family/ts/0"
           - "users/sink1/family/tsdel/0"
           - "users/sink1/family/conflict/0"
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # I-13(c) replica preservation: same per-doc CV across sink a/b/c.  Catches the
+    # case where internal sink replication drops or rewrites the captured state on
+    # one of the followers (plan: "I-13(a)/(c) fail on SB or SC but pass on SA ->
+    # internal replication inside the sink dropped or rewrote the captured state").
+    - name: "Assert per-family stored item CV is identical across sink a/b/c (I-13c)"
+      ravendb_diagnostic:
+        kind: cross_cluster_cv_equality
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ sink_id | default(2) }}a", "{{ sink_id | default(2) }}b", "{{ sink_id | default(2) }}c"]
+        doc_ids: *family_doc_ids
         assert_mode: true
       register: r
     - name: Show result
@@ -867,41 +885,82 @@
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
 
-# ----- step 8: local edit on a sink node propagates to its peers ------------------------------
-# Pick a single doc on sink node 2b, edit it directly, and confirm the change shows up on the
-# other two sink nodes (2a, 2c).
-- name: RP-1 step 8 -- local update on SB, verify internal-replication path
+# ----- step 8: per-family local update on SB; verify CV across SA/SB/SC -----------------------
+# Plan: "Locally update one item per family on SB; verify both halves of the stored CV carry
+# the local update + replicate to SA / SC".  Implementation: re-PUT every family doc on sink-B
+# (a follower, not the leader), drain, then cross-check per-doc CV identity across all three
+# sink replicas.  Equal CV sets across {SA,SB,SC} after a local SB write proves:
+#   1. SB accepted the local write (writes on a follower work),
+#   2. SB -> SA and SB -> SC internal replication propagated the new etag/dbid entry,
+#   3. both halves of the composite CV ended up identical on every replica (no drift).
+- name: RP-1 step 8 -- per-family local update on SB, verify CV across sink a/b/c
   hosts: localhost
   connection: local
   gather_facts: false
+  vars:
+    family_doc_ids:
+      - "users/sink1/family/doc/0"
+      - "users/sink1/family/rev/0"
+      - "users/sink1/family/att/0"
+      - "users/sink1/family/cnt/0"
+      - "users/sink1/family/ts/0"
+      - "users/sink1/family/tsdel/0"
+      - "users/sink1/family/conflict/0"
   tasks:
-    # Write directly to {{ sink_id | default(2) }}b (not via hub).  Then a marker propagation
-    # confirms replication SB -> SA + SC.
-    - name: "Write local-update marker doc on sink 2b/db1"
-      ravendb_writes:
-        kind: docs
+    - name: "Local PUT each family doc on sink-B (re-PUT with a local-update marker body)"
+      ansible.builtin.uri:
+        url: "https://{{ sink_id | default(2) }}b.{{ ravendb_domain }}:443/databases/db1/docs?id={{ item }}"
+        method: PUT
+        body_format: json
+        body:
+          local_update_marker: "from-sink-B"
+          "@metadata":
+            "@collection": "Users"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        status_code: [200, 201]
+      loop: "{{ family_doc_ids }}"
+
+    - name: "Wait for sink etag parity to settle after local SB updates"
+      ravendb_wait:
+        kind: etag_parity
         ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
         ca_cert: "{{ cert_ca_crt }}"
-        target: "{{ sink_id | default(2) }}b"
         db_name: db1
-        id_prefix: "users/sink1/family/local-update"
-        count: 1
+        nodes: ["{{ sink_id | default(2) }}a", "{{ sink_id | default(2) }}b", "{{ sink_id | default(2) }}c"]
+        timeout: 120
       register: r
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
-    - name: "Wait for local-update marker to propagate sink-b -> sink-a + sink-c"
-      ravendb_wait:
-        kind: marker_propagation
+    - name: "Assert per-doc CV identical across sink a/b/c after local SB updates"
+      ravendb_diagnostic:
+        kind: cross_cluster_cv_equality
         ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
         ca_cert: "{{ cert_ca_crt }}"
         db_name: db1
-        source: "{{ sink_id | default(2) }}b"
-        targets: ["{{ sink_id | default(2) }}a", "{{ sink_id | default(2) }}c"]
-        marker_id_prefix: "users/sink1/family/local-update/"
-        timeout: 120
+        nodes: ["{{ sink_id | default(2) }}a", "{{ sink_id | default(2) }}b", "{{ sink_id | default(2) }}c"]
+        doc_ids: "{{ family_doc_ids }}"
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Still verify the split shape held on every replica after the local SB update --
+    # confirms "both halves" of the composite CV carry the local update.
+    - name: "Assert per-family CV split shape on sink-B (after local update)"
+      ravendb_diagnostic:
+        kind: stored_item_cv_split
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        target: "{{ sink_id | default(2) }}b"
+        expect: split
+        doc_ids: "{{ family_doc_ids }}"
+        assert_mode: true
       register: r
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
