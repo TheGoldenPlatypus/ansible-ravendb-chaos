@@ -683,7 +683,7 @@
     # (sampled probe set).  Doc counts already matched above; this checks revisions.
     # Note: Raven ETL by default doesn't carry revisions -- if this fails with ETL showing
     # [0] while bkp-cmp shows the actual rev counts, the ETL task config needs revisions
-    # enabled, OR Karmel's spec needs to be updated to acknowledge ETL-revisions are
+    # enabled, OR spec needs to be updated to acknowledge ETL-revisions are
     # intentionally not part of the 3-way equality.
     - name: Per-doc revision-count parity ETL tgt vs bkp-cmp tgt (must match)
       ravendb_diagnostic:

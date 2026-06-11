@@ -189,6 +189,33 @@
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
 
+# Sink-side activity: write a sink-local pool that DOES NOT match the hub->sink filter.
+# The ids live under their own top-level prefix `sink<N>-local/` so they're easy to
+# tell apart from hub-routed docs in logs and assertions. "every
+# replication scenario should have writes on the sink whenever there are writes
+# on the hub."
+- name: RP-1 step 2a-sink -- bulk seed sink-local pool on sink leader
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Seed sink-local Users (sink1-local/users/*, count={{ sink_local_seed_count }}) on sink {{ sink_cluster_leader }}/db1"
+      ravendb_writes:
+        kind: docs
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ sink_cluster_leader }}"
+        db_name: db1
+        id_prefix: "sink1-local/users"
+        count: "{{ sink_local_seed_count | default(300) | int }}"
+        body_tag: sink1-local
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
 # Per-family inventory: one item per replication-item type, all under users/sink1/family/* so
 # the filtered pull picks them up.  Asserted at step 7 via stored_item_cv_split on the sink.
 - name: RP-1 step 2b -- per-family inventory (doc, tombstone, revision, attachment, counter, TS, ...)
@@ -513,7 +540,7 @@
         ca_cert: "{{ cert_ca_crt }}"
         sink_cluster_leader: "{{ sink_id | default(2) }}a"
         db_name: db1
-        allowed_prefixes: ["users/sink1/"]
+        allowed_prefixes: ["users/sink1/", "sink1-local/"]
         assert_mode: true
       register: r
     - name: Show result
@@ -716,7 +743,7 @@
         ca_cert: "{{ cert_ca_crt }}"
         sink_cluster_leader: "{{ sink_id | default(2) }}a"
         db_name: db1
-        allowed_prefixes: ["users/sink1/"]
+        allowed_prefixes: ["users/sink1/", "sink1-local/"]
         assert_mode: true
       register: r
     - name: Show result

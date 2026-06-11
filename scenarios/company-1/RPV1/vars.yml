@@ -42,6 +42,17 @@ bucket_orders_sink2: 2000
 bucket_orders_hub:   2000
 bucket_internal:     3000
 
+# ---------- Sink-local seeds (symmetric writes on each sink) ----------------
+# Per Karmel: every replication scenario needs writes on the sink whenever
+# there are writes on the hub.  We seed `sink1-local/users/*` on sink-1's
+# leader and `sink2-local/users/*` on sink-2's leader at step 3, and run a
+# parallel single-bucket workload on each sink through the rolling upgrade
+# (step 5).  Both prefixes are intentionally outside the hub->sink filters
+# so the docs are sink-local-only.  Whitelisted in every filter_compliance
+# call via the third entry in `allowed_prefixes`.
+sink1_local_seed_count: 2000
+sink2_local_seed_count: 2000
+
 # ---------- Filter spec -- disjoint sink filters; hub-only collections stay on hub ----
 sink1_allowed_prefixes: ["users/sink1/*", "orders/sink1/*"]
 sink2_allowed_prefixes: ["users/sink2/*", "orders/sink2/*"]

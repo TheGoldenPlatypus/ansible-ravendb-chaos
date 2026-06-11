@@ -35,6 +35,15 @@ sink_allowed_prefixes: ["users/sink1/*"]
 bulk_users_sink1: 10000
 bulk_orders_hub:  10000
 
+# ---------- Sink-local seed (symmetric writes on the sink) ------------------
+# "every replication scenario needs writes on the sink whenever
+# there are writes on the hub."  We write a pool of `sink1-local/users/*`
+# docs directly to the sink leader at step 2a-sink (mirrors the hub bulk
+# seed, kept small because the goal is just to have sink-side activity,
+# not to stress).  The `sink1-local/` prefix is intentionally outside the
+# hub-side filter `users/sink1/*` so these docs are sink-local-only.
+sink_local_seed_count: 300
+
 # ---------- Per-family inventory --------------------------------------------
 # Per the RP-1 spec: "one item of each replication-item type under users/sink1/family/*".
 # the spec lists 12 item types.  We implement the 10 reachable via existing toolbox tools:

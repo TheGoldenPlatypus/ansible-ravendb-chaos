@@ -363,6 +363,41 @@
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
+    # Sink-side activity: write sink-local pools that do NOT match the hub->sink filters.
+    # Top-level prefixes `sink1-local/` and `sink2-local/` so they're easy to tell
+    # apart from hub-routed docs in logs and assertions.  Per Karmel: every
+    # replication scenario should have writes on the sink whenever there are writes
+    # on the hub.
+    - name: "Seed sink-1 local (sink1-local/users/*, count={{ sink1_local_seed_count }}) on {{ sink1_id | default(2) }}a/db1"
+      ravendb_writes:
+        kind: docs
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ sink1_id | default(2) }}a"
+        db_name: db1
+        id_prefix: "sink1-local/users"
+        count: "{{ sink1_local_seed_count | default(2000) | int }}"
+        body_tag: sink1-local
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Seed sink-2 local (sink2-local/users/*, count={{ sink2_local_seed_count }}) on {{ sink2_id | default(3) }}a/db1"
+      ravendb_writes:
+        kind: docs
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ sink2_id | default(3) }}a"
+        db_name: db1
+        id_prefix: "sink2-local/users"
+        count: "{{ sink2_local_seed_count | default(2000) | int }}"
+        body_tag: sink2-local
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
     # Wait for Hub itself to settle
     - name: "Wait for hub a/b/c quiescence after seed"
       ravendb_wait:
@@ -427,7 +462,7 @@
         ca_cert: "{{ cert_ca_crt }}"
         sink_cluster_leader: "{{ sink1_id | default(2) }}a"
         db_name: db1
-        allowed_prefixes: ["users/sink1/", "orders/sink1/"]
+        allowed_prefixes: ["users/sink1/", "orders/sink1/", "sink1-local/"]
         assert_mode: true
       register: r
     - name: Show result
@@ -441,7 +476,7 @@
         ca_cert: "{{ cert_ca_crt }}"
         sink_cluster_leader: "{{ sink2_id | default(3) }}a"
         db_name: db1
-        allowed_prefixes: ["users/sink2/", "orders/sink2/"]
+        allowed_prefixes: ["users/sink2/", "orders/sink2/", "sink2-local/"]
         assert_mode: true
       register: r
     - name: Show result
@@ -574,6 +609,35 @@
       async: 14400
       poll: 0
 
+    # Parallel sink-side workloads (one per sink cluster) running for the full
+    # upgrade so the sinks aren't silent while hub churns.  Single-bucket each,
+    # writing under sink<N>-local/ (filter-NOT-matching, sink-local only).
+    - name: Launch W-1-Sink-1 (sink-local CRUD churn on sink-1 leader, background async)
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w1/workload_w1.sh"
+      environment:
+        TARGET:        "{{ sink1_id | default(2) }}a"
+        DB_NAME:       "{{ db_name }}"
+        BUCKETS_SPEC:  "sink1-local/users:{{ sink1_local_seed_count | default(2000) | int }}:100"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: 14400
+      poll: 0
+
+    - name: Launch W-1-Sink-2 (sink-local CRUD churn on sink-2 leader, background async)
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w1/workload_w1.sh"
+      environment:
+        TARGET:        "{{ sink2_id | default(3) }}a"
+        DB_NAME:       "{{ db_name }}"
+        BUCKETS_SPEC:  "sink2-local/users:{{ sink2_local_seed_count | default(2000) | int }}:100"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: 14400
+      poll: 0
+
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
   vars:
     pidfile: "/tmp/w1-{{ hub_id | default(1) }}a-db1.pid"
@@ -582,6 +646,16 @@
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
   vars:
     pidfile: "/tmp/w2-{{ hub_id | default(1) }}a-db1.pid"
+    timeout_secs: 30
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars:
+    pidfile: "/tmp/w1-{{ sink1_id | default(2) }}a-db1.pid"
+    timeout_secs: 30
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars:
+    pidfile: "/tmp/w1-{{ sink2_id | default(3) }}a-db1.pid"
     timeout_secs: 30
 
 
@@ -688,7 +762,7 @@
         ca_cert: "{{ cert_ca_crt }}"
         sink_cluster_leader: "{{ sink1_id | default(2) }}a"
         db_name: db1
-        allowed_prefixes: ["users/sink1/", "orders/sink1/"]
+        allowed_prefixes: ["users/sink1/", "orders/sink1/", "sink1-local/"]
         assert_mode: true
       register: r
     - name: Show result
@@ -702,7 +776,7 @@
         ca_cert: "{{ cert_ca_crt }}"
         sink_cluster_leader: "{{ sink2_id | default(3) }}a"
         db_name: db1
-        allowed_prefixes: ["users/sink2/", "orders/sink2/"]
+        allowed_prefixes: ["users/sink2/", "orders/sink2/", "sink2-local/"]
         assert_mode: true
       register: r
     - name: Show result
@@ -852,7 +926,7 @@
         ca_cert: "{{ cert_ca_crt }}"
         sink_cluster_leader: "{{ sink1_id | default(2) }}a"
         db_name: db1
-        allowed_prefixes: ["users/sink1/", "orders/sink1/"]
+        allowed_prefixes: ["users/sink1/", "orders/sink1/", "sink1-local/"]
         assert_mode: true
       register: r
     - name: Show result
@@ -866,7 +940,7 @@
         ca_cert: "{{ cert_ca_crt }}"
         sink_cluster_leader: "{{ sink2_id | default(3) }}a"
         db_name: db1
-        allowed_prefixes: ["users/sink2/", "orders/sink2/"]
+        allowed_prefixes: ["users/sink2/", "orders/sink2/", "sink2-local/"]
         assert_mode: true
       register: r
     - name: Show result
@@ -1035,7 +1109,7 @@
         ca_cert: "{{ cert_ca_crt }}"
         sink_cluster_leader: "{{ sink1_id | default(2) }}a"
         db_name: db1
-        allowed_prefixes: ["users/sink1/", "orders/sink1/"]
+        allowed_prefixes: ["users/sink1/", "orders/sink1/", "sink1-local/"]
         assert_mode: true
       register: r
     - name: Show result
@@ -1049,7 +1123,7 @@
         ca_cert: "{{ cert_ca_crt }}"
         sink_cluster_leader: "{{ sink2_id | default(3) }}a"
         db_name: db1
-        allowed_prefixes: ["users/sink2/", "orders/sink2/"]
+        allowed_prefixes: ["users/sink2/", "orders/sink2/", "sink2-local/"]
         assert_mode: true
       register: r
     - name: Show result
@@ -1503,7 +1577,7 @@
         ca_cert: "{{ cert_ca_crt }}"
         sink_cluster_leader: "{{ sink1_id | default(2) }}a"
         db_name: db1
-        allowed_prefixes: ["users/sink1/", "orders/sink1/"]
+        allowed_prefixes: ["users/sink1/", "orders/sink1/", "sink1-local/"]
         assert_mode: true
       register: r
     - name: Show result
@@ -1517,7 +1591,7 @@
         ca_cert: "{{ cert_ca_crt }}"
         sink_cluster_leader: "{{ sink2_id | default(3) }}a"
         db_name: db1
-        allowed_prefixes: ["users/sink2/", "orders/sink2/"]
+        allowed_prefixes: ["users/sink2/", "orders/sink2/", "sink2-local/"]
         assert_mode: true
       register: r
     - name: Show result
