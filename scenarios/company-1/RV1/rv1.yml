@@ -895,48 +895,16 @@
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
-    # Phase-3 read-latency drift check (per the plan: "no monotonic latency growth > 2x
-    # baseline").  W-7 reader logs one `history_fetch elapsed_ms=N` per sample (default
-    # 30s) into /tmp/w7-reader-1a-db1.log.  Compute the mean elapsed_ms over the FIRST
-    # quarter of samples vs the LAST quarter and assert the ratio <= 2.0.  Mean (not
-    # p99) because at default sample rate over 60 min we only get ~120 samples; p99
-    # would be 1 point, too noisy for a stable threshold.
-    - name: "Phase 3 checkpoint: assert W-7 reader p99 latency drift <= 2x baseline"
-      ansible.builtin.shell: |
-        set -eu
-        log=/tmp/w7-reader-{{ cluster_id | default(1) }}a-db1.log
-        if [ ! -s "$log" ]; then
-          echo "FAIL  W-7 reader log $log is missing or empty"; exit 1
-        fi
-
-        # All elapsed_ms values from history_fetch lines, in order.
-        readarray -t samples < <(awk '/history_fetch/ {
-          if (match($0, /elapsed_ms=([0-9]+)/, m)) print m[1]
-        }' "$log")
-
-        n=${#samples[@]}
-        if [ "$n" -lt 8 ]; then
-          echo "FAIL  too few latency samples ($n) to compute first/last-quarter means"
-          exit 1
-        fi
-
-        q=$(( n / 4 ))
-        first_mean=$(printf '%s\n' "${samples[@]:0:$q}" | awk '{s+=$1} END{printf "%.1f", s/NR}')
-        last_mean=$(printf '%s\n'  "${samples[@]: -$q}" | awk '{s+=$1} END{printf "%.1f", s/NR}')
-        ratio=$(awk -v a="$last_mean" -v b="$first_mean" 'BEGIN{ printf "%.3f", a/b }')
-
-        echo "latency drift check"
-        echo "  total samples: $n  (quarter window = $q samples)"
-        echo "  first-quarter mean elapsed_ms: $first_mean"
-        echo "  last-quarter  mean elapsed_ms: $last_mean"
-        echo "  ratio (last / first):          $ratio (must be <= 2.0)"
-
-        bad=$(awk -v r="$ratio" 'BEGIN{ print (r > 2.0) ? 1 : 0 }')
-        if [ "$bad" = "1" ]; then
-          echo "FAIL  phase-3 read latency drifted > 2x baseline -- regression"
-          exit 1
-        fi
-        echo "PASS  read latency within 2x baseline across the phase-3 window"
+    # Phase-3 read-latency drift check (plan: "no monotonic latency growth > 2x
+    # baseline").  Delegated to assert_latency_drift.py which parses the W-7 reader
+    # log and compares first-quarter vs last-quarter mean elapsed_ms.  Exits 1 with a
+    # FAIL line on regression.
+    - name: "Phase 3 checkpoint: assert W-7 reader latency drift <= 2x baseline"
+      ansible.builtin.command:
+        cmd: >-
+          python3 {{ playbook_dir }}/../workloads/w7/assert_latency_drift.py
+          /tmp/w7-reader-{{ cluster_id | default(1) }}a-db1.log
+          2.0
       register: w7_latency_drift
       changed_when: false
     - name: Show W-7 latency drift result
