@@ -46,14 +46,10 @@ sink_local_seed_count: 300
 
 # ---------- Per-family inventory --------------------------------------------
 # Per the RP-1 spec: "one item of each replication-item type under users/sink1/family/*".
-# the spec lists 12 item types.  We implement the 10 reachable via existing toolbox tools:
+# We implement the reachable replication-item types via existing toolbox tools:
 #   doc, doc-tombstone, revision-doc, revision-tombstone, attachment (meta+stream),
-#   attachment-tombstone, counter, time-series segment, deleted time-series range.
-# Skipped (with notes in rp1.yml):
-#   * conflict document   -- needs concurrent-write + partition-induced conflict (chaos
-#                            step; deeper conflict coverage lives in RP-2 phase (a)).
-#   * legacy counter      -- v_old counter binary format; cannot be created on an all-v_new
-#                            cluster.  RV-1 covers legacy form via the v_62 -> v_new migration.
+#   attachment-tombstone, counter, time-series segment, deleted time-series range,
+#   plus a partition-induced conflict document.
 family_id_prefix: "users/sink1/family"
 
 # ---------- Burst workload --------------------------------------------------

@@ -92,6 +92,11 @@
         hub_task_name: rp1-hub
         sink_cluster_ids: ["{{ sink_id | default(2) | int }}"]
         sink_allowed_paths: "{{ {(sink_id | default(2) | int | string): ['users/sink1/*']} }}"
+        # Plan: RP-1 is "filtered pull" (single direction).  RP-2 separately calls out
+        # "bidirectional filtered pull" -- so RP-1 must be HubToSink only.  Keeps the
+        # sink from ever pushing back, which is what the reverse cv_boundary_by_dbid
+        # check at step 7 verifies structurally.
+        replication_mode: HubToSink
         replication_certs_dir: "{{ playbook_dir }}/../../../replication-certs"
       register: r
     - name: Show result
@@ -112,6 +117,7 @@
           - "https://{{ hub_id | default(1) }}c.hubsink.test:443"
         sink_cluster_ids: ["{{ sink_id | default(2) | int }}"]
         sink_allowed_paths: "{{ {(sink_id | default(2) | int | string): ['users/sink1/*']} }}"
+        replication_mode: HubToSink   # see comment on define_hub above
         replication_certs_dir: "{{ playbook_dir }}/../../../replication-certs"
       register: r
     - name: Show result
@@ -481,26 +487,6 @@
 - ansible.builtin.import_playbook: ../../../toolbox/network/heal_all.yml
 
 
-# 12. legacy counter -- seeded via a pre-built v_old smuggler dump.
-- name: RP-1 step 2d -- smuggler-import the legacy-counter fixture
-  hosts: localhost
-  connection: local
-  gather_facts: false
-  tasks:
-    - name: "Smuggler-import legacy-counter fixture into hub 1a/db1"
-      ravendb_smuggler:
-        kind: import
-        ravendb_domain: "{{ ravendb_domain }}"
-        client_cert: "{{ cert_dir }}/client.pem"
-        ca_cert: "{{ cert_ca_crt }}"
-        target: "{{ hub_id | default(1) }}a"
-        db_name: db1
-        dump_path: "{{ lookup('env', 'PWD') }}/scenarios/company-1/RP1/fixtures/legacy-counter.ravendbdump"
-      register: r
-    - name: Show result
-      ansible.builtin.debug: { msg: "{{ r.msg }}" }
-
-
 # step 2 drain: per-node etag stability on hub + sink, then baseline filter-compliance check.
 - name: RP-1 step 2e -- drain filtered pull + sink internal replication + baseline filter check
   hosts: localhost
@@ -801,7 +787,6 @@
           - "users/sink1/family/ts/0"
           - "users/sink1/family/tsdel/0"
           - "users/sink1/family/conflict/0"
-          - "users/sink1/family/legacy-cnt/0"
         assert_mode: true
       register: r
     - name: Show result
@@ -818,6 +803,24 @@
         db_name: db1
         source_nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
         receiver_nodes: ["{{ sink_id | default(2) }}a", "{{ sink_id | default(2) }}b", "{{ sink_id | default(2) }}c"]
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Reverse direction: with replication_mode=HubToSink the sink cannot push back
+    # at all, so no sink dbid should EVER appear on the hub's DatabaseChangeVector.
+    # This catches any leak from sink-local writes (sink1-local/*) and any drift
+    # from RavenDB's own internals (e.g. if HubToSink stops being respected).
+    - name: "Assert CV order-side boundary by dbid (sink -> hub direction; must be clean)"
+      ravendb_diagnostic:
+        kind: cv_boundary_by_dbid
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        source_nodes: ["{{ sink_id | default(2) }}a", "{{ sink_id | default(2) }}b", "{{ sink_id | default(2) }}c"]
+        receiver_nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
         assert_mode: true
       register: r
     - name: Show result

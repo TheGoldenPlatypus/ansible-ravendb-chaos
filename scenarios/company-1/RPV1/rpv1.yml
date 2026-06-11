@@ -207,6 +207,11 @@
               (sink2_id | default(3) | int | string): ['users/sink2/*', 'orders/sink2/*']
             }
           }}
+        # Plan says "filter-aware" filtered pull with disjoint filters, no mention of
+        # bidirectional (RP-2 explicitly calls bidirectional out separately).  So
+        # RPV-1 is HubToSink only -- sinks never push back to the hub.  The step-12
+        # reverse cv_boundary_by_dbid assertion verifies this structurally.
+        replication_mode: HubToSink
         replication_certs_dir: "{{ playbook_dir }}/../../../replication-certs"
       register: r
     - name: Show result
@@ -234,6 +239,7 @@
               (sink2_id | default(3) | int | string): ['users/sink2/*', 'orders/sink2/*']
             }
           }}
+        replication_mode: HubToSink   # see comment on define_hub above
         replication_certs_dir: "{{ playbook_dir }}/../../../replication-certs"
       register: r
     - name: Show result
@@ -1186,6 +1192,30 @@
         db_name: db1
         source_nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
         receiver_nodes: ["{{ sink2_id | default(3) }}a", "{{ sink2_id | default(3) }}b", "{{ sink2_id | default(3) }}c"]
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Reverse direction: with replication_mode=HubToSink (set in step 2) neither sink
+    # can push back to the hub, so no sink dbid should EVER appear on the hub's
+    # DatabaseChangeVector.  Catches any leak from sink-local writes (sink1-local/*
+    # + sink2-local/*) and any drift if HubToSink stops being respected.
+    - name: "Endpoint I-13b reverse: assert CV-boundary order-side sink-1 + sink-2 -> hub (must be clean)"
+      ravendb_diagnostic:
+        kind: cv_boundary_by_dbid
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        source_nodes:
+          - "{{ sink1_id | default(2) }}a"
+          - "{{ sink1_id | default(2) }}b"
+          - "{{ sink1_id | default(2) }}c"
+          - "{{ sink2_id | default(3) }}a"
+          - "{{ sink2_id | default(3) }}b"
+          - "{{ sink2_id | default(3) }}c"
+        receiver_nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
         assert_mode: true
       register: r
     - name: Show result
