@@ -717,6 +717,8 @@ def main():
     except Exception as e:
         module.fail_json(msg=str(e))
 
+    if isinstance(message, list):
+        message = "\n".join(message)
     module.exit_json(changed=False, msg=message)
 
 

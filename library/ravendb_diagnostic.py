@@ -1582,10 +1582,12 @@ def main():
     try:
         message = handler(module.params)
     except DiagnosticViolation as e:
-        module.fail_json(msg=e.lines)
+        module.fail_json(msg="\n".join(e.lines) if isinstance(e.lines, list) else str(e.lines))
     except Exception as e:
         module.fail_json(msg=str(e))
 
+    if isinstance(message, list):
+        message = "\n".join(message)
     module.exit_json(changed=False, msg=message)
 
 
