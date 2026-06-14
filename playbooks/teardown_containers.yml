@@ -54,7 +54,11 @@
       ansible.builtin.shell: |
         cid_start={{ cluster_id_start | default(1) | int }}
         cid_count={{ clusters_count | default(1) | int }}
-        for ((cid=cid_start; cid<cid_start+cid_count; cid++)); do
+        cid_end=$((cid_start + cid_count - 1))
+        # POSIX-compatible loop: ansible's `shell:` runs /bin/sh (dash on Ubuntu)
+        # which doesn't support bash's `for ((...))` C-style loops.  `seq` works
+        # in both dash and bash.
+        for cid in $(seq "$cid_start" "$cid_end"); do
           # match pidfiles like /tmp/w*-<cid>[a-z]-db1*.pid (with or without -w<N> suffix)
           for pf in /tmp/w*-${cid}[a-z]-db1*.pid; do
             [ -e "$pf" ] || continue
