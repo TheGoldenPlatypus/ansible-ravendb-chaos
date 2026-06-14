@@ -136,3 +136,13 @@ filter_drain_budget_secs: 600
 # but per-node counts only equalize once cleanup has caught up.  300s = 5min ceiling;
 # bump for slower labs.
 tombstone_settle_timeout_secs: 300
+
+t0_stats_assert_fields:
+  - CountOfAttachments
+  - CountOfConflicts
+  - CountOfDocuments
+  - CountOfDocumentsConflicts
+  - CountOfRemoteAttachments
+  - CountOfRevisionDocuments
+  - CountOfTimeSeriesDeletedRanges
+  - CountOfUniqueAttachments

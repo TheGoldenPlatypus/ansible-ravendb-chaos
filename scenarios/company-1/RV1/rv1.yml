@@ -158,6 +158,7 @@
   hosts: localhost
   connection: local
   gather_facts: false
+  vars_files: [vars.yml]
   tasks:
     - name: "T0 baseline: dump schema version on a/b/c (expect all v_old)"
       ravendb_diagnostic:
@@ -178,6 +179,7 @@
         ca_cert: "{{ cert_ca_crt }}"
         db_name: db1
         nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
+        assert_fields: "{{ t0_stats_assert_fields }}"
         assert_mode: true
       register: r
     - name: Show result

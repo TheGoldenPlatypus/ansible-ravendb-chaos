@@ -540,8 +540,7 @@
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
-    # One /stats parity check per cluster while everything is still quiet.
-    - name: "T0: assert /stats parity across hub a/b/c"
+    - name: "T0: assert /stats parity across hub a/b/c (tombstones excluded)"
       ravendb_diagnostic:
         kind: stats_parity
         ravendb_domain: "{{ ravendb_domain }}"
@@ -549,12 +548,13 @@
         ca_cert: "{{ cert_ca_crt }}"
         db_name: db1
         nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
+        assert_fields: "{{ t0_stats_assert_fields }}"
         assert_mode: true
       register: r
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
-    - name: "T0: assert /stats parity across sink-1 a/b/c"
+    - name: "T0: assert /stats parity across sink-1 a/b/c (tombstones excluded)"
       ravendb_diagnostic:
         kind: stats_parity
         ravendb_domain: "{{ ravendb_domain }}"
@@ -562,12 +562,13 @@
         ca_cert: "{{ cert_ca_crt }}"
         db_name: db1
         nodes: ["{{ sink1_id | default(2) }}a", "{{ sink1_id | default(2) }}b", "{{ sink1_id | default(2) }}c"]
+        assert_fields: "{{ t0_stats_assert_fields }}"
         assert_mode: true
       register: r
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
-    - name: "T0: assert /stats parity across sink-2 a/b/c"
+    - name: "T0: assert /stats parity across sink-2 a/b/c (tombstones excluded)"
       ravendb_diagnostic:
         kind: stats_parity
         ravendb_domain: "{{ ravendb_domain }}"
@@ -575,6 +576,7 @@
         ca_cert: "{{ cert_ca_crt }}"
         db_name: db1
         nodes: ["{{ sink2_id | default(3) }}a", "{{ sink2_id | default(3) }}b", "{{ sink2_id | default(3) }}c"]
+        assert_fields: "{{ t0_stats_assert_fields }}"
         assert_mode: true
       register: r
     - name: Show result

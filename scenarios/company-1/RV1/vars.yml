@@ -108,3 +108,13 @@ w3_cooldown_secs: 45
 # NOTE: size envelope baseline path + growth cap are inlined in rv1.yml at the
 # import_playbook call sites (vars defined here can't be passed through import_playbook
 # vars blocks, which evaluate outside any play context).
+
+t0_stats_assert_fields:
+  - CountOfAttachments
+  - CountOfConflicts
+  - CountOfDocuments
+  - CountOfDocumentsConflicts
+  - CountOfRemoteAttachments
+  - CountOfRevisionDocuments
+  - CountOfTimeSeriesDeletedRanges
+  - CountOfUniqueAttachments
