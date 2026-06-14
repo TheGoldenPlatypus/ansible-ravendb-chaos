@@ -303,8 +303,8 @@ def k_etag_parity(p):
     if not has_db:
         raise ValueError("no probed node has database '%s'" % p["db_name"])
 
-    prev = snapshot_stats_field(p, has_db, "LastDatabaseEtag")
-    prev_time = now_hms()
+    prev = None
+    prev_time = None
 
     def predicate():
         nonlocal prev, prev_time
@@ -315,6 +315,10 @@ def k_etag_parity(p):
             # empty, but if any future caller bypasses that, refuse to PASS
             # via all([])==True.
             raise RuntimeError("k_etag_parity: has_db is empty -- vacuous PASS guard")
+        if prev is None:
+            prev = current
+            prev_time = current_time
+            return False, (current_time, current, current_time, current)
         stable = all(prev.get(n) == current.get(n) for n in has_db)
         snapshots = (prev_time, prev, current_time, current)
         if stable:
@@ -352,8 +356,8 @@ def k_docs_drain(p):
     if not has_db:
         raise ValueError("no probed node has database '%s'" % p["db_name"])
 
-    prev = snapshot_stats_field(p, has_db, "DatabaseChangeVector")
-    prev_time = now_hms()
+    prev = None
+    prev_time = None
 
     def predicate():
         nonlocal prev, prev_time
@@ -361,6 +365,10 @@ def k_docs_drain(p):
         current_time = now_hms()
         if not has_db:
             raise RuntimeError("k_docs_drain: has_db is empty -- vacuous PASS guard")
+        if prev is None:
+            prev = current
+            prev_time = current_time
+            return False, (current_time, current, current_time, current)
         stable = all(prev.get(n) == current.get(n) for n in has_db)
         snapshots = (prev_time, prev, current_time, current)
         if stable:
