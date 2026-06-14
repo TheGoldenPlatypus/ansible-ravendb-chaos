@@ -1,5 +1,7 @@
+import errno
 import http.client
 import json
+import socket
 import ssl
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -16,12 +18,13 @@ from urllib.request import Request, urlopen
 TARGET_URL_OVERRIDES: dict = {}
 
 
-# Cache one SSLContext per (ca_cert, client_cert) pair.  Recreating the context
-# on every call -- which is what the old code did -- re-parses both PEM files
-# from disk per request.  Under a 50k-doc seed that's 50k file reads + cert
-# chain validations on the controller, enough to noticeably slow the run and
-# (depending on Python version) churn allocations.  Once-and-cached is what
-# every production HTTPS client does.
+# ---------------------------------------------------------------------------
+# SSL context cache: build one per (ca_cert, client_cert) pair and reuse.
+# Recreating the context on every call re-parses both PEM files from disk per
+# request -- under a 50k-doc seed that's 50k file reads + cert chain
+# validations on the controller, enough to noticeably slow the run and (on
+# some Python builds) churn allocations / leak fds.
+# ---------------------------------------------------------------------------
 _SSL_CONTEXT_CACHE: dict = {}
 
 
@@ -35,52 +38,122 @@ def _ssl_context_for(client_cert, ca_cert):
     return ctx
 
 
-# How many times to retry a request that died mid-flight with a transport
-# error.  RavenDB occasionally closes the TCP connection before sending the
-# HTTP response (load shed, idle keepalive recycle, race between accept and
-# the per-connection limiter).  urllib surfaces this as one of:
-#   * http.client.RemoteDisconnected("Remote end closed connection without response")
-#   * ConnectionResetError
-#   * URLError wrapping either of the above
-# Real HTTPError responses (4xx/5xx) are NOT retried -- those are real server
-# answers, not transport failures.
-_TRANSPORT_RETRY_MAX = 2
-_TRANSPORT_RETRY_BACKOFF_SECS = (0.2, 0.5)   # one entry per retry attempt
+# ---------------------------------------------------------------------------
+# Retry on transient transport errors.
+#
+# Under sustained load against the RavenDB chaos lab we've seen every one of
+# these flavors of transport failure at one point or another:
+#   - TLS EOF without close_notify  (ssl.SSLEOFError, also as bare SSLError
+#     with reason="UNEXPECTED_EOF_WHILE_READING")
+#   - Server briefly closes the half-open keepalive socket
+#     (http.client.RemoteDisconnected)
+#   - Server's accept queue full briefly      (ConnectionRefusedError)
+#   - Server-side abort mid-stream            (ConnectionAbortedError)
+#   - Server reset existing socket            (ConnectionResetError)
+#   - Server closed while we were sending     (BrokenPipeError, EPIPE)
+#   - Socket-level read/write timeout         (TimeoutError, also socket.timeout)
+#   - DNS resolver briefly unhappy            (socket.gaierror -- systemd-resolved
+#     hiccups under burst)
+#   - Truncated body / bad status line during cluster operation
+#     (http.client.IncompleteRead, BadStatusLine, LineTooLong)
+#   - Any of the above wrapped in URLError
+#   - OSError carrying transient errno values (EAGAIN, EHOSTUNREACH, etc.)
+#
+# What we deliberately do NOT retry:
+#   - HTTPError 4xx/5xx  -> real server responses, caller routes on the code
+#   - ssl.SSLCertVerificationError / HOSTNAME_MISMATCH / CERTIFICATE_VERIFY_FAILED
+#     -> real config bugs, retrying just delays the user-visible failure
+#   - ValueError / TypeError -> programmer bugs in the caller
+#
+# Retry budget: 4 retries (5 tries total) with escalating backoff totaling
+# ~3.7s.  Sized so RavenDB's post-config-change settle window (sub-second
+# typically, 1-2s seen on kaiju) fits comfortably.  Real persistent failures
+# still surface within ~4s.
+# ---------------------------------------------------------------------------
+_TRANSPORT_RETRY_MAX = 4
+_TRANSPORT_RETRY_BACKOFF_SECS = (0.2, 0.5, 1.0, 2.0)
+
+# ssl.SSLError.reason strings we treat as transient.  Everything else (cert
+# verify, hostname mismatch, alert codes for client misconfig) bubbles up.
+_TRANSIENT_SSL_REASONS = frozenset([
+    "UNEXPECTED_EOF_WHILE_READING",
+    "WRONG_VERSION_NUMBER",
+    "SSL_ERROR_SYSCALL",
+    "APPLICATION_DATA_AFTER_CLOSE_NOTIFY",
+    "TLSV1_ALERT_INTERNAL_ERROR",
+    "TLSV1_ALERT_USER_CANCELLED",
+])
+
+# OSError.errno values worth retrying.  Linux numbers; Windows uses the same
+# names via the errno module so this works cross-platform.
+_TRANSIENT_ERRNOS = frozenset([
+    errno.ECONNREFUSED,    # 111  server briefly not accepting
+    errno.ECONNRESET,      # 104  RST received
+    errno.ECONNABORTED,    # 103  local abort
+    errno.EPIPE,           # 32   broken pipe
+    errno.ETIMEDOUT,       # 110  socket op timed out
+    errno.EHOSTUNREACH,    # 113  routing blip
+    errno.ENETUNREACH,     # 101  routing blip
+    errno.ENETRESET,       # 102  network dropped during connection
+    errno.EAGAIN,          # 11   resource temporarily unavailable
+])
+_eho = getattr(errno, "EHOSTDOWN", None)
+if _eho is not None:
+    _TRANSIENT_ERRNOS = _TRANSIENT_ERRNOS | {_eho}
+
+
+# Direct transport-failure exception classes (some Python versions wrap them
+# in URLError, others bubble them up directly).
+_TRANSIENT_DIRECT_TYPES = (
+    http.client.RemoteDisconnected,    # server closed before sending response
+    http.client.BadStatusLine,         # garbage status line during restart
+    http.client.IncompleteRead,        # body truncated mid-stream
+    http.client.LineTooLong,           # response header line malformed under load
+    ConnectionResetError,
+    ConnectionRefusedError,
+    ConnectionAbortedError,
+    BrokenPipeError,
+    TimeoutError,                      # PEP 3151 alias of socket.timeout
+    socket.timeout,                    # explicit -- old Python paths still raise this
+    socket.gaierror,                   # transient DNS / resolver hiccup
+    EOFError,
+    ssl.SSLEOFError,                   # TLS terminated without close_notify
+)
 
 
 def _is_transient_transport_error(exc):
     """Return True if `exc` is the kind of transport-level failure that's worth
-    a quick retry (server closed mid-stream, connection reset, refused-accept,
-    EOF before headers, broken-pipe on send).  HTTPError-style 4xx/5xx are
-    explicitly NOT considered transient here -- those are real responses,
-    callers handle them on the status code."""
-    # Direct transport-failure exceptions urllib may surface (some Python
-    # versions wrap them in URLError, others bubble them up directly).
-    direct = (
-        http.client.RemoteDisconnected,
-        ConnectionResetError,
-        ConnectionRefusedError,    # server's accept queue briefly full
-        ConnectionAbortedError,    # server-side abort mid-stream
-        BrokenPipeError,           # server closed while we were writing
-        TimeoutError,              # socket-level read/write timeout
-        EOFError,                  # peer closed before sending headers
-        ssl.SSLEOFError,           # TLS terminated without close_notify
-                                   # (Python's "UNEXPECTED_EOF_WHILE_READING")
-    )
-    if isinstance(exc, direct):
+    a quick retry.  Comprehensive: covers socket-level, HTTP-pre-response,
+    TLS, and DNS classes that have surfaced under sustained chaos-lab load.
+
+    HTTPError-style 4xx/5xx are explicitly NOT considered transient here --
+    those are real responses, callers handle them on the status code.  Real
+    SSL configuration errors (cert verification, hostname mismatch, etc.)
+    are NOT retried either -- they'd never succeed on a retry."""
+    if isinstance(exc, _TRANSIENT_DIRECT_TYPES):
         return True
+
+    # ssl.SSLError without being SSLEOFError -- match on the reason string for
+    # the specific transient cases we've seen.  Cert-verify failures keep
+    # bubbling up.
+    if isinstance(exc, ssl.SSLError):
+        reason = getattr(exc, "reason", "") or ""
+        if reason in _TRANSIENT_SSL_REASONS:
+            return True
+
+    # Bare OSError carrying a transient errno (covers OSError subclasses we
+    # didn't enumerate above and the catch-all `OSError(EHOSTUNREACH, ...)`).
+    if isinstance(exc, OSError) and not isinstance(exc, _TRANSIENT_DIRECT_TYPES):
+        if getattr(exc, "errno", None) in _TRANSIENT_ERRNOS:
+            return True
+
+    # URLError commonly wraps every one of the above.  Unwrap one level
+    # (recursively, in case of nested URLError -> URLError -> SSLError).
     if isinstance(exc, URLError):
         inner = getattr(exc, "reason", None)
-        if isinstance(inner, direct):
+        if inner is not None and _is_transient_transport_error(inner):
             return True
-        # Defensive: some Python versions surface TLS-EOF as a bare ssl.SSLError
-        # (not the SSLEOFError subclass) with reason='UNEXPECTED_EOF_WHILE_READING'.
-        # Match that specific reason -- but NOT all SSLErrors (cert-verify and
-        # hostname-mismatch are real config bugs that mustn't be silently retried).
-        if isinstance(inner, ssl.SSLError):
-            reason = getattr(inner, "reason", "") or ""
-            if "UNEXPECTED_EOF" in reason:
-                return True
+
     return False
 
 
@@ -97,11 +170,10 @@ def request(method, target, domain, path, client_cert, ca_cert,
         ctx = _ssl_context_for(client_cert, ca_cert)
 
     data = None
-    # `Connection: close` tells the server "don't keep this socket open after
-    # the response".  urllib.urlopen doesn't pool by default, so we open a
-    # fresh socket per call anyway -- this header just makes the HTTP/1.1
-    # semantics match the underlying behavior and stops any keepalive-recycle
-    # races on the server side.
+    # `Connection: close` -- urllib.urlopen doesn't pool connections by default,
+    # so this just makes HTTP/1.1 semantics match the underlying one-shot
+    # behavior and prevents any server-side per-keepalive limit from racing
+    # with our request stream.
     headers = {"Connection": "close"}
     if isinstance(body, (dict, list)):
         data = json.dumps(body).encode()
@@ -126,7 +198,7 @@ def request(method, target, domain, path, client_cert, ca_cert,
                     return response.status, response.read()
         except HTTPError as e:
             # Real HTTP response from the server.  Not a transport failure;
-            # callers expect (status_code, body) here and route on the code.
+            # callers expect (status_code, body) and route on the code.
             return e.code, e.read()
         except Exception as e:
             if attempt < _TRANSPORT_RETRY_MAX and _is_transient_transport_error(e):
@@ -135,8 +207,9 @@ def request(method, target, domain, path, client_cert, ca_cert,
                 continue
             raise
 
-    # Defensive: shouldn't reach here -- the loop returns or raises.  If it
-    # does, surface the last seen exception rather than silently returning.
+    # Defensive: shouldn't reach here -- the loop returns or raises above.
+    # If it does, surface the last seen exception rather than silently
+    # returning, so the failure mode is visible.
     raise last_exc if last_exc is not None else RuntimeError(
         "request() exhausted retries without an exception -- this is a bug")
 
