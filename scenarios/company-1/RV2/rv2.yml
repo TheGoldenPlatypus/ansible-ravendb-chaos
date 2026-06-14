@@ -607,20 +607,40 @@
     - name: Show target doc count
       ansible.builtin.debug: { msg: "{{ tgt_count.msg }}" }
 
-    # Per-doc revision-count parity across the seeded probe set.  Only the target needs to be
-    # probed here (the source was already verified per-shard in step 6).  The target's per-doc
-    # count must match what the source held -- seed revisions plus churn from W-1.  Same
-    # sparse-sample pattern as RV-1 phase 4.
-    - name: Target per-doc revision count exists (every probe id has >=1 revision)
+    - name: "Phase (b) I-1: assert source-union doc count == target doc count"
+      ansible.builtin.assert:
+        that:
+          - (src_count.msg | regex_search('->\\s+([0-9]+) docs', '\\1') | first | int)
+            == (tgt_count.msg | regex_search('->\\s+([0-9]+) docs', '\\1') | first | int)
+        fail_msg: >-
+          source-union vs target doc count mismatch.
+          source: {{ src_count.msg }}
+          target: {{ tgt_count.msg }}
+        success_msg: "source-union doc count == target doc count"
+
+    - name: "Phase (b) I-3: assert per-doc revision counts agree source-union vs target"
       ravendb_diagnostic:
         kind: revision_count_parity
         ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
         ca_cert: "{{ cert_ca_crt }}"
         db_name: db1
-        nodes: ["{{ tgt_leader }}"]
+        nodes: ["{{ src_leader }}", "{{ tgt_leader }}"]
         id_prefix: "{{ seed_prefix }}"
         count: "{{ parity_probe_count | default(50) | int }}"
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Phase (b) I-4: assert no orphan revisions on target"
+      ravendb_diagnostic:
+        kind: orphan_revisions
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ tgt_leader }}"]
         assert_mode: true
       register: r
     - name: Show result
