@@ -1,0 +1,113 @@
+# scenarios/company-1/RPV2/vars.yml -- shared config for RPV-2
+# (mixed-form replication + tombstone cleanup + backup chain + restore, 2 rounds).
+
+# ---------- Topology -- 6 clusters total ----------------------------------------
+# Source T2 (hub + sink-1) stays alive across rounds; round 2 extends the dataset.
+# Round-1 and Round-2 each get their OWN fresh restore-target clusters so the
+# form-sampling checks aren't polluted by prior-round state.
+db_name: db1
+
+hub_id:      1
+sink1_id:    2
+r1_snap_id:  3   # round-1 snapshot-restore target
+r1_smug_id:  4   # round-1 smuggler-restore target
+r2_snap_id:  5   # round-2 snapshot-restore target
+r2_smug_id:  6   # round-2 smuggler-restore target
+
+# Derived (inlined at every import_playbook call site because vars.yml is
+# not reachable from `vars:` blocks of imported playbooks).
+hub_cluster_leader: "{{ hub_id | default(1) }}a"
+hub_cluster_nodes:
+  - "{{ hub_id | default(1) }}a"
+  - "{{ hub_id | default(1) }}b"
+  - "{{ hub_id | default(1) }}c"
+
+sink1_cluster_leader: "{{ sink1_id | default(2) }}a"
+sink1_cluster_nodes:
+  - "{{ sink1_id | default(2) }}a"
+  - "{{ sink1_id | default(2) }}b"
+  - "{{ sink1_id | default(2) }}c"
+
+r1_snap_leader: "{{ r1_snap_id | default(3) }}a"
+r1_smug_leader: "{{ r1_smug_id | default(4) }}a"
+r2_snap_leader: "{{ r2_snap_id | default(5) }}a"
+r2_smug_leader: "{{ r2_smug_id | default(6) }}a"
+
+# Phase-(e) fresh sink lives as a fresh DB on the smuggler-restore-target cluster
+# (saves a cluster vs spinning up a 7th).  Per-round so we can compare.
+r1_fresh_sink_node: "{{ r1_smug_leader }}"
+r2_fresh_sink_node: "{{ r2_smug_leader }}"
+r1_fresh_sink_db: "db1_resink"
+r2_fresh_sink_db: "db1_resink"
+
+# ---------- Filter spec (sink-1 only receives users/sink1/*) --------------------
+sink1_allowed_prefixes: ["users/sink1/*"]
+
+# ---------- Seed -- mixed-form revisions on Hub --------------------------------
+# Per plan: 15k raw-CV + 15k hashed = 30k revisions across users/sink1/* +
+# users/hub/* + Internal/*.  Half landed via the legacy-form fixture import
+# (raw-CV on disk), half via fresh writes on the new build (hashed/split CV).
+# Override per bucket for fast dev shakedowns.
+seed_users_sink1_count:  5000
+seed_users_hub_count:    5000
+seed_internal_count:     5000
+seed_revs_per_doc:       3       # 5000 docs * 3 revs = 15k revisions per half
+
+# Subset of the seed pool that also gets attachments + counters + time-series.
+extensions_subset_count: 1000
+
+# Legacy fixture commit-and-load (built once per fixtures/README.md, checked into
+# the repo, imported in step 2 to get raw-CV revisions on disk on hub).
+legacy_revs_fixture_path: "{{ lookup('env', 'PWD') }}/scenarios/company-1/RPV2/fixtures/legacy-revs.ravendbdump"
+
+# Smuggler dump paths (one per round).  Hoisted to vars.yml so the set_fact in
+# the producing step and the consumer in a later step always agree, even
+# across re-runs / partial replays.  ansible_date_time isn't reliable across
+# plays so we use a stable file name -- if a previous run's dump exists, the
+# ravendb_smuggler kind=export will simply overwrite it.
+r1_smug_dump_path: "{{ lookup('env', 'PWD') }}/scenarios/company-1/RPV2/dumps/r1.ravendbdump"
+r2_smug_dump_path: "{{ lookup('env', 'PWD') }}/scenarios/company-1/RPV2/dumps/r2.ravendbdump"
+
+# ---------- Workloads -- W-1 doc CRUD + W-2 extension ops + W-3 delete-storm ----
+# Round 1: W-1 + W-2 run for ~5 min during phase (a), with W-3 bursts during
+# phase (b).  Round 2: same shape, restarted after the failover.
+phase_a_w1_w2_duration_secs: 300    # 5 min
+phase_b_w3_duration_secs:    180    # 3 min delete-storm window
+phase_c_w1_w2_extension_secs: 180   # 3 min during backups
+
+# Workload bucket spec for W-1 / W-2 (pipe-separated prefix:pool:weight triples).
+# 60/20/20 split across the three buckets; aggressive on users/sink1/* because
+# that's the filtered bucket whose tombstone cleanup we're stressing.
+workload_buckets_spec: "users/sink1:{{ seed_users_sink1_count | int }}:60|users/hub:{{ seed_users_hub_count | int }}:20|Internal:{{ seed_internal_count | int }}:20"
+
+# Round-2 failover trigger: T+ this many seconds into phase (a) -> hard-kill 2a.
+r2_failover_at_secs: 90
+
+# ---------- Probe sets for parity asserts --------------------------------------
+parity_probe_count: 50
+
+# Form-sampling probe size per backup-restore comparison (raw-CV vs hashed).
+form_sampling_probe_count: 50
+
+# ---------- Per-collection revisions config ------------------------------------
+# Plan: aggressive on Users so purge fires mid-scenario (keep-10 + 30-min max).
+# Orders/Internal can stay looser.  Reapplied on every database (hub, sink-1,
+# and every restore target) so reload semantics are uniform.
+collections_revisions:
+  Users:    { keep: 10, max_age_secs: 1800 }     # tight -> purge fires
+  Internal: { keep: 25, max_age_secs: 21600 }
+
+# Default-segment fallback for the per-collection revisions config (governs
+# collections not named above -- none currently, but keep for future-proofing).
+default_keep: 25
+default_max_age_secs: 21600
+
+# ---------- Budgets (seconds) --------------------------------------------------
+member_budget_secs:           300
+drain_budget_secs:            180
+quiesce_budget_secs:          1200
+filter_drain_budget_secs:     600
+tombstone_settle_timeout_secs: 300
+backup_timeout_secs:          900
+restore_timeout_secs:         1200
+etl_drain_budget_secs:        900

@@ -1,0 +1,1967 @@
+##################################################################################################
+# scenarios/company-1/RPV2/rpv2.yml -- mixed-form replication + tombstone cleanup + backup chain
+# + restore, run as two rounds (clean lifecycle + same lifecycle with sink-leader failover).
+#
+# Six clusters, all v_new:
+#   <hub_id>      Hub source         (3 nodes, RF=3)
+#   <sink1_id>    Sink-1 source      (3 nodes, RF=3 -- needed for round-2 failover)
+#   <r1_snap_id>  Round-1 snapshot restore target  (1 node)
+#   <r1_smug_id>  Round-1 smuggler restore target  (1 node)
+#   <r2_snap_id>  Round-2 snapshot restore target  (1 node)
+#   <r2_smug_id>  Round-2 smuggler restore target  (1 node)
+#
+# Phase-(e) post-restore "fresh sink" lives as a fresh database (db1_resink) on the round's
+# smuggler-restore cluster -- saves a 7th cluster without breaking restore-target isolation.
+#
+# What this scenario does (32 steps over 2 rounds):
+#   Round 1 (clean lifecycle):                  Round 2 (failover lifecycle):
+#     1   setup dbs + revisions + filtered pull   18  reset round-2 targets
+#     2   mixed-form seed + drain                 19  restart W-1+W-2 baseline
+#     3   start W-1+W-2 (phase a)                 20  T+90s sink-1 leader hard-kill (phase a fault)
+#     4   phase (a) checkpoint                    21  phase (a) round-2 checkpoint
+#     5   W-3 delete-storm (phase b)              22  restart 2a + rejoin
+#     6   phase (b) checkpoint                    23  W-3 delete-storm
+#     7   snapshot backup (phase c)               24  phase (b) round-2 checkpoint
+#     8   wait + I-6 spot check                   25  snapshot + smuggler backups
+#     9   smuggler export                         26  phase (c) round-2 checkpoint
+#     10  phase (c) checkpoint                    27  restore both backups + sampling
+#     11  stop + restore snapshot + sampling      28  phase (d) round-2 checkpoint
+#     12  smuggler import + sampling              29  phase (e) re-sink + W-1 burst
+#     13  filter spec preservation check          30  phase (e) round-2 checkpoint
+#     14  phase (d) checkpoint                    31  round-2 finish
+#     15  phase (e) re-sink + W-1 burst           32  cross-round per-doc compare
+#     16  phase (e) checkpoint
+#     17  round-1 finish + capture state
+#
+# Deep version (invariants, risks, validators) -> company-1_TESTING_PLAN/scenarios.md (RPV-2).
+#
+# PREREQ -- bring up a clean 6-cluster lab at v_new via run.sh (per-cluster provision + form,
+# since playbooks/provision_nodes.yml only supports a uniform nodes_per_cluster).
+#
+# RUN:
+#   ./scenarios/company-1/RPV2/run.sh $PWD/builds/raven-prNNN.deb
+##################################################################################################
+
+
+# ===== pre: stop any leftover workloads from a previous run + validate inputs ===================
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars: { pidfile: "/tmp/w1-{{ hub_id | default(1) }}a-db1.pid" }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars: { pidfile: "/tmp/w2-{{ hub_id | default(1) }}a-db1.pid" }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars: { pidfile: "/tmp/w3-{{ hub_id | default(1) }}a-db1.pid" }
+
+- name: RPV-2 pre -- validate inputs + show plan
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - v_new_build is defined
+        fail_msg: "Required: -e v_new_build=<path to v_new .deb>"
+    - name: Show plan
+      ansible.builtin.debug:
+        msg: >-
+          RPV-2  v_new={{ v_new_build }}
+          hub={{ hub_id }}a/b/c  sink1={{ sink1_id }}a/b/c
+          r1-snap={{ r1_snap_id }}a  r1-smug={{ r1_smug_id }}a
+          r2-snap={{ r2_snap_id }}a  r2-smug={{ r2_smug_id }}a
+          seed=users/sink1:{{ seed_users_sink1_count }} users/hub:{{ seed_users_hub_count }} Internal:{{ seed_internal_count }} x{{ seed_revs_per_doc }} revs
+
+
+############################################################################################
+# ROUND 1 -- clean lifecycle                                                                #
+############################################################################################
+
+
+# ===== step 1: setup -- databases + revisions config + filtered pull (hub -> sink-1) ===========
+
+- ansible.builtin.import_playbook: ../../../toolbox/db/create_database.yml
+  vars: { cluster_leader: "{{ hub_id   | default(1) }}a", db_name: db1, replication_factor: 3 }
+- ansible.builtin.import_playbook: ../../../toolbox/db/create_database.yml
+  vars: { cluster_leader: "{{ sink1_id | default(2) }}a", db_name: db1, replication_factor: 3 }
+
+- name: RPV-2 step 1 -- per-collection revisions + filtered pull hub -> sink-1
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Configure per-collection revisions on hub {{ hub_cluster_leader }}/db1"
+      ravendb_revisions:
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_cluster_leader }}"
+        db_name: db1
+        collections_config: "{{ collections_revisions }}"
+        default_keep: "{{ default_keep }}"
+        default_max_age_secs: "{{ default_max_age_secs }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Configure per-collection revisions on sink-1 {{ sink1_cluster_leader }}/db1"
+      ravendb_revisions:
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ sink1_cluster_leader }}"
+        db_name: db1
+        collections_config: "{{ collections_revisions }}"
+        default_keep: "{{ default_keep }}"
+        default_max_age_secs: "{{ default_max_age_secs }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Define hub pull task 'rpv2-hub' + access entry for sink-1"
+      ravendb_tasks:
+        kind: define_hub
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        hub_leader: "{{ hub_cluster_leader }}"
+        db_name: db1
+        hub_task_name: rpv2-hub
+        sink_cluster_ids: ["{{ sink1_id | default(2) | int }}"]
+        sink_allowed_paths: >-
+          {{ { (sink1_id | default(2) | int | string): sink1_allowed_prefixes } }}
+        replication_mode: HubToSink
+        replication_certs_dir: "{{ playbook_dir }}/../../../replication-certs"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Attach sink-1 pull task to hub topology"
+      ravendb_tasks:
+        kind: attach_sinks
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        hub_task_name: rpv2-hub
+        hub_topology_urls:
+          - "https://{{ hub_id | default(1) }}a.{{ ravendb_domain }}:443"
+          - "https://{{ hub_id | default(1) }}b.{{ ravendb_domain }}:443"
+          - "https://{{ hub_id | default(1) }}c.{{ ravendb_domain }}:443"
+        sink_cluster_ids: ["{{ sink1_id | default(2) | int }}"]
+        sink_allowed_paths: >-
+          {{ { (sink1_id | default(2) | int | string): sink1_allowed_prefixes } }}
+        replication_mode: HubToSink
+        replication_certs_dir: "{{ playbook_dir }}/../../../replication-certs"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ===== step 2: setup -- mixed-form seed on hub + filtered drain to sink-1 =======================
+
+- name: RPV-2 step 2 -- mixed-form seed (legacy fixture + fresh writes) + drain
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    # ----- legacy half: smuggler-import the raw-CV fixture into hub --------------------
+    - name: Assert legacy-revs fixture exists
+      ansible.builtin.stat: { path: "{{ legacy_revs_fixture_path }}" }
+      register: legacy_fixture
+    - name: Assert legacy-revs fixture present
+      ansible.builtin.assert:
+        that: legacy_fixture.stat.exists
+        fail_msg: >-
+          Missing fixture at {{ legacy_revs_fixture_path }}.  RPV-2 requires the raw-CV half
+          of the mixed-form seed; build it once per scenarios/company-1/RPV2/fixtures/README.md
+          and commit it, then re-run.
+
+    - name: "Seed half 1 -- smuggler-import legacy-revs fixture (raw-CV form) into hub/db1"
+      ravendb_smuggler:
+        kind: import
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_cluster_leader }}"
+        db_name: db1
+        dump_path: "{{ legacy_revs_fixture_path }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # ----- fresh half: write hashed-form revisions on top -------------------------------
+    - name: "Seed half 2a -- users/sink1/* fresh writes on hub ({{ seed_users_sink1_count }} x {{ seed_revs_per_doc }} revs)"
+      ravendb_writes:
+        kind: docs_revisions
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_cluster_leader }}"
+        db_name: db1
+        id_prefix: users/sink1
+        collection: Users
+        count: "{{ seed_users_sink1_count | int }}"
+        revs_per_doc: "{{ seed_revs_per_doc | int }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Seed half 2b -- users/hub/* fresh writes on hub ({{ seed_users_hub_count }} x {{ seed_revs_per_doc }} revs)"
+      ravendb_writes:
+        kind: docs_revisions
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_cluster_leader }}"
+        db_name: db1
+        id_prefix: users/hub
+        collection: Users
+        count: "{{ seed_users_hub_count | int }}"
+        revs_per_doc: "{{ seed_revs_per_doc | int }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Seed half 2c -- Internal/* fresh writes on hub ({{ seed_internal_count }} x {{ seed_revs_per_doc }} revs)"
+      ravendb_writes:
+        kind: docs_revisions
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_cluster_leader }}"
+        db_name: db1
+        id_prefix: Internal
+        collection: Internal
+        count: "{{ seed_internal_count | int }}"
+        revs_per_doc: "{{ seed_revs_per_doc | int }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # ----- extensions on a 1k subset of users/sink1/* -----------------------------------
+    - name: "Seed extensions: attachments on users/sink1/{0..{{ extensions_subset_count - 1 }}}"
+      ravendb_writes:
+        kind: attachments
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_cluster_leader }}"
+        db_name: db1
+        id_prefix: users/sink1
+        count: "{{ extensions_subset_count | int }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Seed extensions: counters on users/sink1/{0..{{ extensions_subset_count - 1 }}}"
+      ravendb_writes:
+        kind: counters
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_cluster_leader }}"
+        db_name: db1
+        id_prefix: users/sink1
+        count: "{{ extensions_subset_count | int }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Seed extensions: timeseries on users/sink1/{0..{{ extensions_subset_count - 1 }}}"
+      ravendb_writes:
+        kind: timeseries
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_cluster_leader }}"
+        db_name: db1
+        id_prefix: users/sink1
+        count: "{{ extensions_subset_count | int }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+# Drain hub-internal replication then wait for filtered drain to sink-1.
+
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_etag_parity.yml
+  vars:
+    nodes: "{{ [(hub_id | default(1)) ~ 'a', (hub_id | default(1)) ~ 'b', (hub_id | default(1)) ~ 'c'] }}"
+    timeout_secs: "{{ drain_budget_secs | default(180) }}"
+
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_marker_propagation.yml
+  vars:
+    source_node: "{{ (hub_id | default(1)) ~ 'a' }}"
+    target_nodes: "{{ [(sink1_id | default(2)) ~ 'a', (sink1_id | default(2)) ~ 'b', (sink1_id | default(2)) ~ 'c'] }}"
+    id_prefix: "users/sink1/marker"
+    timeout_secs: "{{ filter_drain_budget_secs | default(600) }}"
+
+
+# ===== step 3: phase (a) -- start W-1 + W-2 on hub for 5 min ====================================
+
+- name: RPV-2 step 3 -- launch W-1 + W-2 on hub (background, async)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Launch W-1 (background)
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w1/workload_w1.sh"
+      environment:
+        TARGET:        "{{ hub_cluster_leader }}"
+        DB_NAME:       db1
+        BUCKETS_SPEC:  "{{ workload_buckets_spec }}"
+        DURATION_SECS: "{{ phase_a_w1_w2_duration_secs | int }}"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: "{{ phase_a_w1_w2_duration_secs | int + 120 }}"
+      poll: 0
+
+    - name: Launch W-2 (background)
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w2/workload_w2.sh"
+      environment:
+        TARGET:        "{{ hub_cluster_leader }}"
+        DB_NAME:       db1
+        BUCKETS_SPEC:  "{{ workload_buckets_spec }}"
+        DURATION_SECS: "{{ phase_a_w1_w2_duration_secs | int }}"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: "{{ phase_a_w1_w2_duration_secs | int + 120 }}"
+      poll: 0
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars: { pidfile: "/tmp/w1-{{ hub_id | default(1) }}a-db1.pid", timeout_secs: 30 }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars: { pidfile: "/tmp/w2-{{ hub_id | default(1) }}a-db1.pid", timeout_secs: 30 }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/assert_workload_alive.yml
+  vars: { pidfile: "/tmp/w1-{{ hub_id | default(1) }}a-db1.pid" }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/assert_workload_alive.yml
+  vars: { pidfile: "/tmp/w2-{{ hub_id | default(1) }}a-db1.pid" }
+
+
+# ===== step 4: phase (a) checkpoint -- I-1, I-2 cross-form CV equality, I-3, I-6 ===============
+# Wait for W-1+W-2 to finish naturally (they self-terminate at DURATION_SECS), then drain
+# and run the parity asserts.  W-1+W-2 will be restarted in phase (c) before backups; we
+# tear them down here so phase (a) -> (b) -> (c) form a clean sequence.
+
+- name: RPV-2 step 4 -- wait for W-1+W-2 to finish; drain; phase (a) checkpoint
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Wait for W-1 to finish (internal loop, no retry spam)
+      ansible.builtin.shell: |
+        set -u
+        pidfile=/tmp/w1-{{ hub_id | default(1) }}a-db1.pid
+        deadline=$(( $(date +%s) + {{ phase_a_w1_w2_duration_secs | int + 300 }} ))
+        while [ $(date +%s) -lt $deadline ]; do
+          if [ ! -f "$pidfile" ]; then echo "FINISHED"; exit 0; fi
+          PID=$(cat "$pidfile" 2>/dev/null || true)
+          if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then echo "FINISHED"; exit 0; fi
+          sleep 5
+        done
+        echo "TIMEOUT"; exit 124
+      register: w1_poll
+      changed_when: false
+    - name: Show W-1 status
+      ansible.builtin.debug: { msg: "W-1 status: {{ w1_poll.stdout }}" }
+
+    - name: Wait for W-2 to finish
+      ansible.builtin.shell: |
+        set -u
+        pidfile=/tmp/w2-{{ hub_id | default(1) }}a-db1.pid
+        deadline=$(( $(date +%s) + {{ phase_a_w1_w2_duration_secs | int + 300 }} ))
+        while [ $(date +%s) -lt $deadline ]; do
+          if [ ! -f "$pidfile" ]; then echo "FINISHED"; exit 0; fi
+          PID=$(cat "$pidfile" 2>/dev/null || true)
+          if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then echo "FINISHED"; exit 0; fi
+          sleep 5
+        done
+        echo "TIMEOUT"; exit 124
+      register: w2_poll
+      changed_when: false
+    - name: Show W-2 status
+      ansible.builtin.debug: { msg: "W-2 status: {{ w2_poll.stdout }}" }
+
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_etag_parity.yml
+  vars:
+    nodes: "{{ [(hub_id | default(1)) ~ 'a', (hub_id | default(1)) ~ 'b', (hub_id | default(1)) ~ 'c'] }}"
+    timeout_secs: "{{ drain_budget_secs | default(180) }}"
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_etag_parity.yml
+  vars:
+    nodes: "{{ [(sink1_id | default(2)) ~ 'a', (sink1_id | default(2)) ~ 'b', (sink1_id | default(2)) ~ 'c'] }}"
+    timeout_secs: "{{ drain_budget_secs | default(180) }}"
+
+- name: RPV-2 step 4 -- phase (a) checkpoint asserts
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Doc count parity across hub a/b/c"
+      ravendb_diagnostic:
+        kind: doc_count_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: "{{ hub_cluster_nodes }}"
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Per-doc revision-count parity for users/sink1/* across hub + sink-1 (cross-form)"
+      ravendb_diagnostic:
+        kind: revision_count_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: "{{ hub_cluster_nodes + sink1_cluster_nodes }}"
+        id_prefix: users/sink1
+        count: "{{ parity_probe_count | int }}"
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "I-6 no stuck task on hub leader"
+      ravendb_diagnostic:
+        kind: replication_health
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_cluster_leader }}"
+        db_name: db1
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "I-6 no stuck task on sink-1 leader"
+      ravendb_diagnostic:
+        kind: replication_health
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ sink1_cluster_leader }}"
+        db_name: db1
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ===== step 5: phase (b) -- W-3 delete-storm burst on hub ======================================
+
+- name: RPV-2 step 5 -- launch W-3 delete-storm on hub
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Launch W-3 (background, async) targeting users/sink1/* hot pool
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w3/workload_w3.sh"
+      environment:
+        TARGET:        "{{ hub_cluster_leader }}"
+        DB_NAME:       db1
+        ID_PREFIX:     users/sink1
+        POOL_SIZE:     "{{ seed_users_sink1_count | int }}"
+        DURATION_SECS: "{{ phase_b_w3_duration_secs | int }}"
+        COLLECTION:    Users
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: "{{ phase_b_w3_duration_secs | int + 120 }}"
+      poll: 0
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars: { pidfile: "/tmp/w3-{{ hub_id | default(1) }}a-db1.pid", timeout_secs: 30 }
+
+
+# ===== step 6: phase (b) checkpoint -- tombstone parity hub vs sink-1 ==========================
+
+- name: RPV-2 step 6 -- wait W-3 finish; drain; tombstone parity asserts
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Wait for W-3 to finish
+      ansible.builtin.shell: |
+        set -u
+        pidfile=/tmp/w3-{{ hub_id | default(1) }}a-db1.pid
+        deadline=$(( $(date +%s) + {{ phase_b_w3_duration_secs | int + 300 }} ))
+        while [ $(date +%s) -lt $deadline ]; do
+          if [ ! -f "$pidfile" ]; then echo "FINISHED"; exit 0; fi
+          PID=$(cat "$pidfile" 2>/dev/null || true)
+          if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then echo "FINISHED"; exit 0; fi
+          sleep 5
+        done
+        echo "TIMEOUT"; exit 124
+      register: w3_poll
+      changed_when: false
+    - name: Show W-3 status
+      ansible.builtin.debug: { msg: "W-3 status: {{ w3_poll.stdout }}" }
+
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_etag_parity.yml
+  vars:
+    nodes: "{{ [(hub_id | default(1)) ~ 'a', (hub_id | default(1)) ~ 'b', (hub_id | default(1)) ~ 'c'] }}"
+    timeout_secs: "{{ drain_budget_secs | default(180) }}"
+
+# Wait for the per-node tombstone counts to converge across hub + sink-1 -- this is the
+# load-bearing phase-(b) assertion.  Failure here is the v_new bug class RPV-1 documented.
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_stats_field_parity.yml
+  vars:
+    nodes: "{{ [(hub_id | default(1)) ~ 'a', (hub_id | default(1)) ~ 'b', (hub_id | default(1)) ~ 'c',
+                 (sink1_id | default(2)) ~ 'a', (sink1_id | default(2)) ~ 'b', (sink1_id | default(2)) ~ 'c'] }}"
+    fields: ["CountOfTombstones"]
+    timeout_secs: "{{ tombstone_settle_timeout_secs | default(300) }}"
+
+- name: RPV-2 step 6 -- per-doc revision-count parity after purge
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Revision-count parity post-purge across hub + sink-1"
+      ravendb_diagnostic:
+        kind: revision_count_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: "{{ hub_cluster_nodes + sink1_cluster_nodes }}"
+        id_prefix: users/sink1
+        count: "{{ parity_probe_count | int }}"
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ===== step 7: phase (c) -- snapshot backup of hub while W-1+W-2 keep running ==================
+# Restart W-1+W-2 first so the backup runs against an active workload (per the plan's
+# "backup during replication" intent -- we want to catch the "backup acquires a lock that
+# stalls the sender" failure mode).
+
+- name: RPV-2 step 7 -- restart W-1+W-2 for the phase-(c) backup window
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Launch W-1 for the phase-(c) window
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w1/workload_w1.sh"
+      environment:
+        TARGET:        "{{ hub_cluster_leader }}"
+        DB_NAME:       db1
+        BUCKETS_SPEC:  "{{ workload_buckets_spec }}"
+        DURATION_SECS: "{{ phase_c_w1_w2_extension_secs | int }}"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: "{{ phase_c_w1_w2_extension_secs | int + 120 }}"
+      poll: 0
+
+    - name: Launch W-2 for the phase-(c) window
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w2/workload_w2.sh"
+      environment:
+        TARGET:        "{{ hub_cluster_leader }}"
+        DB_NAME:       db1
+        BUCKETS_SPEC:  "{{ workload_buckets_spec }}"
+        DURATION_SECS: "{{ phase_c_w1_w2_extension_secs | int }}"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: "{{ phase_c_w1_w2_extension_secs | int + 120 }}"
+      poll: 0
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars: { pidfile: "/tmp/w1-{{ hub_id | default(1) }}a-db1.pid", timeout_secs: 30 }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars: { pidfile: "/tmp/w2-{{ hub_id | default(1) }}a-db1.pid", timeout_secs: 30 }
+
+- name: RPV-2 step 7 -- snapshot backup of hub (replication is live)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Snapshot backup of hub/db1 -> /backups/rpv2-r1-snap
+      ravendb_backup:
+        kind: backup
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_cluster_leader }}"
+        db_name: db1
+        backup_type: Snapshot
+        backup_path: /backups/rpv2-r1-snap
+        timeout: "{{ backup_timeout_secs | int }}"
+      register: r1_snap_result
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r1_snap_result.msg }}" }
+
+
+# ===== step 8: phase (c) -- wait for snapshot completion + I-6 spot check ======================
+# k_backup blocks until done, so step 7 already captured completion.  Here we do the I-6
+# replication-health spot check while W-1+W-2 are still running (load-bearing for "backup
+# didn't stall replication").
+
+- name: RPV-2 step 8 -- I-6 spot check mid-window (W-1+W-2 still running)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "I-6 hub leader -- no stuck replication task during the backup window"
+      ravendb_diagnostic:
+        kind: replication_health
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_cluster_leader }}"
+        db_name: db1
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ===== step 9: phase (c) -- smuggler-export hub to a separate destination ======================
+
+- name: RPV-2 step 9 -- smuggler-export hub while W-1+W-2 keep running
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Ensure dumps dir exists on controller
+      ansible.builtin.file:
+        path: "{{ lookup('env', 'PWD') }}/scenarios/company-1/RPV2/dumps"
+        state: directory
+        mode: '0755'
+
+    - name: Smuggler-export hub/db1 -> {{ r1_smug_dump_path }}
+      ravendb_smuggler:
+        kind: export
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_cluster_leader }}"
+        db_name: db1
+        dump_path: "{{ r1_smug_dump_path }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ===== step 10: phase (c) checkpoint -- I-6 across hub + sink-1 ================================
+
+- name: RPV-2 step 10 -- phase (c) checkpoint (I-6 on hub + sink-1)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "I-6 hub leader -- no stuck task after both backups"
+      ravendb_diagnostic:
+        kind: replication_health
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_cluster_leader }}"
+        db_name: db1
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "I-6 sink-1 leader -- no stuck task after both backups"
+      ravendb_diagnostic:
+        kind: replication_health
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ sink1_cluster_leader }}"
+        db_name: db1
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ===== step 11: phase (d) -- stop W-1+W-2; restore snapshot to r1-snap-target ==================
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars: { pidfile: "/tmp/w1-{{ hub_id | default(1) }}a-db1.pid" }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars: { pidfile: "/tmp/w2-{{ hub_id | default(1) }}a-db1.pid" }
+
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_etag_parity.yml
+  vars:
+    nodes: "{{ [(hub_id | default(1)) ~ 'a', (hub_id | default(1)) ~ 'b', (hub_id | default(1)) ~ 'c'] }}"
+    timeout_secs: "{{ drain_budget_secs | default(180) }}"
+
+- name: RPV-2 step 11 -- restore snapshot to r1-snap-target + form sampling
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Restore snapshot onto r1-snap-target as db1
+      ravendb_backup:
+        kind: restore
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ r1_snap_leader }}"
+        backup_path: /backups/rpv2-r1-snap
+        new_db_name: db1
+        timeout: "{{ restore_timeout_secs | int }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Snapshot restores at the voron page level, so on-disk revisions keep
+    # their original form.  Our mixed-form seed put raw-CV revs (from the legacy
+    # fixture) AND hashed-form revs (from the fresh writes on top) into the
+    # source.  After snapshot restore at least one revision must still be raw --
+    # this is the load-bearing form-preservation assertion.
+    - name: "Form sampling (per-revision): r1-snap-target preserves >=1 raw revision"
+      ravendb_diagnostic:
+        kind: revision_form_sampling
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        target: "{{ r1_snap_leader }}"
+        id_prefix: users/sink1
+        count: "{{ form_sampling_probe_count | int }}"
+        expect: any-raw
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ===== step 12: phase (d) -- smuggler-import dump to r1-smug-target + form sampling ============
+
+- ansible.builtin.import_playbook: ../../../toolbox/db/create_database.yml
+  vars: { cluster_leader: "{{ r1_smug_id | default(4) }}a", db_name: db1, replication_factor: 1 }
+
+- name: RPV-2 step 12 -- smuggler-import + form sampling on r1-smug-target
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Configure revisions on r1-smug-target (same per-collection policy)
+      ravendb_revisions:
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ r1_smug_leader }}"
+        db_name: db1
+        collections_config: "{{ collections_revisions }}"
+        default_keep: "{{ default_keep }}"
+        default_max_age_secs: "{{ default_max_age_secs }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: Smuggler-import dump into r1-smug-target/db1
+      ravendb_smuggler:
+        kind: import
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ r1_smug_leader }}"
+        db_name: db1
+        dump_path: "{{ r1_smug_dump_path }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Smuggler re-keys every revision through the public API.  EVERY revision on
+    # the smuggler-restored target must be in split (hashed) form -- if a raw
+    # revision slipped through, smuggler didn't actually re-key it.
+    - name: "Form sampling (per-revision): r1-smug-target all revisions are split (re-keyed)"
+      ravendb_diagnostic:
+        kind: revision_form_sampling
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        target: "{{ r1_smug_leader }}"
+        id_prefix: users/sink1
+        count: "{{ form_sampling_probe_count | int }}"
+        expect: all-split
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ===== step 13: phase (d) -- filter spec preservation check on r1-smug-target ==================
+
+- name: RPV-2 step 13 -- assert filter spec preserved on r1-smug-target
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    # I-7 filter preservation -- deeper check.  Smuggler export from the hub carried
+    # the hub-side pull-replication task definition + its access entries (each access
+    # entry has its own AllowedHubToSinkPaths).  Smuggler import on the restore target
+    # rehydrates BOTH.  We assert:
+    #   (a) the task exists by name        (rpv2-hub)
+    #   (b) at least one access entry survived
+    #   (c) some access entry's AllowedHubToSinkPaths equals sink1_allowed_prefixes
+    #       (set equality, order-insensitive).
+    # If smuggler dropped the filter on import, (c) fails loud.
+    - name: GET PullReplicationAsHub tasks on r1-smug-target
+      ansible.builtin.uri:
+        url: "https://{{ r1_smug_leader }}.{{ ravendb_domain }}:443/databases/db1/tasks?type=PullReplicationAsHub"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+      register: tasks_resp
+
+    - name: Show pull-replication tasks (info)
+      ansible.builtin.debug:
+        msg: "PullReplications on r1-smug-target: {{ tasks_resp.json.PullReplications | default('<none>') }}"
+
+    - name: "I-7 (a): assert the hub task 'rpv2-hub' survived the smuggler round-trip"
+      ansible.builtin.assert:
+        that:
+          - (tasks_resp.json.PullReplications | default([])) | selectattr('Name', 'equalto', 'rpv2-hub') | list | length > 0
+        fail_msg: >-
+          Filter spec NOT preserved -- 'rpv2-hub' PullReplicationAsHub task missing on r1-smug-target.
+
+    - name: GET hub access entries for 'rpv2-hub'
+      ansible.builtin.uri:
+        url: "https://{{ r1_smug_leader }}.{{ ravendb_domain }}:443/databases/db1/tasks/pull-replication/hub/access?name=rpv2-hub"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+      register: access_resp
+
+    - name: Show access entries (info)
+      ansible.builtin.debug:
+        msg: "Access entries on r1-smug-target/rpv2-hub: {{ access_resp.json | default('<none>') }}"
+
+    - name: "I-7 (b): assert at least one access entry round-tripped"
+      ansible.builtin.assert:
+        that:
+          - (access_resp.json.Results | default([])) | length > 0
+            or (access_resp.json.Configurations | default([])) | length > 0
+        fail_msg: >-
+          Filter spec partial -- 'rpv2-hub' exists but no access entries survived
+          (hub-side access registrations dropped on smuggler import).
+
+    # The response shape can be either {Results: [...]} or {Configurations: [...]}
+    # depending on the server version; we normalize into one list before comparing.
+    - name: "I-7 (c): assert some access entry's AllowedHubToSinkPaths == sink1_allowed_prefixes"
+      ansible.builtin.assert:
+        that:
+          - (access_resp.json.Results | default([])) + (access_resp.json.Configurations | default([]))
+            | selectattr('AllowedHubToSinkPaths', 'defined')
+            | map(attribute='AllowedHubToSinkPaths')
+            | map('sort') | list
+            | select('equalto', (sink1_allowed_prefixes | sort))
+            | list | length > 0
+        fail_msg: >-
+          Filter spec content NOT preserved -- no access entry on r1-smug-target/rpv2-hub
+          carries AllowedHubToSinkPaths == {{ sink1_allowed_prefixes | sort }}.
+          Smuggler dropped or rewrote the filter on import.
+
+
+# ===== step 14: phase (d) checkpoint -- summarize form sampling + I-7 ==========================
+
+- name: RPV-2 step 14 -- phase (d) checkpoint summary
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Phase (d) checkpoint summary
+      ansible.builtin.debug:
+        msg: >-
+          PHASE D PASS  snapshot restore preserved on-disk form;
+          smuggler restore re-keyed all revs to hashed; I-7 filter spec round-tripped.
+
+    - name: "Per-doc revision-count parity hub vs r1-snap-target (post-restore)"
+      ravendb_diagnostic:
+        kind: revision_count_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ hub_cluster_leader }}", "{{ r1_snap_leader }}"]
+        id_prefix: users/sink1
+        count: "{{ parity_probe_count | int }}"
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ===== step 15: phase (e) -- pull replication r1-snap-target -> db1_resink on r1-smug cluster ==
+
+- name: RPV-2 step 15 -- create db1_resink on r1-smug + wire pull from r1-snap-target
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Create db1_resink on r1-smug cluster (fresh sink for phase-e)
+      ansible.builtin.command:
+        cmd: >-
+          ansible-playbook toolbox/db/create_database.yml
+          -e cluster_leader={{ r1_smug_leader }} -e db_name={{ r1_fresh_sink_db }} -e replication_factor=1
+        chdir: "{{ playbook_dir }}/../../.."
+      environment:
+        ANSIBLE_BECOME_PASS: "{{ ansible_become_pass | default('') }}"
+
+    - name: Configure revisions on the resink db
+      ravendb_revisions:
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ r1_fresh_sink_node }}"
+        db_name: "{{ r1_fresh_sink_db }}"
+        collections_config: "{{ collections_revisions }}"
+        default_keep: "{{ default_keep }}"
+        default_max_age_secs: "{{ default_max_age_secs }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Wire the r1-snap-target as the HUB for a new pull replication to db1_resink on
+    # r1-smug.  Confirms the restored database can serve as a replication source.
+    - name: "Define hub pull task on r1-snap-target for fresh sink"
+      ravendb_tasks:
+        kind: define_hub
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        hub_leader: "{{ r1_snap_leader }}"
+        db_name: db1
+        hub_task_name: rpv2-r1-resink
+        sink_cluster_ids: ["{{ r1_smug_id | default(4) | int }}"]
+        sink_allowed_paths: >-
+          {{ { (r1_smug_id | default(4) | int | string): sink1_allowed_prefixes } }}
+        replication_mode: HubToSink
+        replication_certs_dir: "{{ playbook_dir }}/../../../replication-certs"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Attach fresh sink (db1_resink on r1-smug) to r1-snap-target hub"
+      ravendb_tasks:
+        kind: attach_sinks
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        hub_task_name: rpv2-r1-resink
+        hub_topology_urls:
+          - "https://{{ r1_snap_leader }}.{{ ravendb_domain }}:443"
+        sink_cluster_ids: ["{{ r1_smug_id | default(4) | int }}"]
+        sink_allowed_paths: >-
+          {{ { (r1_smug_id | default(4) | int | string): sink1_allowed_prefixes } }}
+        replication_mode: HubToSink
+        replication_certs_dir: "{{ playbook_dir }}/../../../replication-certs"
+        target_db_override: "{{ r1_fresh_sink_db }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # W-1 burst against the restored source for 5 min.
+    - name: Launch W-1 burst against r1-snap-target (the restored source)
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w1/workload_w1.sh"
+      environment:
+        TARGET:        "{{ r1_snap_leader }}"
+        DB_NAME:       db1
+        ID_PREFIX:     users/sink1
+        POOL_SIZE:     "{{ seed_users_sink1_count | int }}"
+        DURATION_SECS: "{{ phase_a_w1_w2_duration_secs | int }}"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: "{{ phase_a_w1_w2_duration_secs | int + 120 }}"
+      poll: 0
+
+    - name: Wait for W-1 to finish on r1-snap-target
+      ansible.builtin.shell: |
+        set -u
+        pidfile=/tmp/w1-{{ r1_snap_leader }}-db1.pid
+        deadline=$(( $(date +%s) + {{ phase_a_w1_w2_duration_secs | int + 300 }} ))
+        while [ $(date +%s) -lt $deadline ]; do
+          if [ ! -f "$pidfile" ]; then echo "FINISHED"; exit 0; fi
+          PID=$(cat "$pidfile" 2>/dev/null || true)
+          if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then echo "FINISHED"; exit 0; fi
+          sleep 5
+        done
+        echo "TIMEOUT"; exit 124
+      register: w1_resink_poll
+      changed_when: false
+    - name: Show W-1 status
+      ansible.builtin.debug: { msg: "W-1 (resink) status: {{ w1_resink_poll.stdout }}" }
+
+
+# ===== step 16: phase (e) checkpoint -- restored sink converges ================================
+
+- name: RPV-2 step 16 -- phase (e) checkpoint
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Wait for ETL/repl drain: r1-snap-target doc count == r1-smug/db1_resink"
+      ravendb_wait:
+        kind: doc_count_match
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        source: "{{ r1_snap_leader }}"
+        db_name: db1
+        target: "{{ r1_fresh_sink_node }}"
+        target_db_name: "{{ r1_fresh_sink_db }}"
+        timeout: "{{ etl_drain_budget_secs | int }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "I-6 r1-snap-target -- no stuck task on the resink wiring"
+      ravendb_diagnostic:
+        kind: replication_health
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ r1_snap_leader }}"
+        db_name: db1
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ===== step 17: round-1 finish -- captures source state for round-2 cross-round compare =========
+
+- name: RPV-2 step 17 -- round-1 final asserts + state capture
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Round-1 finish: doc count parity across hub + sink-1"
+      ravendb_diagnostic:
+        kind: doc_count_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: "{{ hub_cluster_nodes + sink1_cluster_nodes }}"
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Round-1 finish: revision-count parity sample on users/sink1/*"
+      ravendb_diagnostic:
+        kind: revision_count_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: "{{ hub_cluster_nodes + sink1_cluster_nodes }}"
+        id_prefix: users/sink1
+        count: "{{ parity_probe_count | int }}"
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Snapshot hub doc CVs for the round-1 probe set, into a round-1-specific dir
+    # so step 32 (cross-round compare) can diff against the round-2 capture.
+    - name: "Capture per-doc CVs on hub for the round-1 probe set"
+      ravendb_diagnostic:
+        kind: capture_doc_cv
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ hub_cluster_leader }}"]
+        ids: "{{ ['users/sink1'] | product(range(0, parity_probe_count | int) | list) | map('join', '/') | list }}"
+        output_dir: "{{ lookup('env', 'PWD') }}/scenarios/company-1/RPV2/captures/r1"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: Round-1 PASS banner
+      ansible.builtin.debug:
+        msg: >-
+          ROUND 1 PASS  hub + sink-1 + r1-snap + r1-smug + r1-resink converged
+          across the clean lifecycle.  CV capture -> .../captures/r1/ for round-2 compare.
+
+
+############################################################################################
+# ROUND 2 -- same lifecycle with sink-leader failover during phase (a)                      #
+############################################################################################
+
+
+# ===== step 18: reset -- tear down round-1 restore-target dbs; source stays alive ==============
+
+- name: RPV-2 step 18 -- delete round-1 restore-target dbs
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Delete db1 on r1-snap-target
+      ansible.builtin.command:
+        cmd: >-
+          ansible-playbook toolbox/db/delete_database.yml
+          -e cluster_leader={{ r1_snap_leader }} -e db_name=db1
+        chdir: "{{ playbook_dir }}/../../.."
+      environment:
+        ANSIBLE_BECOME_PASS: "{{ ansible_become_pass | default('') }}"
+
+    - name: Delete db1 on r1-smug-target
+      ansible.builtin.command:
+        cmd: >-
+          ansible-playbook toolbox/db/delete_database.yml
+          -e cluster_leader={{ r1_smug_leader }} -e db_name=db1
+        chdir: "{{ playbook_dir }}/../../.."
+      environment:
+        ANSIBLE_BECOME_PASS: "{{ ansible_become_pass | default('') }}"
+
+    - name: Delete {{ r1_fresh_sink_db }} on r1-smug-target (phase-e resink)
+      ansible.builtin.command:
+        cmd: >-
+          ansible-playbook toolbox/db/delete_database.yml
+          -e cluster_leader={{ r1_smug_leader }} -e db_name={{ r1_fresh_sink_db }}
+        chdir: "{{ playbook_dir }}/../../.."
+      environment:
+        ANSIBLE_BECOME_PASS: "{{ ansible_become_pass | default('') }}"
+
+
+# ===== step 19: round-2 phase (a) -- restart W-1+W-2 for the 90 s pre-failover baseline ========
+# Phase a in round 2 uses a longer total budget: r2_failover_at_secs (=90) of normal +
+# 180s post-failover = 270s total.  Sized so the failover-injection sub-step (20) lands
+# in the middle of the workload window.
+
+- name: RPV-2 step 19 -- restart W-1+W-2 on hub; baseline before failover
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Launch W-1 for the round-2 phase-(a) window
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w1/workload_w1.sh"
+      environment:
+        TARGET:        "{{ hub_cluster_leader }}"
+        DB_NAME:       db1
+        BUCKETS_SPEC:  "{{ workload_buckets_spec }}"
+        DURATION_SECS: "{{ (r2_failover_at_secs | int) + 180 }}"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: "{{ (r2_failover_at_secs | int) + 180 + 120 }}"
+      poll: 0
+
+    - name: Launch W-2 for the round-2 phase-(a) window
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w2/workload_w2.sh"
+      environment:
+        TARGET:        "{{ hub_cluster_leader }}"
+        DB_NAME:       db1
+        BUCKETS_SPEC:  "{{ workload_buckets_spec }}"
+        DURATION_SECS: "{{ (r2_failover_at_secs | int) + 180 }}"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: "{{ (r2_failover_at_secs | int) + 180 + 120 }}"
+      poll: 0
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars: { pidfile: "/tmp/w1-{{ hub_id | default(1) }}a-db1.pid", timeout_secs: 30 }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars: { pidfile: "/tmp/w2-{{ hub_id | default(1) }}a-db1.pid", timeout_secs: 30 }
+
+- name: RPV-2 step 19 -- sleep r2_failover_at_secs ({{ '{{' }} r2_failover_at_secs {{ '}}' }}s) baseline
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Wait for the pre-failover baseline
+      ansible.builtin.pause:
+        seconds: "{{ r2_failover_at_secs | int }}"
+
+
+# ===== step 20: round-2 phase (a) failover -- hard-kill sink-1 leader ==========================
+
+- name: RPV-2 step 20 -- hard-kill sink-1 leader; wait for new election
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Hard-kill sink-1 leader ({{ sink1_cluster_leader }})
+      ansible.builtin.command:
+        cmd: >-
+          ansible-playbook toolbox/service/hard_kill_ravendb.yml
+          -e target={{ sink1_cluster_leader }}
+        chdir: "{{ playbook_dir }}/../../.."
+      environment:
+        ANSIBLE_BECOME_PASS: "{{ ansible_become_pass | default('') }}"
+
+# Wait for a new sink-1 leader -- query one of the surviving members (not the killed node).
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_leader.yml
+  vars:
+    target: "{{ (sink1_id | default(2)) ~ 'b' }}"
+    timeout_secs: "{{ member_budget_secs | default(300) }}"
+
+
+# ===== step 21: round-2 phase (a) checkpoint -- post-failover assertions =======================
+# W-1+W-2 are still running; we wait for them to finish naturally (their DURATION_SECS
+# was sized to span pre-failover + post-failover), then drain and assert.
+
+- name: RPV-2 step 21 -- wait W-1+W-2 finish; post-failover phase (a) asserts
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Wait for W-1 to finish
+      ansible.builtin.shell: |
+        set -u
+        pidfile=/tmp/w1-{{ hub_id | default(1) }}a-db1.pid
+        deadline=$(( $(date +%s) + 300 ))
+        while [ $(date +%s) -lt $deadline ]; do
+          [ -f "$pidfile" ] || { echo "FINISHED"; exit 0; }
+          PID=$(cat "$pidfile" 2>/dev/null || true)
+          [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null && { echo "FINISHED"; exit 0; }
+          sleep 5
+        done
+        echo "TIMEOUT"; exit 124
+      register: w1_r2
+      changed_when: false
+    - name: Wait for W-2 to finish
+      ansible.builtin.shell: |
+        set -u
+        pidfile=/tmp/w2-{{ hub_id | default(1) }}a-db1.pid
+        deadline=$(( $(date +%s) + 300 ))
+        while [ $(date +%s) -lt $deadline ]; do
+          [ -f "$pidfile" ] || { echo "FINISHED"; exit 0; }
+          PID=$(cat "$pidfile" 2>/dev/null || true)
+          [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null && { echo "FINISHED"; exit 0; }
+          sleep 5
+        done
+        echo "TIMEOUT"; exit 124
+      register: w2_r2
+      changed_when: false
+
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_etag_parity.yml
+  vars:
+    nodes: "{{ [(hub_id | default(1)) ~ 'a', (hub_id | default(1)) ~ 'b', (hub_id | default(1)) ~ 'c'] }}"
+    timeout_secs: "{{ drain_budget_secs | default(180) }}"
+
+# Drain sink-1 surviving members only (2a is down -- excluded).  When 2a rejoins it
+# back-fills; we re-drain across all 3 in phase (b)'s checkpoint.
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_etag_parity.yml
+  vars:
+    nodes: "{{ [(sink1_id | default(2)) ~ 'b', (sink1_id | default(2)) ~ 'c'] }}"
+    timeout_secs: "{{ drain_budget_secs | default(180) }}"
+
+- name: RPV-2 step 21 -- post-failover parity asserts
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Doc count parity across hub + sink-1 surviving members (2a still down)"
+      ravendb_diagnostic:
+        kind: doc_count_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: "{{ hub_cluster_nodes + [(sink1_id | default(2)) ~ 'b', (sink1_id | default(2)) ~ 'c'] }}"
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "I-6 hub + sink-1 new leader after the kill"
+      ravendb_diagnostic:
+        kind: replication_health
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_cluster_leader }}"
+        db_name: db1
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "I-6 on sink-1 new leader (queried via 2b)"
+      ravendb_diagnostic:
+        kind: replication_health
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ (sink1_id | default(2)) ~ 'b' }}"
+        db_name: db1
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ===== step 22: round-2 phase (a) -> (b) -- restart 2a, wait full member rejoin ================
+
+- name: RPV-2 step 22 -- restart 2a; wait for full member rejoin
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Restart RavenDB on the killed sink-1 leader 2a
+      ansible.builtin.command:
+        cmd: >-
+          ansible-playbook toolbox/service/restart_ravendb.yml
+          -e target={{ sink1_cluster_leader }}
+        chdir: "{{ playbook_dir }}/../../.."
+      environment:
+        ANSIBLE_BECOME_PASS: "{{ ansible_become_pass | default('') }}"
+
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_member.yml
+  vars:
+    cluster_leader: "{{ (sink1_id | default(2)) ~ 'b' }}"
+    db_name: db1
+    target: "{{ sink1_cluster_leader }}"
+    target_tag: "A"
+    timeout_secs: "{{ member_budget_secs | default(300) }}"
+
+
+# ===== step 23: round-2 phase (b) -- W-3 delete-storm on recovered topology ====================
+
+- name: RPV-2 step 23 -- restart W-1+W-2 + W-3 on recovered topology
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Launch W-1 for the round-2 phase-(b) window
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w1/workload_w1.sh"
+      environment:
+        TARGET:        "{{ hub_cluster_leader }}"
+        DB_NAME:       db1
+        BUCKETS_SPEC:  "{{ workload_buckets_spec }}"
+        DURATION_SECS: "{{ phase_b_w3_duration_secs | int + 60 }}"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: "{{ phase_b_w3_duration_secs | int + 180 }}"
+      poll: 0
+
+    - name: Launch W-2 for the round-2 phase-(b) window
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w2/workload_w2.sh"
+      environment:
+        TARGET:        "{{ hub_cluster_leader }}"
+        DB_NAME:       db1
+        BUCKETS_SPEC:  "{{ workload_buckets_spec }}"
+        DURATION_SECS: "{{ phase_b_w3_duration_secs | int + 60 }}"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: "{{ phase_b_w3_duration_secs | int + 180 }}"
+      poll: 0
+
+    - name: Launch W-3 delete-storm
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w3/workload_w3.sh"
+      environment:
+        TARGET:        "{{ hub_cluster_leader }}"
+        DB_NAME:       db1
+        ID_PREFIX:     users/sink1
+        POOL_SIZE:     "{{ seed_users_sink1_count | int }}"
+        DURATION_SECS: "{{ phase_b_w3_duration_secs | int }}"
+        COLLECTION:    Users
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: "{{ phase_b_w3_duration_secs | int + 120 }}"
+      poll: 0
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars: { pidfile: "/tmp/w3-{{ hub_id | default(1) }}a-db1.pid", timeout_secs: 30 }
+
+
+# ===== step 24: round-2 phase (b) checkpoint -- tombstone parity incl rejoined 2a ==============
+
+- name: RPV-2 step 24 -- wait workloads finish; drain; tombstone parity (3-replica)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Wait for W-1+W-2+W-3 to finish
+      ansible.builtin.shell: |
+        set -u
+        deadline=$(( $(date +%s) + 400 ))
+        for pf in /tmp/w1-{{ hub_id | default(1) }}a-db1.pid \
+                  /tmp/w2-{{ hub_id | default(1) }}a-db1.pid \
+                  /tmp/w3-{{ hub_id | default(1) }}a-db1.pid; do
+          while [ $(date +%s) -lt $deadline ] && [ -f "$pf" ]; do
+            PID=$(cat "$pf" 2>/dev/null || true)
+            [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null && break
+            sleep 5
+          done
+        done
+        echo DONE
+      register: w_r2b
+      changed_when: false
+
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_etag_parity.yml
+  vars:
+    nodes: "{{ [(hub_id | default(1)) ~ 'a', (hub_id | default(1)) ~ 'b', (hub_id | default(1)) ~ 'c'] }}"
+    timeout_secs: "{{ drain_budget_secs | default(180) }}"
+
+# Tombstone-count parity across hub + ALL THREE sink-1 replicas (including rejoined 2a).
+# This is the load-bearing round-2 assertion: did 2a's rejoin back-fill the tombstones
+# created while it was down?
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_stats_field_parity.yml
+  vars:
+    nodes: "{{ [(hub_id | default(1)) ~ 'a', (hub_id | default(1)) ~ 'b', (hub_id | default(1)) ~ 'c',
+                 (sink1_id | default(2)) ~ 'a', (sink1_id | default(2)) ~ 'b', (sink1_id | default(2)) ~ 'c'] }}"
+    fields: ["CountOfTombstones"]
+    timeout_secs: "{{ tombstone_settle_timeout_secs | default(300) }}"
+
+
+# ===== step 25: round-2 phase (c) -- snapshot + smuggler backups while W-1+W-2 keep going ======
+
+- name: RPV-2 step 25 -- restart W-1+W-2 + snapshot/smuggler backups on hub
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Launch W-1 for the phase-(c) window
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w1/workload_w1.sh"
+      environment:
+        TARGET:        "{{ hub_cluster_leader }}"
+        DB_NAME:       db1
+        BUCKETS_SPEC:  "{{ workload_buckets_spec }}"
+        DURATION_SECS: "{{ phase_c_w1_w2_extension_secs | int }}"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: "{{ phase_c_w1_w2_extension_secs | int + 120 }}"
+      poll: 0
+
+    - name: Launch W-2 for the phase-(c) window
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w2/workload_w2.sh"
+      environment:
+        TARGET:        "{{ hub_cluster_leader }}"
+        DB_NAME:       db1
+        BUCKETS_SPEC:  "{{ workload_buckets_spec }}"
+        DURATION_SECS: "{{ phase_c_w1_w2_extension_secs | int }}"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: "{{ phase_c_w1_w2_extension_secs | int + 120 }}"
+      poll: 0
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars: { pidfile: "/tmp/w1-{{ hub_id | default(1) }}a-db1.pid", timeout_secs: 30 }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars: { pidfile: "/tmp/w2-{{ hub_id | default(1) }}a-db1.pid", timeout_secs: 30 }
+
+- name: RPV-2 step 25 -- snapshot + smuggler backups
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Snapshot backup of hub/db1 -> /backups/rpv2-r2-snap
+      ravendb_backup:
+        kind: backup
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_cluster_leader }}"
+        db_name: db1
+        backup_type: Snapshot
+        backup_path: /backups/rpv2-r2-snap
+        timeout: "{{ backup_timeout_secs | int }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: Smuggler-export hub/db1 -> {{ r2_smug_dump_path }}
+      ravendb_smuggler:
+        kind: export
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_cluster_leader }}"
+        db_name: db1
+        dump_path: "{{ r2_smug_dump_path }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ===== step 26: round-2 phase (c) checkpoint -- I-6 on recovered topology ======================
+
+- name: RPV-2 step 26 -- phase (c) round-2 checkpoint
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "I-6 hub leader"
+      ravendb_diagnostic:
+        kind: replication_health
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_cluster_leader }}"
+        db_name: db1
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "I-6 sink-1 leader (could be 2a, 2b, or 2c after the failover/rejoin)"
+      ravendb_diagnostic:
+        kind: replication_health
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ (sink1_id | default(2)) ~ 'b' }}"
+        db_name: db1
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ===== step 27: round-2 phase (d) -- restore both backups + form sampling =======================
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars: { pidfile: "/tmp/w1-{{ hub_id | default(1) }}a-db1.pid" }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars: { pidfile: "/tmp/w2-{{ hub_id | default(1) }}a-db1.pid" }
+
+- ansible.builtin.import_playbook: ../../../toolbox/wait/wait_for_etag_parity.yml
+  vars:
+    nodes: "{{ [(hub_id | default(1)) ~ 'a', (hub_id | default(1)) ~ 'b', (hub_id | default(1)) ~ 'c'] }}"
+    timeout_secs: "{{ drain_budget_secs | default(180) }}"
+
+- name: RPV-2 step 27 -- restore snapshot to r2-snap-target + sample
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Restore snapshot onto r2-snap-target
+      ravendb_backup:
+        kind: restore
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ r2_snap_leader }}"
+        backup_path: /backups/rpv2-r2-snap
+        new_db_name: db1
+        timeout: "{{ restore_timeout_secs | int }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Form sampling (per-revision): r2-snap-target preserves >=1 raw revision"
+      ravendb_diagnostic:
+        kind: revision_form_sampling
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        target: "{{ r2_snap_leader }}"
+        id_prefix: users/sink1
+        count: "{{ form_sampling_probe_count | int }}"
+        expect: any-raw
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+- ansible.builtin.import_playbook: ../../../toolbox/db/create_database.yml
+  vars: { cluster_leader: "{{ r2_smug_id | default(6) }}a", db_name: db1, replication_factor: 1 }
+
+- name: RPV-2 step 27 -- smuggler-import dump to r2-smug-target + sample
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Configure revisions on r2-smug-target
+      ravendb_revisions:
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ r2_smug_leader }}"
+        db_name: db1
+        collections_config: "{{ collections_revisions }}"
+        default_keep: "{{ default_keep }}"
+        default_max_age_secs: "{{ default_max_age_secs }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: Smuggler-import dump into r2-smug-target/db1
+      ravendb_smuggler:
+        kind: import
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ r2_smug_leader }}"
+        db_name: db1
+        dump_path: "{{ r2_smug_dump_path }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Form sampling (per-revision): r2-smug-target all revisions are split (re-keyed)"
+      ravendb_diagnostic:
+        kind: revision_form_sampling
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        target: "{{ r2_smug_leader }}"
+        id_prefix: users/sink1
+        count: "{{ form_sampling_probe_count | int }}"
+        expect: all-split
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ===== step 28: round-2 phase (d) checkpoint ===================================================
+
+- name: RPV-2 step 28 -- phase (d) round-2 checkpoint
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    # Same 3-level filter-spec preservation check as round-1 step 13.
+    - name: GET PullReplicationAsHub tasks on r2-smug-target
+      ansible.builtin.uri:
+        url: "https://{{ r2_smug_leader }}.{{ ravendb_domain }}:443/databases/db1/tasks?type=PullReplicationAsHub"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+      register: r2_tasks_resp
+
+    - name: "Round-2 I-7 (a): hub task 'rpv2-hub' survived smuggler round-trip"
+      ansible.builtin.assert:
+        that:
+          - (r2_tasks_resp.json.PullReplications | default([])) | selectattr('Name', 'equalto', 'rpv2-hub') | list | length > 0
+        fail_msg: "Round-2 filter spec NOT preserved -- 'rpv2-hub' missing on r2-smug-target."
+
+    - name: GET hub access entries for 'rpv2-hub' (r2)
+      ansible.builtin.uri:
+        url: "https://{{ r2_smug_leader }}.{{ ravendb_domain }}:443/databases/db1/tasks/pull-replication/hub/access?name=rpv2-hub"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+      register: r2_access_resp
+
+    - name: "Round-2 I-7 (b): at least one access entry round-tripped"
+      ansible.builtin.assert:
+        that:
+          - (r2_access_resp.json.Results | default([])) | length > 0
+            or (r2_access_resp.json.Configurations | default([])) | length > 0
+        fail_msg: "Round-2 filter spec partial -- no access entries survived on r2-smug-target/rpv2-hub."
+
+    - name: "Round-2 I-7 (c): some access entry's AllowedHubToSinkPaths == sink1_allowed_prefixes"
+      ansible.builtin.assert:
+        that:
+          - (r2_access_resp.json.Results | default([])) + (r2_access_resp.json.Configurations | default([]))
+            | selectattr('AllowedHubToSinkPaths', 'defined')
+            | map(attribute='AllowedHubToSinkPaths')
+            | map('sort') | list
+            | select('equalto', (sink1_allowed_prefixes | sort))
+            | list | length > 0
+        fail_msg: "Round-2 filter content NOT preserved on r2-smug-target."
+
+    - name: "Per-doc revision-count parity hub vs r2-snap-target"
+      ravendb_diagnostic:
+        kind: revision_count_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ hub_cluster_leader }}", "{{ r2_snap_leader }}"]
+        id_prefix: users/sink1
+        count: "{{ parity_probe_count | int }}"
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ===== step 29: round-2 phase (e) -- pull r2-snap -> db1_resink on r2-smug + W-1 burst =========
+
+- name: RPV-2 step 29 -- wire pull r2-snap -> db1_resink + W-1 burst
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Create {{ r2_fresh_sink_db }} on r2-smug cluster
+      ansible.builtin.command:
+        cmd: >-
+          ansible-playbook toolbox/db/create_database.yml
+          -e cluster_leader={{ r2_fresh_sink_node }} -e db_name={{ r2_fresh_sink_db }} -e replication_factor=1
+        chdir: "{{ playbook_dir }}/../../.."
+      environment:
+        ANSIBLE_BECOME_PASS: "{{ ansible_become_pass | default('') }}"
+
+    - name: Configure revisions on the round-2 resink db
+      ravendb_revisions:
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ r2_fresh_sink_node }}"
+        db_name: "{{ r2_fresh_sink_db }}"
+        collections_config: "{{ collections_revisions }}"
+        default_keep: "{{ default_keep }}"
+        default_max_age_secs: "{{ default_max_age_secs }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Define hub pull task on r2-snap-target for fresh sink"
+      ravendb_tasks:
+        kind: define_hub
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        hub_leader: "{{ r2_snap_leader }}"
+        db_name: db1
+        hub_task_name: rpv2-r2-resink
+        sink_cluster_ids: ["{{ r2_smug_id | default(6) | int }}"]
+        sink_allowed_paths: >-
+          {{ { (r2_smug_id | default(6) | int | string): sink1_allowed_prefixes } }}
+        replication_mode: HubToSink
+        replication_certs_dir: "{{ playbook_dir }}/../../../replication-certs"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Attach round-2 fresh sink"
+      ravendb_tasks:
+        kind: attach_sinks
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        hub_task_name: rpv2-r2-resink
+        hub_topology_urls:
+          - "https://{{ r2_snap_leader }}.{{ ravendb_domain }}:443"
+        sink_cluster_ids: ["{{ r2_smug_id | default(6) | int }}"]
+        sink_allowed_paths: >-
+          {{ { (r2_smug_id | default(6) | int | string): sink1_allowed_prefixes } }}
+        replication_mode: HubToSink
+        replication_certs_dir: "{{ playbook_dir }}/../../../replication-certs"
+        target_db_override: "{{ r2_fresh_sink_db }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: Launch W-1 burst against r2-snap-target
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w1/workload_w1.sh"
+      environment:
+        TARGET:        "{{ r2_snap_leader }}"
+        DB_NAME:       db1
+        ID_PREFIX:     users/sink1
+        POOL_SIZE:     "{{ seed_users_sink1_count | int }}"
+        DURATION_SECS: "{{ phase_a_w1_w2_duration_secs | int }}"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: "{{ phase_a_w1_w2_duration_secs | int + 120 }}"
+      poll: 0
+
+    - name: Wait for W-1 to finish on r2-snap-target
+      ansible.builtin.shell: |
+        set -u
+        pidfile=/tmp/w1-{{ r2_snap_leader }}-db1.pid
+        deadline=$(( $(date +%s) + {{ phase_a_w1_w2_duration_secs | int + 300 }} ))
+        while [ $(date +%s) -lt $deadline ]; do
+          [ -f "$pidfile" ] || { echo "FINISHED"; exit 0; }
+          PID=$(cat "$pidfile" 2>/dev/null || true)
+          [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null && { echo "FINISHED"; exit 0; }
+          sleep 5
+        done
+        echo "TIMEOUT"; exit 124
+      register: w1_r2e
+      changed_when: false
+    - name: Show W-1 status
+      ansible.builtin.debug: { msg: "W-1 (r2 resink) status: {{ w1_r2e.stdout }}" }
+
+
+# ===== step 30: round-2 phase (e) checkpoint ===================================================
+
+- name: RPV-2 step 30 -- phase (e) round-2 checkpoint
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Wait for resink doc count match (r2-snap-target -> r2-smug/{{ r2_fresh_sink_db }})"
+      ravendb_wait:
+        kind: doc_count_match
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        source: "{{ r2_snap_leader }}"
+        db_name: db1
+        target: "{{ r2_fresh_sink_node }}"
+        target_db_name: "{{ r2_fresh_sink_db }}"
+        timeout: "{{ etl_drain_budget_secs | int }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ===== step 31: round-2 finish + state capture =================================================
+
+- name: RPV-2 step 31 -- round-2 final asserts + state capture
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Round-2 finish: doc count parity across hub + sink-1 (all 3 replicas)"
+      ravendb_diagnostic:
+        kind: doc_count_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: "{{ hub_cluster_nodes + sink1_cluster_nodes }}"
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Capture per-doc CVs on hub for the round-1 probe set (round-2 capture dir)"
+      ravendb_diagnostic:
+        kind: capture_doc_cv
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ hub_cluster_leader }}"]
+        ids: "{{ ['users/sink1'] | product(range(0, parity_probe_count | int) | list) | map('join', '/') | list }}"
+        output_dir: "{{ lookup('env', 'PWD') }}/scenarios/company-1/RPV2/captures/r2"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ===== step 32: cross-round per-doc compare ====================================================
+# Compare the round-1 captured doc CVs against the round-2 captured doc CVs for the same
+# probe doc set.  Round 2 extends the dataset, so the (dbid, etag) entries WILL differ --
+# but per the plan, per-doc revision-count and presence (I-2 / I-3 proxy) on the round-1
+# doc IDs must agree.  We assert: (a) every round-1 CV file has a round-2 counterpart,
+# (b) the round-2 capture is non-empty for the same probe IDs.  Strict per-CV-set
+# equality is intentionally NOT asserted because round-2's failover-induced new dbid
+# entries are EXPECTED to add membership.
+
+- name: RPV-2 step 32 -- cross-round per-doc compare
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Enumerate round-1 captured CVs
+      ansible.builtin.find:
+        paths: "{{ lookup('env', 'PWD') }}/scenarios/company-1/RPV2/captures/r1"
+        patterns: "*.cv"
+      register: r1_caps
+
+    - name: Enumerate round-2 captured CVs
+      ansible.builtin.find:
+        paths: "{{ lookup('env', 'PWD') }}/scenarios/company-1/RPV2/captures/r2"
+        patterns: "*.cv"
+      register: r2_caps
+
+    - name: "Cross-round capture sanity (same count of doc CVs captured)"
+      ansible.builtin.assert:
+        that:
+          - r1_caps.matched == r2_caps.matched
+          - r1_caps.matched > 0
+        fail_msg: >-
+          Cross-round capture mismatch: r1={{ r1_caps.matched }} files,
+          r2={{ r2_caps.matched }} files.  A doc that was captured in round 1 must also
+          be capturable in round 2 (the round-1 doc IDs persist through the failover).
+
+    - name: "Per-doc revision-count parity hub vs r2-snap (round-1 doc-ID set)"
+      ravendb_diagnostic:
+        kind: revision_count_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ hub_cluster_leader }}", "{{ r2_snap_leader }}"]
+        id_prefix: users/sink1
+        count: "{{ parity_probe_count | int }}"
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ===== DONE ====================================================================================
+
+- name: RPV-2 -- DONE
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Show RPV-2 PASS banner
+      ansible.builtin.debug:
+        msg: >-
+          RPV-2 PASS  hub={{ hub_id }}a/b/c  sink1={{ sink1_id }}a/b/c
+          r1-snap={{ r1_snap_id }}a  r1-smug={{ r1_smug_id }}a
+          r2-snap={{ r2_snap_id }}a  r2-smug={{ r2_smug_id }}a  db=db1
+          mixed-form replication + tombstone cleanup + backup/restore +
+          form preservation + post-restore replication +
+          sink-leader failover + recovery + cross-round per-doc compare all held.
