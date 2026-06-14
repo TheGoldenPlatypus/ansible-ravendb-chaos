@@ -827,6 +827,105 @@ def k_revision_count_parity(p):
     return lines
 
 
+_FORM_EXPECT_CHOICES = ("any-raw", "all-split", "any-split", "all-raw")
+
+
+def k_revision_form_sampling(p):
+    """For each probe doc id, GET /databases/<db>/revisions?id=<id>&pageSize=N on
+    `target`, then classify every revision's @change-vector by form:
+
+        raw    -- no `delimiter` in the CV (legacy on-disk shape)
+        split  -- contains `delimiter` (new lane / hashed)
+
+    Aggregate per-id raw/split counts + overall totals, then assert per `expect`:
+
+        any-raw   -- at least one revision (across all ids) must be raw.
+                     Use after a SNAPSHOT restore of a mixed-form source to prove
+                     raw-CV revisions were preserved at the voron page level.
+        all-split -- every revision must be split.  Use after a SMUGGLER restore
+                     (the public-API import re-keys all revs into hashed form).
+        any-split -- at least one revision must be split.
+        all-raw   -- every revision must be raw (pure v_old baseline).
+
+    A probe id with zero returned revisions is reported as `missing` and fails
+    under assert_mode -- otherwise a smuggler restore that dropped all revisions
+    on a given doc would silently pass an `any-raw` / `all-split` check that
+    only looks at the rest of the probe set.
+
+    Returns list[str] -- per-id raw/split counts (first 10) + totals + PASS/FAIL.
+
+    Distinct from `stored_item_cv_split`: that kind checks the LIVE doc's CV
+    shape (one entry per id); this one walks every REVISION returned by
+    /revisions?id=..., which is what catches a per-revision-form regression."""
+    target = p["target"]
+    db = p["db_name"]
+    expect = p["expect"] or "any-raw"
+    delimiter = p["delimiter"] or "|"
+    page_size = int(p["page_size"] or 1024)
+    assert_mode = bool(p["assert_mode"])
+    probe_ids = expand_id_set(p)
+
+    if expect not in _FORM_EXPECT_CHOICES:
+        raise ValueError(
+            "kind=revision_form_sampling: expect must be one of %s (got %r)"
+            % (list(_FORM_EXPECT_CHOICES), expect))
+
+    per_id = {}
+    total_raw = 0
+    total_split = 0
+    missing = []
+
+    for doc_id in probe_ids:
+        path = "/databases/%s/revisions?id=%s&pageSize=%d" % (db, quote(doc_id), page_size)
+        s, b = request("GET", target, p["ravendb_domain"], path,
+                       p["client_cert"], p["ca_cert"])
+        if s != 200:
+            raise RuntimeError(
+                "%s/%s id=%s: /revisions returned HTTP %d -- db missing or node unreachable"
+                % (target, db, doc_id, s))
+        results = json.loads(b).get("Results") or []
+        if not results:
+            missing.append(doc_id)
+            per_id[doc_id] = (0, 0)
+            continue
+        raw_n = split_n = 0
+        for rev in results:
+            cv = (rev.get("@metadata") or {}).get("@change-vector") or ""
+            if delimiter in cv:
+                split_n += 1
+            else:
+                raw_n += 1
+        per_id[doc_id] = (raw_n, split_n)
+        total_raw += raw_n
+        total_split += split_n
+
+    lines = ["revision form sampling on %s/%s  (%d id(s), expect=%s):"
+             % (target, db, len(probe_ids), expect)]
+    for i, (rn, sn) in list(per_id.items())[:10]:
+        lines.append("  %-30s  raw=%-3d  split=%-3d" % (i, rn, sn))
+    lines.append("  totals: raw=%d  split=%d  missing(no-revs)=%d"
+                 % (total_raw, total_split, len(missing)))
+
+    if missing:
+        return violation(assert_mode, lines + [
+            "FAIL  %d id(s) returned no revisions: %s" % (len(missing), missing[:20])])
+
+    bad = None
+    if expect == "any-raw" and total_raw == 0:
+        bad = "expected any-raw but every revision is split"
+    elif expect == "all-split" and total_raw > 0:
+        bad = "expected all-split but %d revision(s) are raw" % total_raw
+    elif expect == "any-split" and total_split == 0:
+        bad = "expected any-split but every revision is raw"
+    elif expect == "all-raw" and total_split > 0:
+        bad = "expected all-raw but %d revision(s) are split" % total_split
+    if bad:
+        return violation(assert_mode, lines + ["FAIL  " + bad])
+
+    lines.append("PASS  expect=%s held (raw=%d split=%d)" % (expect, total_raw, total_split))
+    return lines
+
+
 def k_extension_stats_parity(p):
     """Assert selected `aspects` (attachments/counters/timeseries) match across nodes."""
     nodes = p["nodes"]
@@ -1658,6 +1757,7 @@ KINDS = {
     "doc_id_set_parity":          k_doc_id_set_parity,
     "extension_stats_parity":     k_extension_stats_parity,
     "revision_count_parity":      k_revision_count_parity,
+    "revision_form_sampling":     k_revision_form_sampling,
     "stats_parity":               k_stats_parity,
     # --- leak / orphan ---
     "cross_sink_isolation":       k_cross_sink_isolation,
@@ -1732,8 +1832,12 @@ def main():
         # extension_stats_parity
         aspects=dict(default=None),
 
-        # stored_item_cv_split
-        expect=dict(default=None, choices=["raw", "split", None]),
+        # stored_item_cv_split: "raw" / "split"
+        # revision_form_sampling: "any-raw" / "all-split" / "any-split" / "all-raw"
+        expect=dict(default=None,
+                    choices=["raw", "split",
+                             "any-raw", "all-split", "any-split", "all-raw",
+                             None]),
         delimiter=dict(default=None),
 
         # filter_compliance / cross_sink_isolation
