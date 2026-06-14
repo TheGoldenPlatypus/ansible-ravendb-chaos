@@ -28,6 +28,7 @@ on_exit() {
 on_signal() {
   local sig=$1
   log "SIGNAL  $sig  (will exit after trap)"
+  exit 0
 }
 
 setup_pidfile() {
@@ -46,28 +47,46 @@ setup_pidfile() {
 updates=0; puts=0; deletes=0; errs=0; last_op=""; last_http=""
 
 # ---------- buckets ----------
-# Parallel arrays.  pick_bucket sets bucket_prefix + bucket_pool weighted by cum_weights.
+# Parallel arrays.  pick_bucket sets bucket_prefix + bucket_pool + bucket_collection
+# weighted by cum_weights.
 
-prefixes=(); pools=(); cum_weights=(); total_weight=0
+prefixes=(); pools=(); collections=(); cum_weights=(); total_weight=0
+
+derive_collection() {
+  case "$1" in
+    users/*|users)        echo "Users" ;;
+    orders/*|orders)      echo "Orders" ;;
+    Internal/*|Internal)  echo "Internal" ;;
+    *)                    echo "MicroDocs" ;;
+  esac
+}
 
 add_bucket() {
+  # $1 = prefix, $2 = pool, $3 = weight, $4 = collection (optional -- derived from prefix if absent)
   prefixes+=("$1")
   pools+=("$2")
   total_weight=$(( total_weight + $3 ))
   cum_weights+=("$total_weight")
+  local coll="${4:-}"
+  [ -n "$coll" ] || coll=$(derive_collection "$1")
+  collections+=("$coll")
 }
 
 setup_buckets() {
   if [ -n "${BUCKETS_SPEC:-}" ]; then
-    local entry p pool w
+    # Spec format: "prefix:pool:weight[:collection]|prefix:pool:weight[:collection]|..."
+    # 4th field is optional -- when omitted, derive_collection() picks one from the prefix.
+    local entry p pool w c
     IFS='|' read -ra entries <<< "$BUCKETS_SPEC"
     for entry in "${entries[@]}"; do
-      IFS=':' read -r p pool w <<< "$entry"
-      add_bucket "$p" "$pool" "$w"
+      IFS=':' read -r p pool w c <<< "$entry"
+      add_bucket "$p" "$pool" "$w" "${c:-}"
     done
   else
     : "${ID_PREFIX:?}" "${POOL_SIZE:?}"
-    add_bucket "$ID_PREFIX" "$POOL_SIZE" 1
+    # Single-bucket mode: COLLECTION env var wins, else derive from ID_PREFIX,
+    # else fall through to the legacy MicroDocs default.
+    add_bucket "$ID_PREFIX" "$POOL_SIZE" 1 "${COLLECTION:-}"
   fi
 }
 
@@ -77,6 +96,7 @@ pick_bucket() {
     if [ "$r" -lt "${cum_weights[$i]}" ]; then
       bucket_prefix="${prefixes[$i]}"
       bucket_pool="${pools[$i]}"
+      bucket_collection="${collections[$i]}"
       return
     fi
   done
@@ -106,7 +126,7 @@ is_delete_ok() { [ "$1" = 204 ] || [ "$1" = 404 ]; }
 
 do_update() {
   local id="${bucket_prefix}/$((RANDOM % bucket_pool))"
-  local body="{\"v\":\"u-$RANDOM\",\"@metadata\":{\"@collection\":\"MicroDocs\"}}"
+  local body="{\"v\":\"u-$RANDOM\"}"
   last_op="update $id"
   last_http=$(put_doc "$id" "$body")
   if is_put_ok "$last_http"; then updates=$((updates+1)); else errs=$((errs+1)); fi
@@ -114,7 +134,7 @@ do_update() {
 
 do_put_new() {
   local id="${bucket_prefix}/new-$$-$RANDOM"
-  local body="{\"v\":\"new\",\"@metadata\":{\"@collection\":\"MicroDocs\"}}"
+  local body="{\"v\":\"new\",\"@metadata\":{\"@collection\":\"${bucket_collection}\"}}"
   last_op="put $id"
   last_http=$(put_doc "$id" "$body")
   if is_put_ok "$last_http"; then puts=$((puts+1)); else errs=$((errs+1)); fi
