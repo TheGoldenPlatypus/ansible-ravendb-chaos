@@ -163,6 +163,7 @@ def test_retries_on_each_documented_transient_class(monkeypatch):
         BrokenPipeError("broken pipe"),
         TimeoutError("socket timeout"),
         EOFError("eof before headers"),
+        ssl.SSLEOFError("EOF in violation of protocol"),
     ]
 
     for shape in ("direct", "wrapped"):
@@ -231,6 +232,61 @@ def test_exhausts_retries_then_raises(monkeypatch):
                    body=b"payload")
     print(f"    actual:   attempts={attempts['n']}\n")
     assert attempts["n"] == rc._TRANSPORT_RETRY_MAX + 1   # initial + retries
+
+
+def test_retries_on_bare_sslerror_with_unexpected_eof_reason(monkeypatch):
+    """Some Python builds surface TLS-EOF as a bare ssl.SSLError (not
+    SSLEOFError) with reason='UNEXPECTED_EOF_WHILE_READING'.  The defensive
+    reason-string check has to fire so we retry instead of bailing.
+
+    Pinned separately from the SSLEOFError case because they hit DIFFERENT
+    code paths in _is_transient_transport_error -- the class-check vs the
+    reason-check branch."""
+    monkeypatch.setattr(rc.time, "sleep", lambda _s: None)
+
+    attempts = {"n": 0}
+
+    def flaky(req, **kw):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            # SSLError, not SSLEOFError -- exact shape seen in some Python
+            # versions surfacing the "UNEXPECTED_EOF_WHILE_READING" condition.
+            err = ssl.SSLError("EOF occurred in violation of protocol")
+            err.reason = "UNEXPECTED_EOF_WHILE_READING"
+            raise URLError(err)
+        return _fake_response(status=200, body=b"")
+    monkeypatch.setattr(rc, "urlopen", flaky)
+
+    status, _ = rc.request("PUT", "1a", "test.local", "/x",
+                           "/ca.pem", "/c.pem", body=b"d")
+
+    print(f"\n    expected: 2 attempts (1st bare-SSLError UNEXPECTED_EOF, 2nd ok)")
+    print(f"    actual:   attempts={attempts['n']}  status={status}\n")
+    assert attempts["n"] == 2
+    assert status == 200
+
+
+def test_does_not_retry_on_ssl_cert_verification_error(monkeypatch):
+    """Real SSL config bugs (cert verify, hostname mismatch, etc.) come
+    through as ssl.SSLError too, but their `reason` is not UNEXPECTED_EOF.
+    Those should NOT be retried -- they'd never succeed, and silently
+    retrying them would just slow down user-visible config-error feedback."""
+    monkeypatch.setattr(rc.time, "sleep", lambda _s: None)
+
+    attempts = {"n": 0}
+
+    def cert_fail(req, **kw):
+        attempts["n"] += 1
+        err = ssl.SSLError("certificate verify failed")
+        err.reason = "CERTIFICATE_VERIFY_FAILED"
+        raise URLError(err)
+    monkeypatch.setattr(rc, "urlopen", cert_fail)
+
+    print(f"\n    expected: URLError raised on first try, no retries")
+    with pytest.raises(URLError, match="certificate verify failed"):
+        rc.request("PUT", "1a", "test.local", "/x", "/ca.pem", "/c.pem")
+    print(f"    actual:   attempts={attempts['n']}\n")
+    assert attempts["n"] == 1
 
 
 def test_does_not_retry_on_real_http_error(monkeypatch):

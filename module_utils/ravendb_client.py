@@ -64,6 +64,8 @@ def _is_transient_transport_error(exc):
         BrokenPipeError,           # server closed while we were writing
         TimeoutError,              # socket-level read/write timeout
         EOFError,                  # peer closed before sending headers
+        ssl.SSLEOFError,           # TLS terminated without close_notify
+                                   # (Python's "UNEXPECTED_EOF_WHILE_READING")
     )
     if isinstance(exc, direct):
         return True
@@ -71,6 +73,14 @@ def _is_transient_transport_error(exc):
         inner = getattr(exc, "reason", None)
         if isinstance(inner, direct):
             return True
+        # Defensive: some Python versions surface TLS-EOF as a bare ssl.SSLError
+        # (not the SSLEOFError subclass) with reason='UNEXPECTED_EOF_WHILE_READING'.
+        # Match that specific reason -- but NOT all SSLErrors (cert-verify and
+        # hostname-mismatch are real config bugs that mustn't be silently retried).
+        if isinstance(inner, ssl.SSLError):
+            reason = getattr(inner, "reason", "") or ""
+            if "UNEXPECTED_EOF" in reason:
+                return True
     return False
 
 
