@@ -344,6 +344,62 @@ def k_replication(p):
     return lines
 
 
+_REPL_TASK_TYPES = frozenset([
+    "Replication",                # OngoingTasks entry for external_replication
+    "ExternalReplication",        # alternate name some endpoints use
+    "PullReplicationAsHub",
+    "PullReplicationAsSink",
+    "RavenEtl",
+])
+
+
+def k_replication_health(p):
+    """Assert no replication-flavored ongoing task on `target/db` is stuck.
+
+    Hits /databases/<db>/tasks, filters OngoingTasks to replication types, and
+    fails (under assert_mode) when any task is Faulted, carries a non-empty
+    Error, or has TaskConnectionStatus=Reconnect at the moment of the check.
+    Callers should drain first; a sustained 'Reconnect' after a drain means
+    the task isn't progressing.
+
+    Returns list[str] -- a header + per-task line, with FAIL/PASS at the end."""
+    target = p["target"]
+    db = p["db_name"]
+    assert_mode = bool(p["assert_mode"])
+
+    path = "/databases/%s/tasks" % db
+    status, body = request("GET", target, p["ravendb_domain"], path,
+                           p["client_cert"], p["ca_cert"])
+    if status != 200:
+        raise RuntimeError(
+            "%s/%s: /tasks returned HTTP %d -- db missing or node unreachable"
+            % (target, db, status))
+
+    ongoing = json.loads(body).get("OngoingTasks") or []
+    repl_tasks = [t for t in ongoing if t.get("TaskType") in _REPL_TASK_TYPES]
+
+    lines = ["replication health on %s/%s  (%d replication task(s)):"
+             % (target, db, len(repl_tasks))]
+    bad = []
+    for t in repl_tasks:
+        ttype = t.get("TaskType")
+        tname = t.get("TaskName") or "<no-name>"
+        state = t.get("TaskState")
+        conn = t.get("TaskConnectionStatus")
+        err = t.get("Error")
+        lines.append("  %-22s  %-30s  state=%-10s  conn=%-10s  err=%s"
+                     % (ttype, tname, state, conn, err if err else "-"))
+        is_stuck = (state == "Faulted") or (conn == "Reconnect") or bool(err)
+        if is_stuck:
+            bad.append("%s/%s state=%s conn=%s err=%s"
+                       % (ttype, tname, state, conn, err))
+
+    if bad:
+        return violation(assert_mode, lines + ["FAIL  stuck task(s): %s" % bad])
+    lines.append("PASS  no stuck replication task")
+    return lines
+
+
 def k_schema_version(p):
     """Report /build/version per node, optionally asserting parity or an expected substring."""
     nodes = p["nodes"]
@@ -665,14 +721,60 @@ def k_doc_id_set_parity(p):
     return lines
 
 
+def _resolve_revisions_route(p, target):
+    """Pick the node to actually hit for /revisions?id=... on `target`.
+
+    Non-sharded: hit the target itself.  Sharded: hit the database's
+    orchestrator member, which routes per-id reads to the owning shard.
+    Hitting a non-orchestrator member of a sharded cluster can silently
+    return an incomplete result, so we route explicitly instead of
+    relying on transparent forwarding."""
+    db = p["db_name"]
+    try:
+        s, b = request("GET", target, p["ravendb_domain"],
+                       "/admin/databases?name=%s" % db,
+                       p["client_cert"], p["ca_cert"])
+    except Exception:
+        # Transport-level failure (DNS / connection refused / timeout).  Keep
+        # the message shape the existing kind contract uses so callers'
+        # 'unreachable' assertions still match.
+        raise RuntimeError(
+            "%s/%s: /admin/databases unreachable -- can't determine sharded routing"
+            % (target, db))
+    if s != 200:
+        raise RuntimeError(
+            "%s/%s: /admin/databases returned HTTP %d -- db missing or node unreachable"
+            % (target, db, s))
+    rec = json.loads(b)
+    if not (rec.get("Sharding") or {}).get("Shards"):
+        return target
+    orch_members = (((rec.get("Sharding") or {}).get("Orchestrator") or {})
+                    .get("Topology") or {}).get("Members") or []
+    if not orch_members:
+        raise RuntimeError(
+            "%s/%s: sharded db has no orchestrator members -- can't route revisions read"
+            % (target, db))
+    cluster_id = target[:-1]
+    return "%s%s" % (cluster_id, orch_members[0].lower())
+
+
 def k_revision_count_parity(p):
-    """Assert per-id revision counts agree across nodes (and equal `expected_count` if given)."""
+    """Assert per-id revision counts agree across nodes (and equal `expected_count` if given).
+
+    Accepts both plain nodes (hit directly) and sharded leaders (auto-detected
+    via /admin/databases?name=<db>; per-id reads routed through the database's
+    orchestrator).  The output labels keep the caller's original target tag so
+    a sharded leader shows up as e.g. '1a' in the per-id table, not as the
+    orchestrator member we routed through internally."""
     nodes = p["nodes"]
     db = p["db_name"]
     assert_mode = bool(p["assert_mode"])
     expected = p["expected_count"]
     page_size = int(p["page_size"] or 1024)
     probe_ids = expand_id_set(p)
+
+    # Resolve once per target so we don't pay an /admin/databases hit per probe id.
+    route_for = {t: _resolve_revisions_route(p, t) for t in nodes}
 
     id_counts = {}
     unreachable_nodes = set()
@@ -682,9 +784,10 @@ def k_revision_count_parity(p):
             if target in unreachable_nodes:
                 counts.append(None)
                 continue
+            route = route_for[target]
             path = "/databases/%s/revisions?id=%s&pageSize=%d" % (db, quote(doc_id), page_size)
             try:
-                status, body = request("GET", target, p["ravendb_domain"], path,
+                status, body = request("GET", route, p["ravendb_domain"], path,
                                        p["client_cert"], p["ca_cert"])
             except Exception:
                 unreachable_nodes.add(target)
@@ -1379,6 +1482,78 @@ def k_db_cv_order_side_only(p):
     return lines
 
 
+def k_shard_placement_check(p):
+    """Assert each probe doc id lives on EXACTLY ONE shard of `target/db_name`.
+
+    `target` is any node in a sharded cluster.  The kind:
+      1. Reads /admin/databases?name=<db> on `target` to enumerate shard ids.
+      2. For each probe doc id, GETs /databases/<db>/docs?id=<id>&shardNumber=N
+         once per shard N (per-shard route -- same pattern get_stats uses for
+         /stats).  Exactly one shard must return 200; all others must return
+         non-200 (typically 404).
+      3. Doc ids that are present on 0 shards (missing) or >1 shards
+         (mis-routed -- the orchestrator placed the same id on multiple
+         shards) are reported.
+
+    Returns list[str] with the per-id placement table (first 10) + PASS/FAIL line.
+    """
+    target = p["target"]
+    db = p["db_name"]
+    assert_mode = bool(p["assert_mode"])
+    probe_ids = expand_id_set(p)
+
+    s, b = request("GET", target, p["ravendb_domain"],
+                   "/admin/databases?name=%s" % db,
+                   p["client_cert"], p["ca_cert"])
+    if s != 200:
+        raise RuntimeError(
+            "%s/%s: /admin/databases returned HTTP %d -- db missing or node unreachable"
+            % (target, db, s))
+    rec = json.loads(b)
+    shards = (rec.get("Sharding") or {}).get("Shards") or {}
+    if not shards:
+        raise RuntimeError(
+            "%s/%s: not a sharded database -- shard_placement_check requires sharding"
+            % (target, db))
+    shard_ids = sorted(shards.keys(), key=lambda s: int(s))
+
+    tag = target[-1].upper()
+    per_id_owners = {}
+    for doc_id in probe_ids:
+        owners = []
+        for shard_id in shard_ids:
+            path = "/databases/%s/docs?id=%s&nodeTag=%s&shardNumber=%s" % (
+                db, quote(doc_id), tag, shard_id)
+            try:
+                status, body = request("GET", target, p["ravendb_domain"], path,
+                                       p["client_cert"], p["ca_cert"])
+            except Exception:
+                # Treat transport failure as "can't determine placement" -- fail loud
+                # rather than silently dropping the shard from the comparison.
+                raise RuntimeError(
+                    "%s/%s shard=%s: transport error during placement probe for id=%s"
+                    % (target, db, shard_id, doc_id))
+            if status == 200 and (json.loads(body).get("Results") or []):
+                owners.append(shard_id)
+        per_id_owners[doc_id] = owners
+
+    missing = [i for i, o in per_id_owners.items() if len(o) == 0]
+    duplicate = [(i, o) for i, o in per_id_owners.items() if len(o) > 1]
+
+    lines = ["shard placement on %s/%s  (%d id(s) across shards %s):"
+             % (target, db, len(probe_ids), shard_ids)]
+    for i, o in list(per_id_owners.items())[:10]:
+        lines.append("  %-30s  owners=%s" % (i, o))
+    lines.append("  missing(0-shard): %d   duplicate(>1-shard): %d" % (len(missing), len(duplicate)))
+
+    if missing or duplicate:
+        return violation(assert_mode, lines + [
+            "FAIL  missing on: %s   duplicate on: %s"
+            % (missing[:20], duplicate[:20])])
+    lines.append("PASS  every probe id lives on exactly one shard")
+    return lines
+
+
 def k_cross_cluster_cv_equality(p):
     """Per-doc CV (dbid, etag)-set equality across `nodes`.
 
@@ -1471,6 +1646,7 @@ KINDS = {
     # --- info-only ---
     "doc_count":                  k_doc_count,
     "replication":                k_replication,
+    "replication_health":         k_replication_health,
     "schema_version":             k_schema_version,
     "size_envelope":              k_size_envelope,
     "supported_features":         k_supported_features,
@@ -1489,6 +1665,7 @@ KINDS = {
     "lane_inert":                 k_lane_inert,
     "orphan_revisions":           k_orphan_revisions,
     "scan_fltr":                  k_scan_fltr,
+    "shard_placement_check":      k_shard_placement_check,
     # --- CV-shape ---
     "cross_cluster_cv_equality":  k_cross_cluster_cv_equality,
     "cv_boundary_by_dbid":        k_cv_boundary_by_dbid,

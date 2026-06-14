@@ -1,0 +1,37 @@
+##################################################################################################
+# toolbox/diagnostic/diagnostic_replication_health.yml
+#
+# Asserts no replication-flavored ongoing task on `target/db_name` is stuck.  Hits
+# /databases/<db>/tasks, filters OngoingTasks to ExternalReplication / PullReplicationAsHub /
+# PullReplicationAsSink / RavenEtl, and fails under assert_mode on any task that is
+# Faulted, has an Error, or has TaskConnectionStatus=Reconnect at the moment of the check.
+# Callers should drain first; a sustained "Reconnect" after a drain means the task isn't
+# progressing.  Serves I-6 (no stuck task) in the company-1 scenarios.
+#
+# Distinct from `diagnostic_replication.yml` (pure info on active connections).
+#
+# INPUTS:
+#   target       REQUIRED.  Node to query (typically the cluster leader).
+#   db_name      REQUIRED.
+#   assert_mode  OPTIONAL.  Default false (info-only).  Set true to fail the play on a stuck task.
+#
+# RUN EXAMPLE:
+#   ansible-playbook toolbox/diagnostic/diagnostic_replication_health.yml \
+#       -e target=1a -e db_name=db1 -e assert_mode=true
+##################################################################################################
+
+- name: Assert no stuck replication-flavored ongoing task on a target node
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - ravendb_diagnostic:
+        kind: replication_health
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ target }}"
+        db_name: "{{ db_name }}"
+        assert_mode: "{{ assert_mode | default(false) }}"
+      register: r
+    - ansible.builtin.debug: { msg: "{{ r.msg }}" }
