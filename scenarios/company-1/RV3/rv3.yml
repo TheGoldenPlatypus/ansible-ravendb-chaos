@@ -22,7 +22,9 @@
 #         This confirms the orchestrator routes every imported doc to the right shard.
 #   4.    Phase (a) checkpoint: drain each shard, then confirm the non-sharded source's doc
 #         count matches the sharded target's aggregate, per-doc revision counts line up on a
-#         probe set, and the target's revisions all land in the new build's hashed form.
+#         probe set, the target's revisions all land in the new build's hashed form, every
+#         probe id lives on exactly one shard (orchestrator routing), and neither side has a
+#         stuck replication-flavored task (I-6).
 #   5.    Phase (b) seed: create the sharded database on cluster 1 and seed it the same way
 #         as phase (a) -- legacy fixture + fresh writes on top.
 #   6.    Phase (b) ETL setup: create the ETL target database on cluster 4 and wire up a
@@ -37,7 +39,9 @@
 #         reflect the same quiescent snapshot.
 #   10.   Phase (b) 3-way cross-check: ETL target == backup-restored target == source
 #         aggregate.  Exact equality on doc counts, plus per-doc revision-count parity on
-#         a probe set against both targets.
+#         a probe set across ALL three (sharded source routed via its orchestrator).
+#         Step 8 also asserts I-6 (no stuck task) on both ends of the ETL pipe after the
+#         doc-count drain.
 #
 # A note on the reordering: the original spec lists the backup as step 7 (before W-1) and
 # the restore as step 9.  Taken literally, the backup would capture pre-W-1 state and the
@@ -332,6 +336,52 @@
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
+    - name: Sharded target per-doc placement check
+      ravendb_diagnostic:
+        kind: shard_placement_check
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        target: "{{ sharded_tgt_leader }}"
+        id_prefix: "{{ phase_a_seed_prefix }}"
+        count: "{{ parity_probe_count | int }}"
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # I-6 (no stuck task) on both sides of phase (a).  Smuggler is a one-shot
+    # REST call, not a long-running task -- but we check anyway: any
+    # pre-existing replication-flavored task (from a previous scenario sharing
+    # the cluster) that is Faulted / in Reconnect should fail the run here, not
+    # leak into phase (b).
+    - name: Phase (a) I-6 on non-sharded source -- no stuck replication task
+      ravendb_diagnostic:
+        kind: replication_health
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ nonshd_src_leader }}"
+        db_name: db1
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: Phase (a) I-6 on sharded import target -- no stuck replication task
+      ravendb_diagnostic:
+        kind: replication_health
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ sharded_tgt_leader }}"
+        db_name: db1
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
 
 # ----- step 5: phase (b) -- create the sharded source on cluster 1 and seed it mixed-form ------
 
@@ -521,6 +571,37 @@
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
+    # I-6 on both sides of the ETL pipe.  Plan step (b)-10 calls for a 3-way
+    # cross-check at a drained moment; if the ETL task itself is stuck
+    # (Faulted / Error / Reconnect) the drained state is a lie and the
+    # cross-check passes for the wrong reason.  Check after the doc-count
+    # match so a still-catching-up Reconnect doesn't fail us prematurely.
+    - name: Phase (b) I-6 on sharded source -- no stuck replication task
+      ravendb_diagnostic:
+        kind: replication_health
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ src_sharded_leader }}"
+        db_name: db1
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: Phase (b) I-6 on ETL target -- no stuck replication task
+      ravendb_diagnostic:
+        kind: replication_health
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ etl_tgt_leader }}"
+        db_name: db1
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
 
 # ----- step 9: phase (b) -- dump the source at the drained moment + restore into cluster 5 -----
 
@@ -679,20 +760,26 @@
         success_msg: >-
           3-WAY CROSS-CHECK PASS  src=etl=bkp={{ src_n }}
 
-    # Per-doc revision-count parity ACROSS the ETL target and the backup-restored target
-    # (sampled probe set).  Doc counts already matched above; this checks revisions.
-    # Note: Raven ETL by default doesn't carry revisions -- if this fails with ETL showing
-    # [0] while bkp-cmp shows the actual rev counts, the ETL task config needs revisions
-    # enabled, OR spec needs to be updated to acknowledge ETL-revisions are
-    # intentionally not part of the 3-way equality.
-    - name: Per-doc revision-count parity ETL tgt vs bkp-cmp tgt (must match)
+    # Per-doc revision-count parity ACROSS all three copies (plan: "I-2 union
+    # equality across ETL target, backup-restored target, and sharded source").
+    # The kind auto-detects the sharded source via /admin/databases and routes
+    # per-id /revisions reads through its orchestrator; non-sharded targets are
+    # hit directly.  Doc counts already matched above; this checks revisions.
+    # Note: Raven ETL by default doesn't carry revisions -- if this fails with
+    # ETL showing [0] while src and bkp-cmp show the actual rev counts, the
+    # ETL task config needs revisions enabled, OR the spec needs to acknowledge
+    # ETL-revisions are intentionally not part of the 3-way equality.
+    - name: Per-doc revision-count parity sharded src vs ETL tgt vs bkp-cmp tgt (must match)
       ravendb_diagnostic:
         kind: revision_count_parity
         ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
         ca_cert: "{{ cert_ca_crt }}"
         db_name: db1
-        nodes: ["{{ etl_tgt_leader }}", "{{ bkp_cmp_leader }}"]
+        nodes:
+          - "{{ src_sharded_leader }}"
+          - "{{ etl_tgt_leader }}"
+          - "{{ bkp_cmp_leader }}"
         id_prefix: "{{ phase_b_seed_prefix }}"
         count: "{{ parity_probe_count | int }}"
         assert_mode: true
