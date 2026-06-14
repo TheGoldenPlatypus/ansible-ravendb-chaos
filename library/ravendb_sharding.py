@@ -8,7 +8,6 @@ def k_create_sharded(p):
     leader = p["cluster_leader"]
     db = p["db_name"]
     shards = p["shards"]
-    orchestrator_members = p["orchestrator_members"]
 
     if not shards:
         raise ValueError("kind=create_sharded requires `shards` (dict: shard_id -> [node_tags])")
@@ -17,22 +16,10 @@ def k_create_sharded(p):
     for shard_id, members in shards.items():
         shard_topology[str(shard_id)] = {"Members": list(members)}
 
-    if not orchestrator_members:
-        seen = set()
-        orchestrator_members = []
-        for members in shards.values():
-            for m in members:
-                if m not in seen:
-                    seen.add(m)
-                    orchestrator_members.append(m)
-
     body = {
         "DatabaseName": db,
         "Sharding": {
             "Shards": shard_topology,
-            "Orchestrator": {
-                "Topology": {"Members": list(orchestrator_members)},
-            },
         },
     }
 
@@ -42,8 +29,19 @@ def k_create_sharded(p):
     if status not in (200, 201):
         raise RuntimeError("create_sharded failed: HTTP %d  body=%s" % (status, resp[:500]))
 
-    return "SHARDED DB created  %s on %s  shards=%s  orchestrator=%s" % (
-        db, leader, list(shards.keys()), orchestrator_members)
+    s2, b2 = request("GET", leader, p["ravendb_domain"],
+                     "/admin/databases?name=%s" % db,
+                     p["client_cert"], p["ca_cert"])
+    picked = "?"
+    if s2 == 200:
+        import json as _json
+        rec = _json.loads(b2)
+        orch_topo = ((rec.get("Sharding") or {}).get("Orchestrator") or {}).get("Topology") or {}
+        picked = "members=%s rf=%s" % (
+            orch_topo.get("Members"), orch_topo.get("ReplicationFactor"))
+
+    return "SHARDED DB created  %s on %s  shards=%s  orchestrator(auto)=%s" % (
+        db, leader, list(shards.keys()), picked)
 
 
 KINDS = {
@@ -61,7 +59,6 @@ def main():
         db_name=dict(required=True),
         # create_sharded
         shards=dict(type="dict", default=None),
-        orchestrator_members=dict(type="list", elements="str", default=None),
     ))
 
     handler = KINDS[module.params["kind"]]
