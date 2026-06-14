@@ -36,41 +36,25 @@
         path: "{{ playbook_dir }}/../captures"
         state: absent
 
-    - name: Kill leftover background workloads for THIS cluster range + their pidfiles
-      # Background workloads are launched via nohup and survive a Ctrl-C of the scenario.
-      # Teardown is the "reset everything" command, so we sweep them here too.
-      #
-      # IMPORTANT: scoped to this teardown's cluster_id_start range so parallel
-      # scenarios on disjoint cluster id ranges don't kill each other's workers.
-      # Previously a blanket `pkill -f workload_w1.sh` + `rm -f /tmp/w1-*.pid`
-      # would TERM workers from sibling scenarios on different cluster ids
-      # whenever a teardown ran for any one of them.
-      #
-      # We compute the cluster_id_start..cluster_id_start+clusters_count-1 set
-      # and kill+remove only pidfiles whose target hostname matches one of
-      # those single-digit (or two-digit) cluster ids followed by [abc...].
-      # The [w]orkload regex trick prevents pkill from matching its own command
-      # line and SIGTERM'ing the shell running it.
+    - name: Compute the cluster ids this teardown owns
+      ansible.builtin.set_fact:
+        _teardown_cids: >-
+          {{ range(cluster_id_start | default(1) | int,
+                   (cluster_id_start | default(1) | int)
+                   + (clusters_count | default(1) | int)) | list }}
+
+    - name: Kill leftover workloads + remove their pidfiles (per cluster id)
       ansible.builtin.shell: |
-        cid_start={{ cluster_id_start | default(1) | int }}
-        cid_count={{ clusters_count | default(1) | int }}
-        cid_end=$((cid_start + cid_count - 1))
-        # POSIX-compatible loop: ansible's `shell:` runs /bin/sh (dash on Ubuntu)
-        # which doesn't support bash's `for ((...))` C-style loops.  `seq` works
-        # in both dash and bash.
-        for cid in $(seq "$cid_start" "$cid_end"); do
-          # match pidfiles like /tmp/w*-<cid>[a-z]-db1*.pid (with or without -w<N> suffix)
-          for pf in /tmp/w*-${cid}[a-z]-db1*.pid; do
-            [ -e "$pf" ] || continue
-            pid=$(cat "$pf" 2>/dev/null || true)
-            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-              # use kill (not pkill) so we only TERM the specific PID that matches
-              kill "$pid" 2>/dev/null || true
-            fi
-            rm -f "$pf" 2>/dev/null || true
-          done
+        for pf in /tmp/w*-{{ item }}[a-z]-db1*.pid; do
+          [ -e "$pf" ] || continue
+          pid=$(cat "$pf" 2>/dev/null || true)
+          if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+          fi
+          rm -f "$pf" 2>/dev/null || true
         done
         echo done
+      loop: "{{ _teardown_cids }}"
       changed_when: false
 
 
