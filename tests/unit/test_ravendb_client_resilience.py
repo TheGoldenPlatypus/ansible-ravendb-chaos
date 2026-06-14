@@ -146,6 +146,47 @@ def test_retries_on_remote_disconnected_and_succeeds(monkeypatch):
     assert body == b"ok"
 
 
+def test_retries_on_each_documented_transient_class(monkeypatch):
+    """Every error class _is_transient_transport_error() promises to retry
+    must actually trigger a retry.  Pinned so a future cleanup of the
+    `direct` tuple can't silently drop a class we need.
+
+    Two shapes per class -- raised directly, and wrapped in URLError -- since
+    different Python / urllib paths surface them either way."""
+    monkeypatch.setattr(rc.time, "sleep", lambda _s: None)
+
+    transient_exceptions = [
+        http.client.RemoteDisconnected("closed"),
+        ConnectionResetError("reset"),
+        ConnectionRefusedError("refused"),    # server accept queue full
+        ConnectionAbortedError("aborted"),
+        BrokenPipeError("broken pipe"),
+        TimeoutError("socket timeout"),
+        EOFError("eof before headers"),
+    ]
+
+    for shape in ("direct", "wrapped"):
+        for exc_template in transient_exceptions:
+            rc._SSL_CONTEXT_CACHE.clear()
+            attempts = {"n": 0}
+
+            def flaky(req, _exc=exc_template, **kw):
+                attempts["n"] += 1
+                if attempts["n"] == 1:
+                    if shape == "wrapped":
+                        raise URLError(_exc)
+                    raise _exc
+                return _fake_response(status=200, body=b"ok")
+            monkeypatch.setattr(rc, "urlopen", flaky)
+
+            label = "%s (%s)" % (type(exc_template).__name__, shape)
+            status, _ = rc.request("PUT", "1a", "test.local", "/x",
+                                   "/ca.pem", "/c.pem", body=b"d")
+            print(f"    {label:50}  attempts={attempts['n']}  status={status}")
+            assert attempts["n"] == 2, "did not retry on %s" % label
+            assert status == 200
+
+
 def test_retries_on_connection_reset_wrapped_in_urlerror(monkeypatch):
     """urllib sometimes wraps the transport failure in URLError; the kind
     must still detect it as transient by unwrapping `.reason`."""

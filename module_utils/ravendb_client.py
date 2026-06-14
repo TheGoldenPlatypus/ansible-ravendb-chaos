@@ -50,21 +50,27 @@ _TRANSPORT_RETRY_BACKOFF_SECS = (0.2, 0.5)   # one entry per retry attempt
 
 def _is_transient_transport_error(exc):
     """Return True if `exc` is the kind of transport-level failure that's worth
-    a quick retry (server closed mid-stream, connection reset, EOF before
-    headers).  HTTPError-style 4xx/5xx are explicitly NOT considered transient
-    here -- those are real responses, callers handle them on the status code."""
-    if isinstance(exc, http.client.RemoteDisconnected):
-        return True
-    if isinstance(exc, ConnectionResetError):
+    a quick retry (server closed mid-stream, connection reset, refused-accept,
+    EOF before headers, broken-pipe on send).  HTTPError-style 4xx/5xx are
+    explicitly NOT considered transient here -- those are real responses,
+    callers handle them on the status code."""
+    # Direct transport-failure exceptions urllib may surface (some Python
+    # versions wrap them in URLError, others bubble them up directly).
+    direct = (
+        http.client.RemoteDisconnected,
+        ConnectionResetError,
+        ConnectionRefusedError,    # server's accept queue briefly full
+        ConnectionAbortedError,    # server-side abort mid-stream
+        BrokenPipeError,           # server closed while we were writing
+        TimeoutError,              # socket-level read/write timeout
+        EOFError,                  # peer closed before sending headers
+    )
+    if isinstance(exc, direct):
         return True
     if isinstance(exc, URLError):
         inner = getattr(exc, "reason", None)
-        if isinstance(inner, (http.client.RemoteDisconnected, ConnectionResetError)):
+        if isinstance(inner, direct):
             return True
-        if isinstance(inner, EOFError):
-            return True
-    if isinstance(exc, EOFError):
-        return True
     return False
 
 
