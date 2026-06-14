@@ -10,7 +10,7 @@ clusters_count: 1
 nodes_per_cluster: 3
 
 docker_network_name: hubsinknet
-docker_image: docker.io/geerlingguy/docker-ubuntu2204-ansible:latest
+docker_image: docker.io/geerlingguy/docker-ubuntu2404-ansible:latest
 
 # Force the python interpreter inside the geerlingguy container.  Without this, ansible's
 # auto-discovery can pick a python whose `setup` module returns non-JSON-encodable objects
