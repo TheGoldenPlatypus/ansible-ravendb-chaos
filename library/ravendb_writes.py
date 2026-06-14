@@ -2,11 +2,35 @@
 
 import datetime
 import json
+import time
 import uuid
 from urllib.parse import quote
 
 from ansible.module_utils.basic import AnsibleModule
 from ansible.module_utils.ravendb_client import request
+
+
+_TRANSIENT_HTTP_STATUSES = frozenset([500, 502, 503, 504])
+_HTTP_RETRY_MAX = 3
+_HTTP_RETRY_BACKOFF_SECS = (0.2, 0.5, 1.0)
+
+
+def put_idempotent(p, target, path, body):
+    """PUT with a small bounded retry on transient server-overload statuses.
+
+    Returns the final HTTP status (after retries) and the response body --
+    same shape as request().  Callers route on the status code as usual; if
+    the server stayed in 5xx through all retries, the status surfaces."""
+    status = None
+    resp = None
+    for attempt in range(_HTTP_RETRY_MAX + 1):
+        status, resp = request("PUT", target, p["ravendb_domain"], path,
+                               p["client_cert"], p["ca_cert"], body=body)
+        if status not in _TRANSIENT_HTTP_STATUSES:
+            return status, resp
+        if attempt < _HTTP_RETRY_MAX:
+            time.sleep(_HTTP_RETRY_BACKOFF_SECS[attempt])
+    return status, resp
 
 
 def k_docs(p):
@@ -30,8 +54,7 @@ def k_docs(p):
         # docId from different nodes produce DISTINCT content
         if body_tag:
             body["tag"] = body_tag
-        status, _ = request("PUT", target, p["ravendb_domain"], path,
-                            p["client_cert"], p["ca_cert"], body=body)
+        status, _ = put_idempotent(p, target, path, body)
         if status not in (200, 201):
             failures.append("%s -> HTTP %s" % (doc_id, status))
 
@@ -97,8 +120,12 @@ def k_docs_revisions(p):
                 "src": "write_docs_revisions",
                 "@metadata": {"@collection": collection},
             }
-            status, _ = request("PUT", target, p["ravendb_domain"], path,
-                                p["client_cert"], p["ca_cert"], body=body)
+            # Idempotent PUT with bounded retry on transient server overload
+            # (500/502/503/504).  RavenDB's transaction merger queues can
+            # briefly reject during a 50k-PUT sustained seed; the same write
+            # succeeds a few hundred ms later.  Real 4xx / non-transient 5xx
+            # surface unchanged via the failures list.
+            status, _ = put_idempotent(p, target, path, body)
             if status not in (200, 201):
                 failures.append("%s rev=%d -> HTTP %s" % (doc_id, v, status))
 
