@@ -55,13 +55,23 @@ def _revisions_body(n):
 
 
 # ---- _resolve_revisions_route ---------------------------------------------
+#
+# NOTE: _resolve_revisions_route now delegates to ravendb_client.resolve_db_admin_route,
+# which calls `request` from its OWN module (ravendb_client), not diag.request.
+# So tests must patch the shared helper's request reference, not diag.request.
+# A few tests below also patch diag.request because k_revision_count_parity uses
+# diag.request directly for its inner /revisions GETs (those don't go through
+# the shared helper).
+
+import ravendb_client as rc   # noqa: E402  -- pinned import after sys-path conftest
+
 
 def test_resolves_non_sharded_target_to_itself(monkeypatch):
     def fake_request(method, target, domain, path, *a, **kw):
         if path.startswith("/admin/databases?name="):
             return 200, _admin_databases_body(sharded=False)
         raise AssertionError("unexpected path %r" % path)
-    monkeypatch.setattr(diag, "request", fake_request)
+    monkeypatch.setattr(rc, "request", fake_request)
 
     print(f"\n    expected: non-sharded -> route == target ('2a')")
     route = diag._resolve_revisions_route(params(), "2a")
@@ -76,7 +86,7 @@ def test_resolves_sharded_target_to_orchestrator_member_on_same_cluster(monkeypa
         if path.startswith("/admin/databases?name="):
             return 200, _admin_databases_body(sharded=True, orch_members=["B"])
         raise AssertionError("unexpected path %r" % path)
-    monkeypatch.setattr(diag, "request", fake_request)
+    monkeypatch.setattr(rc, "request", fake_request)
 
     print(f"\n    expected: sharded with orch=['B'] -> route '1b'")
     route = diag._resolve_revisions_route(params(), "1a")
@@ -89,7 +99,7 @@ def test_raises_loud_when_sharded_db_has_no_orchestrator(monkeypatch):
         if path.startswith("/admin/databases?name="):
             return 200, _admin_databases_body(sharded=True, orch_members=[])
         raise AssertionError("unexpected path %r" % path)
-    monkeypatch.setattr(diag, "request", fake_request)
+    monkeypatch.setattr(rc, "request", fake_request)
 
     print(f"\n    expected: raises RuntimeError mentioning 'no orchestrator members'")
     with pytest.raises(RuntimeError, match="no orchestrator members") as exc:
@@ -102,7 +112,7 @@ def test_raises_loud_when_admin_databases_fails(monkeypatch):
         if path.startswith("/admin/databases?name="):
             return 404, b""
         raise AssertionError("unexpected path %r" % path)
-    monkeypatch.setattr(diag, "request", fake_request)
+    monkeypatch.setattr(rc, "request", fake_request)
 
     print(f"\n    expected: raises RuntimeError mentioning 'db missing or node unreachable'")
     with pytest.raises(RuntimeError, match="db missing or node unreachable") as exc:
@@ -128,7 +138,11 @@ def test_kind_routes_sharded_target_through_orchestrator_and_keeps_label(monkeyp
             hit.append(target)
             return 200, _revisions_body(3)
         raise AssertionError("unexpected path %r" % path)
+    # Patch BOTH the diagnostic-side request (used by the kind's inner
+    # /revisions GETs) AND the shared client.request (used by the
+    # resolve_db_admin_route lookup the kind calls upfront).
     monkeypatch.setattr(diag, "request", fake_request)
+    monkeypatch.setattr(rc, "request", fake_request)
 
     lines = diag.k_revision_count_parity(
         params(nodes=["1a", "2a"], ids=["users/0"]))

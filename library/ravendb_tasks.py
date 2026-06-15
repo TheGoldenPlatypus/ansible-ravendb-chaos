@@ -6,7 +6,7 @@ import os
 from urllib.parse import quote
 
 from ansible.module_utils.basic import AnsibleModule
-from ansible.module_utils.ravendb_client import request
+from ansible.module_utils.ravendb_client import request, resolve_db_admin_route
 
 
 def read_pfx_b64(certs_dir, sink_cluster_id):
@@ -390,6 +390,11 @@ def k_setup_etl(p):
 
     assert_target_hosts_db(p, source_leader, source_db)
 
+    route_leader = resolve_db_admin_route(
+        source_leader, source_db, p["ravendb_domain"],
+        p["client_cert"], p["ca_cert"],
+    )
+
     cs_body = {
         "Name": conn_name,
         "Database": target_db,
@@ -397,11 +402,11 @@ def k_setup_etl(p):
         "Type": "Raven",
     }
     cs_path = "/databases/%s/admin/connection-strings" % source_db
-    status, _ = request("PUT", source_leader, p["ravendb_domain"], cs_path,
+    status, _ = request("PUT", route_leader, p["ravendb_domain"], cs_path,
                         p["client_cert"], p["ca_cert"], body=cs_body)
     if status not in (200, 201):
-        raise RuntimeError("create connection string on %s failed: HTTP %d" %
-                           (source_leader, status))
+        raise RuntimeError("create connection string on %s (routed via %s) failed: HTTP %d" %
+                           (source_leader, route_leader, status))
 
     if not script:
         script = "loadToOriginalCollection(this)"
@@ -424,11 +429,11 @@ def k_setup_etl(p):
         "MentorNode": None,
     }
     etl_path = "/databases/%s/admin/etl" % source_db
-    status, body = request("PUT", source_leader, p["ravendb_domain"], etl_path,
+    status, body = request("PUT", route_leader, p["ravendb_domain"], etl_path,
                            p["client_cert"], p["ca_cert"], body=etl_body)
     if status not in (200, 201):
-        raise RuntimeError("create ETL task on %s failed: HTTP %d  body=%s" %
-                           (source_leader, status, body[:300]))
+        raise RuntimeError("create ETL task on %s (routed via %s) failed: HTTP %d  body=%s" %
+                           (source_leader, route_leader, status, body[:300]))
 
     # Don't swallow JSON parse errors -- if the server responded 200/201 but with
     # garbage, that's a bug worth surfacing, not silently skipping the toggle step.

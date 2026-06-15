@@ -232,3 +232,56 @@ def request_per_node(method, targets, domain, path, client_cert, ca_cert,
         for result in pool.map(call_one, targets):
             results.append(result)
     return results
+
+
+def resolve_db_admin_route(target, db_name, domain, client_cert, ca_cert):
+    """Find the node to send database-record-level admin calls to (revisions
+    config, replication-task config, anything that writes the DatabaseRecord).
+
+    For non-sharded databases: return `target` unchanged -- any cluster member
+    holding the database accepts these calls.
+
+    For sharded databases: return the container name of the database's first
+    orchestrator member.  Non-orchestrator members of a sharded database
+    reject admin/<db>/ calls with HTTP 410
+    (Raven.Client.Exceptions.Database.DatabaseNotRelevantException -- "Can't
+    get or add orchestrator for database X because it is not relevant on this
+    node Y").  RavenDB does NOT auto-forward these to the orchestrator the way
+    it forwards per-doc reads, so the client has to route explicitly.
+
+    Returns the node name to use as `target` for the subsequent call.  Raises
+    RuntimeError if /admin/databases?name= is unreachable or if the db is
+    sharded but has no orchestrator (which would indicate a topology bug)."""
+    try:
+        s, b = request("GET", target, domain,
+                       "/admin/databases?name=%s" % db_name,
+                       client_cert, ca_cert)
+    except Exception:
+        # Transport-level failure (DNS / connection refused / timeout) --
+        # we can't determine routing, so surface this loudly rather than
+        # silently sending to the (potentially-wrong) original target.
+        raise RuntimeError(
+            "%s/%s: /admin/databases unreachable -- can't determine sharded routing"
+            % (target, db_name))
+    if s != 200:
+        raise RuntimeError(
+            "%s/%s: /admin/databases returned HTTP %d -- db missing or node unreachable"
+            % (target, db_name, s))
+
+    rec = json.loads(b)
+    if not (rec.get("Sharding") or {}).get("Shards"):
+        # Non-sharded -- the target accepts admin calls directly.
+        return target
+
+    orch_members = (((rec.get("Sharding") or {}).get("Orchestrator") or {})
+                    .get("Topology") or {}).get("Members") or []
+    if not orch_members:
+        raise RuntimeError(
+            "%s/%s: sharded db has no orchestrator members -- can't route admin call"
+            % (target, db_name))
+
+    # `target` looks like "62a"; the cluster id is everything but the last
+    # character (so "62"), and the orchestrator member tag (e.g. "G") becomes
+    # the lowercase suffix -> "62g".
+    cluster_id = target[:-1]
+    return "%s%s" % (cluster_id, orch_members[0].lower())

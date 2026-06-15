@@ -42,7 +42,9 @@ import time
 from urllib.parse import quote
 
 from ansible.module_utils.basic import AnsibleModule
-from ansible.module_utils.ravendb_client import request, request_per_node
+from ansible.module_utils.ravendb_client import (
+    request, request_per_node, resolve_db_admin_route,
+)
 
 
 # ============================================================================
@@ -722,40 +724,10 @@ def k_doc_id_set_parity(p):
 
 
 def _resolve_revisions_route(p, target):
-    """Pick the node to actually hit for /revisions?id=... on `target`.
-
-    Non-sharded: hit the target itself.  Sharded: hit the database's
-    orchestrator member, which routes per-id reads to the owning shard.
-    Hitting a non-orchestrator member of a sharded cluster can silently
-    return an incomplete result, so we route explicitly instead of
-    relying on transparent forwarding."""
-    db = p["db_name"]
-    try:
-        s, b = request("GET", target, p["ravendb_domain"],
-                       "/admin/databases?name=%s" % db,
-                       p["client_cert"], p["ca_cert"])
-    except Exception:
-        # Transport-level failure (DNS / connection refused / timeout).  Keep
-        # the message shape the existing kind contract uses so callers'
-        # 'unreachable' assertions still match.
-        raise RuntimeError(
-            "%s/%s: /admin/databases unreachable -- can't determine sharded routing"
-            % (target, db))
-    if s != 200:
-        raise RuntimeError(
-            "%s/%s: /admin/databases returned HTTP %d -- db missing or node unreachable"
-            % (target, db, s))
-    rec = json.loads(b)
-    if not (rec.get("Sharding") or {}).get("Shards"):
-        return target
-    orch_members = (((rec.get("Sharding") or {}).get("Orchestrator") or {})
-                    .get("Topology") or {}).get("Members") or []
-    if not orch_members:
-        raise RuntimeError(
-            "%s/%s: sharded db has no orchestrator members -- can't route revisions read"
-            % (target, db))
-    cluster_id = target[:-1]
-    return "%s%s" % (cluster_id, orch_members[0].lower())
+    return resolve_db_admin_route(
+        target, p["db_name"], p["ravendb_domain"],
+        p["client_cert"], p["ca_cert"],
+    )
 
 
 def k_revision_count_parity(p):

@@ -1,7 +1,7 @@
 #!/usr/bin/python
 
 from ansible.module_utils.basic import AnsibleModule
-from ansible.module_utils.ravendb_client import request
+from ansible.module_utils.ravendb_client import request, resolve_db_admin_route
 
 
 def seconds_to_hms(secs):
@@ -76,9 +76,17 @@ def main():
     path = "/databases/%s/admin/revisions/config" % p["db_name"]
 
     try:
+        route_target = resolve_db_admin_route(
+            p["target"], p["db_name"], p["ravendb_domain"],
+            p["client_cert"], p["ca_cert"],
+        )
+    except Exception as e:
+        module.fail_json(msg=str(e))
+
+    try:
         status, _ = request(
             "POST",
-            p["target"], p["ravendb_domain"], path,
+            route_target, p["ravendb_domain"], path,
             p["client_cert"], p["ca_cert"],
             body=body,
         )
@@ -86,11 +94,14 @@ def main():
         module.fail_json(msg=str(e))
 
     if status not in (200, 201, 204):
-        module.fail_json(msg="unexpected HTTP status %d" % status)
+        module.fail_json(msg="unexpected HTTP status %d (target=%s, routed via %s)"
+                             % (status, p["target"], route_target))
 
+    routed_note = "" if route_target == p["target"] else " (sharded -- routed via %s)" % route_target
     module.exit_json(
         changed=True,
-        msg="REVISIONS configured on %s/%s -- %s" % (p["target"], p["db_name"], summary),
+        msg="REVISIONS configured on %s/%s -- %s%s" % (
+            p["target"], p["db_name"], summary, routed_note),
     )
 
 
