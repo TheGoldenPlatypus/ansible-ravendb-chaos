@@ -135,8 +135,11 @@ def classify_nodes(p, nodes):
 
     A shard_id of None means non-sharded (or the node hosts the DB plainly);
     a non-None shard_id means we discovered the per-shard route to use for
-    follow-up stat requests on that node.  Nodes that responded with anything
-    other than 200 or the sharding 'nodeTag is mandatory' marker go in `skipped`."""
+    follow-up stat requests on that node.  Two server responses indicate a
+    shard-only member that needs the per-shard route resolved:
+      * 500 'nodeTag is mandatory'     -- legacy 6.x sharded response
+      * 410 DatabaseNotRelevant       -- 7.x sharded response on a non-orchestrator
+    Anything else goes in `skipped`."""
     domain = p["ravendb_domain"]
     db = p["db_name"]
     path = "/databases/%s/stats" % db
@@ -149,6 +152,8 @@ def classify_nodes(p, nodes):
         if status == 200:
             host_map[target] = None
         elif status == 500 and b"nodeTag is mandatory" in (body or b""):
+            sharded_probe_needed.append(target)
+        elif status == 410 and b"DatabaseNotRelevant" in (body or b""):
             sharded_probe_needed.append(target)
         else:
             skipped.append(target)
@@ -226,7 +231,12 @@ def get_stats(p, target, shard_id=None):
         return None
     if status == 200:
         return json.loads(body)
+    # Sharded responses: 6.x returned 500 'nodeTag is mandatory'; 7.x returns
+    # 410 DatabaseNotRelevantException on a shard-only member.  Both mean
+    # "this node hosts the db as a shard, ask via per-shard route".
     if status == 500 and b"nodeTag is mandatory" in body:
+        return aggregate_sharded_stats(p, target, db)
+    if status == 410 and b"DatabaseNotRelevant" in body:
         return aggregate_sharded_stats(p, target, db)
     return None
 

@@ -42,14 +42,20 @@ def _resolve_shard_for_tag(p, target, tag):
 def classify_nodes(p, nodes):
     """Classify each probe node by whether it hosts the database.
 
-    Distinguishes three outcomes per node:
-      - 200          -> hosts the db (flat); add to host_map.
-      - 500 sharded  -> hosts the db (sharded); resolve shard then add.
-      - connection   -> UNREACHABLE; raise loud (do NOT silently skip --
-                        unreachable conflated with 'wrong cluster' is the
-                        root cause of vacuous waits passing on dead clusters).
-      - other HTTP   -> genuinely doesn't host the db (404 etc.); add to
-                        skipped.  Caller decides whether that's tolerable.
+    Distinguishes outcomes per node:
+      - 200                     -> hosts the db (flat); add to host_map.
+      - 500 'nodeTag mandatory' -> hosts the db as a shard member (legacy 6.x
+                                   sharded response); resolve shard then add.
+      - 410 DatabaseNotRelevant -> hosts the db as a shard-only member of a
+                                   sharded db (7.x response on non-orchestrator);
+                                   same path as the 500 case -- resolve shard then
+                                   probe via ?nodeTag=&shardNumber=.
+      - connection              -> UNREACHABLE; raise loud (do NOT silently skip --
+                                   unreachable conflated with 'wrong cluster' is
+                                   the root cause of vacuous waits passing on
+                                   dead clusters).
+      - other HTTP              -> genuinely doesn't host the db (404 etc.); add
+                                   to skipped.  Caller decides if that's tolerable.
     """
     domain = p["ravendb_domain"]
     db = p["db_name"]
@@ -68,6 +74,8 @@ def classify_nodes(p, nodes):
         elif status == 200:
             host_map[target] = None
         elif status == 500 and b"nodeTag is mandatory" in (body or b""):
+            sharded_probe_needed.append(target)
+        elif status == 410 and b"DatabaseNotRelevant" in (body or b""):
             sharded_probe_needed.append(target)
         else:
             skipped.append(target)
