@@ -69,7 +69,7 @@
   connection: local
   gather_facts: false
   tasks:
-    - name: "Configure revisions on hub 1a/db1"
+    - name: "Configure revisions on hub {{ hub_id | default(1) }}a/db1"
       ravendb_revisions:
         ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
@@ -143,7 +143,7 @@
   gather_facts: false
   vars_files: [vars.yml]
   tasks:
-    - name: "Seed Users (users/sink1/*, count={{ bulk_users_sink1 }}, 1 rev) on hub 1a/db1"
+    - name: "Seed Users (users/sink1/*, count={{ bulk_users_sink1 }}, 1 rev) on hub {{ hub_id | default(1) }}a/db1"
       ravendb_writes:
         kind: docs_revisions
         ravendb_domain: "{{ ravendb_domain }}"
@@ -159,7 +159,7 @@
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
-    - name: "Seed Orders (orders/hub/*, count={{ bulk_orders_hub }}, 1 rev) on hub 1a/db1"
+    - name: "Seed Orders (orders/hub/*, count={{ bulk_orders_hub }}, 1 rev) on hub {{ hub_id | default(1) }}a/db1"
       ravendb_writes:
         kind: docs_revisions
         ravendb_domain: "{{ ravendb_domain }}"
@@ -558,7 +558,7 @@
   gather_facts: false
   vars_files: [vars.yml]
   tasks:
-    - name: "Burst write users/sink1/active/* (count={{ burst_active_count }}, 1 rev) on hub 1a/db1"
+    - name: "Burst write users/sink1/active/* (count={{ burst_active_count }}, 1 rev) on hub {{ hub_id | default(1) }}a/db1"
       ravendb_writes:
         kind: docs_revisions
         ravendb_domain: "{{ ravendb_domain }}"

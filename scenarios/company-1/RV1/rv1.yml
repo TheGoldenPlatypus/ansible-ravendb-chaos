@@ -108,7 +108,7 @@
   tasks:
     # Keep every revision forever -- phase 3 hammers a single doc with ~1M revisions and we
     # need the full history to stay around.
-    - name: "Configure keep-all revisions on 1a/db1 (minimum_revisions=1e8)"
+    - name: "Configure keep-all revisions on {{ cluster_id | default(1) }}a/db1 (minimum_revisions=1e8)"
       ravendb_revisions:
         ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
@@ -121,7 +121,7 @@
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # 10k docs x 5 distinct revisions each = 50k revisions, all written by the old build on 1a.
-    - name: "Phase 1 seed: write seed/* on 1a/db1 (10k x 5 v_62 raw-CV revisions)"
+    - name: "Phase 1 seed: write seed/* on {{ cluster_id | default(1) }}a/db1 (10k x 5 v_62 raw-CV revisions)"
       ravendb_writes:
         kind: docs_revisions
         ravendb_domain: "{{ ravendb_domain }}"
@@ -254,7 +254,7 @@
   tasks:
     # Send a marker doc from 1a and confirm it reaches 1b and 1c -- proves replication still
     # moves between the new build and the old build.
-    - name: "Mid-roll: wait for rv1/marker-post1a-* propagation 1a -> 1b/1c"
+    - name: "Mid-roll: wait for rv1/marker-post1a-* propagation {{ cluster_id | default(1) }}a -> {{ cluster_id | default(1) }}b/{{ cluster_id | default(1) }}c"
       ravendb_wait:
         kind: marker_propagation
         ravendb_domain: "{{ ravendb_domain }}"
@@ -271,7 +271,7 @@
 
     # Dump the schema version on each node.  At this point 1a is on the new build while
     # 1b and 1c are still on the old build -- the dump is just for visibility, no assert.
-    - name: "Mid-roll: dump schema version on a/b/c (1a v_new, 1b/1c v_old expected)"
+    - name: "Mid-roll: dump schema version on a/b/c ({{ cluster_id | default(1) }}a v_new, {{ cluster_id | default(1) }}b/{{ cluster_id | default(1) }}c v_old expected)"
       ravendb_diagnostic:
         kind: schema_version
         ravendb_domain: "{{ ravendb_domain }}"
@@ -331,7 +331,7 @@
   gather_facts: false
   vars_files: [vars.yml]
   tasks:
-    - name: "Mid-roll: wait for rv1/marker-post1b-* propagation 1a -> 1b/1c"
+    - name: "Mid-roll: wait for rv1/marker-post1b-* propagation {{ cluster_id | default(1) }}a -> {{ cluster_id | default(1) }}b/{{ cluster_id | default(1) }}c"
       ravendb_wait:
         kind: marker_propagation
         ravendb_domain: "{{ ravendb_domain }}"
@@ -346,7 +346,7 @@
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
-    - name: "Mid-roll: dump schema version on a/b/c (1a/1b v_new, 1c v_old expected)"
+    - name: "Mid-roll: dump schema version on a/b/c ({{ cluster_id | default(1) }}a/{{ cluster_id | default(1) }}b v_new, {{ cluster_id | default(1) }}c v_old expected)"
       ravendb_diagnostic:
         kind: schema_version
         ravendb_domain: "{{ ravendb_domain }}"
@@ -582,7 +582,7 @@
   gather_facts: false
   vars_files: [vars.yml]
   tasks:
-    - name: "Phase 2 pre-seed: write hot/* on 1a/db1 (phase2_hot_count x phase2_hot_revs_per_doc revs)"
+    - name: "Phase 2 pre-seed: write hot/* on {{ cluster_id | default(1) }}a/db1 (phase2_hot_count x phase2_hot_revs_per_doc revs)"
       ravendb_writes:
         kind: docs_revisions
         ravendb_domain: "{{ ravendb_domain }}"

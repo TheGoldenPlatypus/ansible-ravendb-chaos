@@ -84,7 +84,10 @@
 # ----- step 1: phase (a) -- seed the non-sharded source with legacy fixture + fresh writes -----
 
 - ansible.builtin.import_playbook: ../../../toolbox/db/create_database.yml
-  vars: { cluster_leader: "{{ nonshd_src_leader | default('2a') }}", db_name: db1, replication_factor: 1 }
+  # vars.yml is NOT reachable from import_playbook: vars: blocks (they evaluate
+  # at parse time, before vars_files loads).  Use the cluster_id var passed via
+  # -e in run.sh, which IS in scope here.
+  vars: { cluster_leader: "{{ nonshd_src_cluster_id | default(2) }}a", db_name: db1, replication_factor: 1 }
 
 - name: RV-3 step 1 -- revisions config + mixed-form seed on non-sharded source
   hosts: localhost
@@ -92,7 +95,7 @@
   gather_facts: false
   vars_files: [vars.yml]
   tasks:
-    - name: "Phase (a) configure default revisions on non-sharded source 2a/db1"
+    - name: "Phase (a) configure default revisions on non-sharded source {{ nonshd_src_cluster_id | default(2) }}a/db1"
       ravendb_revisions:
         ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
@@ -119,7 +122,7 @@
           new-form revisions; without the legacy half the cross-form check is untested.
           Build the fixture once per scenarios/company-1/RV3/fixtures/README.md and commit it,
           then re-run.
-    - name: "Phase (a) seed half 1: smuggler-import legacy-revs fixture (raw-CV form) into 2a/db1"
+    - name: "Phase (a) seed half 1: smuggler-import legacy-revs fixture (raw-CV form) into {{ nonshd_src_cluster_id | default(2) }}a/db1"
       ravendb_smuggler:
         kind: import
         ravendb_domain: "{{ ravendb_domain }}"
@@ -133,7 +136,7 @@
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # Half 2 of the mixed-form seed: fresh writes on top, which land in the new build's form.
-    - name: "Phase (a) seed half 2: write phase_a_seed_prefix/* on 2a/db1 (hashed-form, x revs)"
+    - name: "Phase (a) seed half 2: write phase_a_seed_prefix/* on {{ nonshd_src_cluster_id | default(2) }}a/db1 (hashed-form, x revs)"
       ravendb_writes:
         kind: docs_revisions
         ravendb_domain: "{{ ravendb_domain }}"
@@ -158,7 +161,7 @@
   gather_facts: false
   vars_files: [vars.yml]
   tasks:
-    - name: "Phase (a) smuggler-export non-sharded source 2a/db1 -> phase_a_dump"
+    - name: "Phase (a) smuggler-export non-sharded source {{ nonshd_src_cluster_id | default(2) }}a/db1 -> phase_a_dump"
       ravendb_smuggler:
         kind: export
         ravendb_domain: "{{ ravendb_domain }}"
@@ -516,14 +519,18 @@
       async: "{{ phase_b_w1_duration_secs | int + 120 }}"
       poll: 0
 
+# import_playbook: vars: blocks evaluate at parse time, before vars_files
+# loads -- so src_sharded_leader from vars.yml is Undefined and the default
+# would fall back to '1a' (wrong on any non-default cluster_id_start).
+# Use src_sharded_cluster_id (passed via -e in run.sh) which IS in scope here.
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
-  vars: { pidfile: "/tmp/w1-{{ src_sharded_leader | default('1a') }}-db1.pid", timeout_secs: 30 }
+  vars: { pidfile: "/tmp/w1-{{ src_sharded_cluster_id | default(1) }}a-db1.pid", timeout_secs: 30 }
 
 # Catch the "launched but immediately crashed" case.  Without this check, the wait-for-finish
 # in step 8 would see an empty pidfile (from the crashed process cleaning up) and report
 # FINISHED, so the scenario would silently proceed without W-1 ever having actually run.
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/assert_workload_alive.yml
-  vars: { pidfile: "/tmp/w1-{{ src_sharded_leader | default('1a') }}-db1.pid" }
+  vars: { pidfile: "/tmp/w1-{{ src_sharded_cluster_id | default(1) }}a-db1.pid" }
 
 
 # ----- step 8: phase (b) -- wait for W-1 to finish, then wait for the ETL target to catch up ---

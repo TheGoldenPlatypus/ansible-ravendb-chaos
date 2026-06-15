@@ -1321,7 +1321,7 @@
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
-    - name: "I-6 on sink-1 new leader (queried via 2b)"
+    - name: "I-6 on sink-1 new leader (queried via {{ sink1_id | default(2) }}b)"
       ravendb_diagnostic:
         kind: replication_health
         ravendb_domain: "{{ ravendb_domain }}"

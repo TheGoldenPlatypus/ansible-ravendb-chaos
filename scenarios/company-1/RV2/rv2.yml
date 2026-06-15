@@ -53,7 +53,7 @@
 # ----- pre: orphan-kill + validate ------------------------------------------------------------
 
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
-  vars: { pidfile: "/tmp/w1-{{ src_leader | default('1a') }}-db1.pid" }
+  vars: { pidfile: "/tmp/w1-{{ src_cluster_id | default(1) }}a-db1.pid" }
 
 - name: RV-2 pre -- validate inputs + show plan
   hosts: localhost
@@ -111,7 +111,10 @@
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
 - ansible.builtin.import_playbook: ../../../toolbox/db/create_database.yml
-  vars: { cluster_leader: "{{ tgt_leader | default('2a') }}", db_name: db1, replication_factor: 1 }
+  # vars.yml is NOT reachable from import_playbook: vars: blocks (they evaluate
+  # at parse time, before vars_files loads).  Use tgt_cluster_id, which is
+  # passed via -e in run.sh and IS in scope here.
+  vars: { cluster_leader: "{{ tgt_cluster_id | default(2) }}a", db_name: db1, replication_factor: 1 }
 
 - name: RV-2 step 1 -- configure target revisions + seed source with v_62 raw-CV revisions
   hosts: localhost
@@ -173,7 +176,7 @@
       poll: 0
 
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
-  vars: { pidfile: "/tmp/w1-{{ src_leader | default('1a') }}-db1.pid", timeout_secs: 30 }
+  vars: { pidfile: "/tmp/w1-{{ src_cluster_id | default(1) }}a-db1.pid", timeout_secs: 30 }
 
 
 # ----- step 3: phase (a) -- upgrade shard Sx one replica at a time (1a, 1b, 1c) + checkpoint --
@@ -202,7 +205,7 @@
       async: 2400
       poll: 30
 
-    - name: Shard Sx checkpoint -- replicas (1a/b/c) all schema 72001
+    - name: "Shard Sx checkpoint -- replicas ({{ src_cluster_id | default(1) }}a/b/c) all schema 72001"
       ravendb_diagnostic:
         kind: schema_version
         ravendb_domain: "{{ ravendb_domain }}"
@@ -303,10 +306,10 @@
 # ----- step 6: phase (a) -- stop the writer, drain every shard, run the per-shard asserts -----
 
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/assert_workload_alive.yml
-  vars: { pidfile: "/tmp/w1-{{ src_leader | default('1a') }}-db1.pid" }
+  vars: { pidfile: "/tmp/w1-{{ src_cluster_id | default(1) }}a-db1.pid" }
 
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
-  vars: { pidfile: "/tmp/w1-{{ src_leader | default('1a') }}-db1.pid" }
+  vars: { pidfile: "/tmp/w1-{{ src_cluster_id | default(1) }}a-db1.pid" }
 
 - name: RV-2 step 6 -- drain + tombstone settle + per-shard final asserts
   hosts: localhost
