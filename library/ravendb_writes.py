@@ -7,7 +7,22 @@ import uuid
 from urllib.parse import quote
 
 from ansible.module_utils.basic import AnsibleModule
-from ansible.module_utils.ravendb_client import request
+from ansible.module_utils.ravendb_client import request, resolve_db_admin_route
+
+
+def resolve_write_target(p):
+    """For sharded databases, doc PUTs to a non-orchestrator member return
+    HTTP 410 DatabaseNotRelevantException -- same routing requirement as
+    admin/<db>/* calls.  Resolve once at the kind entry point and reuse the
+    routed target for the entire write loop; for non-sharded databases this
+    returns p['target'] unchanged.
+
+    Returns the resolved target node name (string).  Raises RuntimeError on
+    transport failure / non-200 /admin/databases lookup."""
+    return resolve_db_admin_route(
+        p["target"], p["db_name"], p["ravendb_domain"],
+        p["client_cert"], p["ca_cert"],
+    )
 
 
 _TRANSIENT_HTTP_STATUSES = frozenset([500, 502, 503, 504])
@@ -34,7 +49,7 @@ def put_idempotent(p, target, path, body):
 
 
 def k_docs(p):
-    target = p["target"]
+    target = resolve_write_target(p)
     db = p["db_name"]
     prefix = p["id_prefix"] or "micro/doc"
     count = p["count"]
@@ -68,7 +83,7 @@ def k_docs(p):
 
 
 def k_docs_freeform(p):
-    target = p["target"]
+    target = resolve_write_target(p)
     db = p["db_name"]
     count = p["count"]
 
@@ -97,7 +112,7 @@ def k_docs_freeform(p):
 
 
 def k_docs_revisions(p):
-    target = p["target"]
+    target = resolve_write_target(p)
     db = p["db_name"]
     count = p["count"]
     revs = p["revs_per_doc"]
@@ -139,7 +154,7 @@ def k_docs_revisions(p):
 
 
 def k_docs_interleaved(p):
-    target = p["target"]
+    target = resolve_write_target(p)
     db = p["db_name"]
     count = p["count"]
     prefixes = p["prefixes"]
@@ -169,7 +184,7 @@ def k_docs_interleaved(p):
 
 
 def k_attachments(p):
-    target = p["target"]
+    target = resolve_write_target(p)
     db = p["db_name"]
     count = p["count"]
     doc_prefix = p["doc_id_prefix"] or "micro/doc"
@@ -201,7 +216,7 @@ def k_attachments(p):
 
 
 def k_counters(p):
-    target = p["target"]
+    target = resolve_write_target(p)
     db = p["db_name"]
     doc_id = p["doc_id"]
     name = p["counter_name"] or "Likes"
@@ -242,7 +257,7 @@ def k_counters(p):
 
 
 def k_timeseries(p):
-    target = p["target"]
+    target = resolve_write_target(p)
     db = p["db_name"]
     doc_id = p["doc_id"]
     name = p["ts_name"] or "Heartrate"
@@ -306,7 +321,7 @@ def k_timeseries(p):
 
 
 def k_delete(p):
-    target = p["target"]
+    target = resolve_write_target(p)
     db = p["db_name"]
 
     if p["ids"]:
@@ -342,7 +357,7 @@ def k_delete(p):
 
 
 def k_restore_revision(p):
-    target = p["target"]
+    target = resolve_write_target(p)
     db = p["db_name"]
     doc_id = p["doc_id"]
     revision_cv = p["revision_cv"]

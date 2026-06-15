@@ -19,7 +19,7 @@ import os
 import uuid
 
 from ansible.module_utils.basic import AnsibleModule
-from ansible.module_utils.ravendb_client import request
+from ansible.module_utils.ravendb_client import request, resolve_db_admin_route
 
 
 def build_multipart(fields, files):
@@ -53,6 +53,11 @@ def k_export(p):
 
     if not dump_path:
         raise ValueError("kind=export requires `dump_path`")
+
+    # Sharded dbs require orchestrator routing -- non-orchestrator members
+    # return HTTP 410 DatabaseNotRelevantException.  Non-sharded passes through.
+    target = resolve_db_admin_route(target, db, p["ravendb_domain"],
+                                    p["client_cert"], p["ca_cert"])
 
     export_path = "/databases/%s/smuggler/export" % db
     status, body_bytes = request("POST", target, p["ravendb_domain"], export_path,
@@ -106,6 +111,10 @@ def k_import(p):
 
     with open(dump_path, "rb") as f:
         dump_bytes = f.read()
+
+    # Sharded dbs route through orchestrator -- same routing as admin/<db>/.
+    target = resolve_db_admin_route(target, db, p["ravendb_domain"],
+                                    p["client_cert"], p["ca_cert"])
 
     body, content_type = build_multipart(
         fields={"importOptions": "{}"},
