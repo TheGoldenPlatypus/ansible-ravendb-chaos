@@ -26,10 +26,31 @@
         name: "{{ docker_network_name }}"
         state: absent
 
-    - name: Remove the shared backups volume (lab_backups)
+    - name: Find containers still referencing this run's backups volume
+      ansible.builtin.command:
+        cmd: >-
+          docker ps -a --filter "volume={{ backups_volume_name | default('lab_backups') }}"
+          --format "{{ '{{' }}.ID{{ '}}' }}"
+      register: _vol_refs
+      changed_when: false
+      failed_when: false
+
+    - name: Force-remove any container still attached to the backups volume
+      ansible.builtin.command:
+        cmd: "docker rm -f {{ item }}"
+      loop: "{{ _vol_refs.stdout_lines | default([]) }}"
+      when: _vol_refs.stdout_lines | default([]) | length > 0
+      changed_when: false
+      failed_when: false
+
+    - name: Remove the shared backups volume (with retry for in-use races)
       community.docker.docker_volume:
         name: "{{ backups_volume_name | default('lab_backups') }}"
         state: absent
+      register: _vol_rm
+      retries: 6
+      delay: 5
+      until: _vol_rm is succeeded
 
     - name: Wipe captures/ at repo root
       ansible.builtin.file:
