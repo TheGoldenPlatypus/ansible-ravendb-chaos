@@ -15,6 +15,15 @@
 #
 # What this scenario does (32 steps over 2 rounds):
 #   Round 1 (clean lifecycle):                  Round 2 (failover lifecycle):
+#
+# Pull replication is bidirectional in every wiring step (round-1 setup, phase-(e)
+# re-sink for round-1 and round-2):
+#   hub -> sink:  filtered to sink1_allowed_prefixes (= users/sink1/* per spec).
+#   sink -> hub:  '*' (unfiltered).  RPV-2 has no sink-local pool, so the reverse
+#                 channel normally stays quiet -- it exists so any sink-side write
+#                 (failover-window writes, restore-induced writes, future
+#                 additions) gets captured by the hub_sink_doc_set checks.
+#
 #     1   setup dbs + revisions + filtered pull   18  reset round-2 targets
 #     2   mixed-form seed + drain                 19  restart W-1+W-2 baseline
 #     3   start W-1+W-2 (phase a)                 20  T+90s sink-1 leader hard-kill (phase a fault)
@@ -126,6 +135,11 @@
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
+    # Bidirectional: hub -> sink-1 filtered to sink1_allowed_prefixes (per spec);
+    # sink-1 -> hub unfiltered ('*') so every sink-1 write flows back.  RPV-2
+    # has no sink-local pool, so the reverse direction is normally quiet, but
+    # the channel is open so any sink-side activity (failover-window writes,
+    # restore-driven writes, etc.) is captured by the hub_sink_doc_set checks.
     - name: "Define hub pull task 'rpv2-hub' + access entry for sink-1"
       ravendb_tasks:
         kind: define_hub
@@ -138,7 +152,8 @@
         sink_cluster_ids: ["{{ sink1_id | default(2) | int }}"]
         sink_allowed_paths: >-
           {{ { (sink1_id | default(2) | int | string): sink1_allowed_prefixes } }}
-        replication_mode: HubToSink
+        sink_to_hub_paths: >-
+          {{ { (sink1_id | default(2) | int | string): ['*'] } }}
         replication_certs_dir: "{{ playbook_dir }}/../../../replication-certs"
       register: r
     - name: Show result
@@ -159,11 +174,24 @@
         sink_cluster_ids: ["{{ sink1_id | default(2) | int }}"]
         sink_allowed_paths: >-
           {{ { (sink1_id | default(2) | int | string): sink1_allowed_prefixes } }}
-        replication_mode: HubToSink
+        sink_to_hub_paths: >-
+          {{ { (sink1_id | default(2) | int | string): ['*'] } }}
         replication_certs_dir: "{{ playbook_dir }}/../../../replication-certs"
       register: r
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# Dump pull-replication config on hub + sink-1 for the round-1 wiring.
+- ansible.builtin.import_playbook: ../../../toolbox/replication/dump_config.yml
+  vars:
+    target: "{{ hub_id   | default(1) }}a"
+    db_name: db1
+    hub_task_name: rpv2-hub
+- ansible.builtin.import_playbook: ../../../toolbox/replication/dump_config.yml
+  vars:
+    target: "{{ sink1_id | default(2) }}a"
+    db_name: db1
 
 
 # ===== step 2: setup -- mixed-form seed on hub + filtered drain to sink-1 =======================
@@ -1009,7 +1037,8 @@
         sink_cluster_ids: ["{{ r1_smug_id | default(4) | int }}"]
         sink_allowed_paths: >-
           {{ { (r1_smug_id | default(4) | int | string): sink1_allowed_prefixes } }}
-        replication_mode: HubToSink
+        sink_to_hub_paths: >-
+          {{ { (r1_smug_id | default(4) | int | string): ['*'] } }}
         replication_certs_dir: "{{ playbook_dir }}/../../../replication-certs"
       register: r
     - name: Show result
@@ -1028,12 +1057,40 @@
         sink_cluster_ids: ["{{ r1_smug_id | default(4) | int }}"]
         sink_allowed_paths: >-
           {{ { (r1_smug_id | default(4) | int | string): sink1_allowed_prefixes } }}
-        replication_mode: HubToSink
+        sink_to_hub_paths: >-
+          {{ { (r1_smug_id | default(4) | int | string): ['*'] } }}
         replication_certs_dir: "{{ playbook_dir }}/../../../replication-certs"
         target_db_override: "{{ r1_fresh_sink_db }}"
       register: r
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Dump the resink config on both sides for the round-1 phase-(e) wiring.
+    - name: "Dump resink config -- r1-snap (hub)"
+      ansible.builtin.uri:
+        url: "https://{{ r1_snap_leader }}.{{ ravendb_domain }}:443/admin/databases?name=db1"
+        method: GET
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        return_content: true
+      register: rec_r1h
+    - ansible.builtin.debug:
+        msg:
+          - "r1-snap HubPullReplications:  {{ rec_r1h.json.HubPullReplications  | default([]) }}"
+          - "r1-snap SinkPullReplications: {{ rec_r1h.json.SinkPullReplications | default([]) }}"
+
+    - name: "Dump resink config -- r1-smug ({{ r1_fresh_sink_db }})"
+      ansible.builtin.uri:
+        url: "https://{{ r1_fresh_sink_node }}.{{ ravendb_domain }}:443/admin/databases?name={{ r1_fresh_sink_db }}"
+        method: GET
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        return_content: true
+      register: rec_r1s
+    - ansible.builtin.debug:
+        msg:
+          - "r1-smug HubPullReplications:  {{ rec_r1s.json.HubPullReplications  | default([]) }}"
+          - "r1-smug SinkPullReplications: {{ rec_r1s.json.SinkPullReplications | default([]) }}"
 
     # W-1 burst against the restored source for 5 min.
     - name: Launch W-1 burst against r1-snap-target (the restored source)
@@ -1869,7 +1926,8 @@
         sink_cluster_ids: ["{{ r2_smug_id | default(6) | int }}"]
         sink_allowed_paths: >-
           {{ { (r2_smug_id | default(6) | int | string): sink1_allowed_prefixes } }}
-        replication_mode: HubToSink
+        sink_to_hub_paths: >-
+          {{ { (r2_smug_id | default(6) | int | string): ['*'] } }}
         replication_certs_dir: "{{ playbook_dir }}/../../../replication-certs"
       register: r
     - name: Show result
@@ -1888,12 +1946,40 @@
         sink_cluster_ids: ["{{ r2_smug_id | default(6) | int }}"]
         sink_allowed_paths: >-
           {{ { (r2_smug_id | default(6) | int | string): sink1_allowed_prefixes } }}
-        replication_mode: HubToSink
+        sink_to_hub_paths: >-
+          {{ { (r2_smug_id | default(6) | int | string): ['*'] } }}
         replication_certs_dir: "{{ playbook_dir }}/../../../replication-certs"
         target_db_override: "{{ r2_fresh_sink_db }}"
       register: r
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Dump the resink config on both sides for the round-2 phase-(e) wiring.
+    - name: "Dump resink config -- r2-snap (hub)"
+      ansible.builtin.uri:
+        url: "https://{{ r2_snap_leader }}.{{ ravendb_domain }}:443/admin/databases?name=db1"
+        method: GET
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        return_content: true
+      register: rec_r2h
+    - ansible.builtin.debug:
+        msg:
+          - "r2-snap HubPullReplications:  {{ rec_r2h.json.HubPullReplications  | default([]) }}"
+          - "r2-snap SinkPullReplications: {{ rec_r2h.json.SinkPullReplications | default([]) }}"
+
+    - name: "Dump resink config -- r2-smug ({{ r2_fresh_sink_db }})"
+      ansible.builtin.uri:
+        url: "https://{{ r2_fresh_sink_node }}.{{ ravendb_domain }}:443/admin/databases?name={{ r2_fresh_sink_db }}"
+        method: GET
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        return_content: true
+      register: rec_r2s
+    - ansible.builtin.debug:
+        msg:
+          - "r2-smug HubPullReplications:  {{ rec_r2s.json.HubPullReplications  | default([]) }}"
+          - "r2-smug SinkPullReplications: {{ rec_r2s.json.SinkPullReplications | default([]) }}"
 
     - name: Launch W-1 burst against r2-snap-target
       ansible.builtin.command:

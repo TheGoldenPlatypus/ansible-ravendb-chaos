@@ -1,0 +1,69 @@
+##################################################################################################
+# toolbox/replication/dump_config.yml
+#
+# Dump the pull-replication configuration of a database to the scenario log.  Run this right
+# after define_hub / attach_sinks so the actual filter, mode, and allowed paths are visible
+# when reading the scenario's stdout -- no need to re-derive them from the wire-up calls.
+#
+# What it prints:
+#   * HubPullReplications  -- per hub-side task: Name, Mode, WithFiltering, DelayReplicationFor,
+#                             PreventDeletionsMode, Disabled, MentorNode.
+#   * SinkPullReplications -- per sink-side task: Name, HubName, Mode, ConnectionStringName,
+#                             AllowedHubToSinkPaths, AllowedSinkToHubPaths, Disabled.
+#   * HubAccessEntries     -- per access entry: Name, AllowedHubToSinkPaths,
+#                             AllowedSinkToHubPaths, CertificateThumbprint.
+#
+# INPUTS:
+#   target      REQUIRED.  Any node that hosts the db.  Hub task config lives in the
+#                          DatabaseRecord, so any member of the cluster works.
+#   db_name     REQUIRED.
+#   hub_task_name OPTIONAL.  If set, also dumps the hub access entries for this task name
+#                            (fetched separately via /admin/tasks/pull-replication/hub/access).
+#
+# RUN EXAMPLES:
+#   ansible-playbook toolbox/replication/dump_config.yml \
+#       -e target=1a -e db_name=db1 -e hub_task_name=rp1-hub
+#
+#   ansible-playbook toolbox/replication/dump_config.yml \
+#       -e target=2a -e db_name=db1
+##################################################################################################
+
+- name: Dump pull-replication config for {{ db_name }} on {{ target }}
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: GET DatabaseRecord
+      ansible.builtin.uri:
+        url: "https://{{ target }}.{{ ravendb_domain }}:443/admin/databases?name={{ db_name }}"
+        method: GET
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        return_content: true
+      register: rec
+
+    - name: "Pull-replication config on {{ target }}/{{ db_name }} -- HubPullReplications"
+      ansible.builtin.debug:
+        msg: "{{ rec.json.HubPullReplications | default([]) }}"
+
+    - name: "Pull-replication config on {{ target }}/{{ db_name }} -- SinkPullReplications"
+      ansible.builtin.debug:
+        msg: "{{ rec.json.SinkPullReplications | default([]) }}"
+
+    - name: "GET hub access entries for task '{{ hub_task_name | default('') }}'"
+      ansible.builtin.uri:
+        url: >-
+          https://{{ target }}.{{ ravendb_domain }}:443/databases/{{ db_name
+          }}/admin/tasks/pull-replication/hub/access?name={{ hub_task_name }}
+        method: GET
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_path: "{{ cert_ca_crt }}"
+        return_content: true
+        status_code: [200, 404]
+      register: access
+      when: hub_task_name | default('') | length > 0
+
+    - name: "Hub access entries for '{{ hub_task_name | default('') }}'"
+      ansible.builtin.debug:
+        msg: "{{ access.json | default({}) }}"
+      when: hub_task_name | default('') | length > 0

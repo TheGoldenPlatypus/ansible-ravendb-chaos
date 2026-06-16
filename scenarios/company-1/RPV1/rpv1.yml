@@ -6,9 +6,13 @@
 # What this scenario does:
 #   1.  Create the database on the hub and on both sinks with a revisions policy for the
 #       Users, Orders, and Internal collections.
-#   2.  Wire a filtered pull-replication from the hub to each sink, so sink-1 only receives
-#       documents with prefixes users/sink1/ and orders/sink1/, sink-2 only receives
-#       users/sink2/ and orders/sink2/, and the hub-only buckets stay on the hub.
+#   2.  Wire bidirectional pull-replication from the hub to each sink:
+#         hub -> sink-1: filtered (users/sink1/, orders/sink1/)
+#         hub -> sink-2: filtered (users/sink2/, orders/sink2/)
+#         sink-1 -> hub: '*' (unfiltered -- every sink-1 write, incl sink1-local/, flows to hub)
+#         sink-2 -> hub: '*' (same for sink-2 / sink2-local/)
+#       Hub-only buckets stay on the hub; cross-sink isolation still holds (sink-1 must NOT
+#       receive users/sink2/* and vice versa -- enforced by the hub->sink filters).
 #   3.  Seed the hub with seven prefix buckets (~15k documents) and wait for the filter to
 #       drain -- a marker document under each allowed prefix has to reach its target sink
 #       before continuing.
@@ -208,11 +212,17 @@
               (sink2_id | default(3) | int | string): ['users/sink2/*', 'orders/sink2/*']
             }
           }}
-        # Plan says "filter-aware" filtered pull with disjoint filters, no mention of
-        # bidirectional (RP-2 explicitly calls bidirectional out separately).  So
-        # RPV-1 is HubToSink only -- sinks never push back to the hub.  The step-12
-        # reverse cv_boundary_by_dbid assertion verifies this structurally.
-        replication_mode: HubToSink
+        # Bidirectional: hub -> sink filters per the plan (disjoint per sink),
+        # sink -> hub unfiltered ('*') so sink-local writes (sink<N>-local/*)
+        # flow back to hub.  The step-12 hub_sink_doc_set check enforces both
+        # directions structurally.
+        sink_to_hub_paths: >-
+          {{
+            {
+              (sink1_id | default(2) | int | string): ['*'],
+              (sink2_id | default(3) | int | string): ['*']
+            }
+          }}
         replication_certs_dir: "{{ playbook_dir }}/../../../replication-certs"
       register: r
     - name: Show result
@@ -240,11 +250,34 @@
               (sink2_id | default(3) | int | string): ['users/sink2/*', 'orders/sink2/*']
             }
           }}
-        replication_mode: HubToSink   # see comment on define_hub above
+        sink_to_hub_paths: >-
+          {{
+            {
+              (sink1_id | default(2) | int | string): ['*'],
+              (sink2_id | default(3) | int | string): ['*']
+            }
+          }}
         replication_certs_dir: "{{ playbook_dir }}/../../../replication-certs"
       register: r
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# Dump pull-replication config on hub + both sinks so the filter, mode, and
+# allowed paths are visible in the scenario log.
+- ansible.builtin.import_playbook: ../../../toolbox/replication/dump_config.yml
+  vars:
+    target: "{{ hub_id   | default(1) }}a"
+    db_name: db1
+    hub_task_name: rpv1-hub
+- ansible.builtin.import_playbook: ../../../toolbox/replication/dump_config.yml
+  vars:
+    target: "{{ sink1_id | default(2) }}a"
+    db_name: db1
+- ansible.builtin.import_playbook: ../../../toolbox/replication/dump_config.yml
+  vars:
+    target: "{{ sink2_id | default(3) }}a"
+    db_name: db1
 
 
 # ----- step 3: seed the hub with seven prefix buckets and wait for the filter to drain --------
@@ -1200,29 +1233,12 @@
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
-    # Reverse direction: with replication_mode=HubToSink (set in step 2) neither sink
-    # can push back to the hub, so no sink dbid should EVER appear on the hub's
-    # DatabaseChangeVector.  Catches any leak from sink-local writes (sink1-local/*
-    # + sink2-local/*) and any drift if HubToSink stops being respected.
-    - name: "Endpoint I-13b reverse: assert CV-boundary order-side sink-1 + sink-2 -> hub (must be clean)"
-      ravendb_diagnostic:
-        kind: cv_boundary_by_dbid
-        ravendb_domain: "{{ ravendb_domain }}"
-        client_cert: "{{ cert_dir }}/client.pem"
-        ca_cert: "{{ cert_ca_crt }}"
-        db_name: db1
-        source_nodes:
-          - "{{ sink1_id | default(2) }}a"
-          - "{{ sink1_id | default(2) }}b"
-          - "{{ sink1_id | default(2) }}c"
-          - "{{ sink2_id | default(3) }}a"
-          - "{{ sink2_id | default(3) }}b"
-          - "{{ sink2_id | default(3) }}c"
-        receiver_nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
-        assert_mode: true
-      register: r
-    - name: Show result
-      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+    # Reverse direction (sink -> hub) is now done structurally by the
+    # hub_sink_doc_set_converged waits at step 12 (one per link).  With bidi
+    # config (sink -> hub filter '*'), every sink-side write must appear on
+    # hub; hub_sink_doc_set asserts exactly that.  A broken sink -> hub link
+    # surfaces there with the offending missing-on-hub ids listed.  No
+    # separate cv_boundary_by_dbid call needed here.
 
 
 # ----- step 12: stop the workloads, wait for everything to drain, and run the strict asserts -
@@ -1348,7 +1364,7 @@
         hub_cluster_leader:  "{{ hub_id   | default(1) }}a"
         sink_cluster_leader: "{{ sink1_id | default(2) }}a"
         allowed_prefixes:    ["users/sink1/*", "orders/sink1/*"]
-        sink_local_prefixes: ["sink1-local/"]
+        sink_local_prefixes: []   # bidi sink->hub * -- sink1-local must also be on hub
         timeout: "{{ doc_set_settle_timeout_secs | default(300) | int }}"
         poll_interval: 5
       register: r
@@ -1365,7 +1381,7 @@
         hub_cluster_leader:  "{{ hub_id   | default(1) }}a"
         sink_cluster_leader: "{{ sink2_id | default(3) }}a"
         allowed_prefixes:    ["users/sink2/*", "orders/sink2/*"]
-        sink_local_prefixes: ["sink2-local/"]
+        sink_local_prefixes: []   # bidi sink->hub * -- sink2-local must also be on hub
         timeout: "{{ doc_set_settle_timeout_secs | default(300) | int }}"
         poll_interval: 5
       register: r
