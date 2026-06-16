@@ -8,6 +8,7 @@ from urllib.parse import quote
 from ansible.module_utils.basic import AnsibleModule
 from ansible.module_utils.ravendb_client import (
     prefix_match,
+    probe_shard_endpoint,
     request,
     request_per_node,
     stream_all_doc_ids,
@@ -54,7 +55,8 @@ def classify_nodes(p, nodes):
       - 410 DatabaseNotRelevant -> hosts the db as a shard-only member of a
                                    sharded db (7.x response on non-orchestrator);
                                    same path as the 500 case -- resolve shard then
-                                   probe via ?nodeTag=&shardNumber=.
+                                   probe via probe_shard_endpoint (tries 7.x
+                                   $N form first, falls back to 6.x query-param).
       - connection              -> UNREACHABLE; raise loud (do NOT silently skip --
                                    unreachable conflated with 'wrong cluster' is
                                    the root cause of vacuous waits passing on
@@ -95,10 +97,14 @@ def classify_nodes(p, nodes):
         if shard_id is None:
             skipped.append(target)
             continue
-        per = "/databases/%s/stats?nodeTag=%s&shardNumber=%s" % (db, tag, shard_id)
+        # Use probe_shard_endpoint so we work on BOTH cursor 7.x (which serves
+        # /databases/db$N/stats) and 6.x (which serves the query-param form).
+        # Without this compat shim, mid-rolling-upgrade clusters get half their
+        # nodes silently classified as 'skipped' and waits PASS vacuously.
         try:
-            s, _ = request("GET", target, p["ravendb_domain"], per,
-                           p["client_cert"], p["ca_cert"])
+            s, _ = probe_shard_endpoint(
+                target, p["ravendb_domain"], db, tag, shard_id,
+                p["client_cert"], p["ca_cert"])
         except Exception as e:
             unreachable.append("%s: sharded stats probe failed: %r" % (target, e))
             continue
@@ -253,14 +259,16 @@ def snapshot_stats_field(p, nodes_or_map, field):
 
     if isinstance(nodes_or_map, dict):
         for target, shard_id in nodes_or_map.items():
-            if shard_id is None:
-                path = "/databases/%s/stats" % db
-            else:
-                tag = target[-1].upper()
-                path = "/databases/%s/stats?nodeTag=%s&shardNumber=%s" % (db, tag, shard_id)
             try:
-                s, b = request("GET", target, p["ravendb_domain"], path,
-                               p["client_cert"], p["ca_cert"])
+                if shard_id is None:
+                    s, b = request("GET", target, p["ravendb_domain"],
+                                   "/databases/%s/stats" % db,
+                                   p["client_cert"], p["ca_cert"])
+                else:
+                    tag = target[-1].upper()
+                    s, b = probe_shard_endpoint(
+                        target, p["ravendb_domain"], db, tag, shard_id,
+                        p["client_cert"], p["ca_cert"])
             except Exception as e:
                 failures.append("%s: connection error %r" % (target, e))
                 continue
@@ -653,9 +661,9 @@ def k_doc_count_match(p):
                     # could let the aggregate 'match' on remaining shards.
                     orphans.append(shard_id)
                     continue
-                per = "/databases/%s/stats?nodeTag=%s&shardNumber=%s" % (db, members[0], shard_id)
-                s2, b2 = request("GET", target, p["ravendb_domain"], per,
-                                 p["client_cert"], p["ca_cert"])
+                s2, b2 = probe_shard_endpoint(
+                    target, p["ravendb_domain"], db, members[0], shard_id,
+                    p["client_cert"], p["ca_cert"])
                 if s2 != 200:
                     shard_failures.append("shard %s -> HTTP %d" % (shard_id, s2))
                     continue

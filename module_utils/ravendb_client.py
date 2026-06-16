@@ -242,6 +242,52 @@ def stream_all_doc_ids(target, domain, db, client_cert, ca_cert,
     return ids
 
 
+def shard_endpoint_path(db, shard_id, suffix="stats"):
+    """7.x per-shard endpoint:  /databases/<db>$<shard>/<suffix>
+
+    `suffix` is everything after the db name, e.g.:
+        'stats'              -> /databases/db1$0/stats
+        'docs?id=users/0'    -> /databases/db1$0/docs?id=users/0
+
+    The literal '$' is the shard-suffix separator RavenDB 7.x uses internally
+    to address one shard's data on a node."""
+    return "/databases/%s$%s/%s" % (db, shard_id, suffix)
+
+
+def shard_endpoint_path_legacy(db, tag, shard_id, suffix="stats"):
+    """6.x per-shard endpoint:  /databases/<db>/<suffix>[?&]nodeTag=<tag>&shardNumber=<shard>
+
+    Picks '?' or '&' for the nodeTag/shardNumber params based on whether
+    `suffix` already contains a '?' (e.g. 'docs?id=...').  The cursor 7.x
+    build returns 410 DatabaseNotRelevant on this URL form; only 6.x serves
+    it.  Kept for mid-rolling-upgrade mixed-binary clusters."""
+    base = "/databases/%s/%s" % (db, suffix)
+    sep = "&" if "?" in base else "?"
+    return "%s%snodeTag=%s&shardNumber=%s" % (base, sep, tag, shard_id)
+
+
+def probe_shard_endpoint(target, domain, db, tag, shard_id,
+                         client_cert, ca_cert, suffix="stats", timeout=30):
+    """Probe a per-shard endpoint with build-version compatibility.
+
+    Tries the 7.x form (db$N) first since the steady-state v_new install hits
+    on the first call.  On non-200, falls back to the 6.x query-param form
+    so mid-rolling-upgrade clusters with still-on-old-binary nodes are
+    handled correctly without forcing the caller to know the build.
+
+    Returns (status, body) of whichever call succeeded; if both fail,
+    returns the last (non-200) response so the caller can route on the code."""
+    new_path = shard_endpoint_path(db, shard_id, suffix=suffix)
+    status, body = request("GET", target, domain, new_path,
+                           client_cert, ca_cert, timeout=timeout)
+    if status == 200:
+        return status, body
+
+    legacy_path = shard_endpoint_path_legacy(db, tag, shard_id, suffix=suffix)
+    return request("GET", target, domain, legacy_path,
+                   client_cert, ca_cert, timeout=timeout)
+
+
 def prefix_match(doc_id, prefixes):
     """True if doc_id is covered by any of the given prefix patterns.
     Accepts trailing '*' or '/' on a prefix; both mean 'starts with stem/'."""

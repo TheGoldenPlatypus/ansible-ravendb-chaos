@@ -44,6 +44,7 @@ from urllib.parse import quote
 from ansible.module_utils.basic import AnsibleModule
 from ansible.module_utils.ravendb_client import (
     prefix_match,
+    probe_shard_endpoint,
     request,
     request_per_node,
     resolve_db_admin_route,
@@ -168,9 +169,11 @@ def classify_nodes(p, nodes):
         if shard_id is None:
             skipped.append(target)
             continue
-        per = "/databases/%s/stats?nodeTag=%s&shardNumber=%s" % (db, tag, shard_id)
-        s, _ = request("GET", target, p["ravendb_domain"], per,
-                       p["client_cert"], p["ca_cert"])
+        # probe_shard_endpoint tries 7.x form (db$N) first, falls back to 6.x
+        # query-param.  Required for mid-rolling-upgrade mixed-binary clusters.
+        s, _ = probe_shard_endpoint(
+            target, p["ravendb_domain"], db, tag, shard_id,
+            p["client_cert"], p["ca_cert"])
         if s == 200:
             host_map[target] = shard_id
         else:
@@ -197,9 +200,9 @@ def aggregate_sharded_stats(p, target, db):
         members = shard_rec.get("Members") or []
         if not members:
             continue
-        per_path = "/databases/%s/stats?nodeTag=%s&shardNumber=%s" % (db, members[0], shard_id)
-        s, b = request("GET", target, p["ravendb_domain"], per_path,
-                       p["client_cert"], p["ca_cert"])
+        s, b = probe_shard_endpoint(
+            target, p["ravendb_domain"], db, members[0], shard_id,
+            p["client_cert"], p["ca_cert"])
         if s != 200:
             continue
         for k, v in json.loads(b).items():
@@ -219,10 +222,10 @@ def get_stats(p, target, shard_id=None):
     db = p["db_name"]
     if shard_id is not None:
         tag = target[-1].upper()
-        path = "/databases/%s/stats?nodeTag=%s&shardNumber=%s" % (db, tag, shard_id)
         try:
-            status, body = request("GET", target, p["ravendb_domain"], path,
-                                   p["client_cert"], p["ca_cert"])
+            status, body = probe_shard_endpoint(
+                target, p["ravendb_domain"], db, tag, shard_id,
+                p["client_cert"], p["ca_cert"])
         except Exception:
             return None      # connection refused / DNS error / timeout -> treat as unreachable
         return json.loads(body) if status == 200 else None
@@ -255,12 +258,14 @@ def per_node_field(p, nodes_or_map, field):
     if isinstance(nodes_or_map, dict):
         for target, shard_id in nodes_or_map.items():
             if shard_id is None:
-                path = "/databases/%s/stats" % db
+                s, b = request("GET", target, p["ravendb_domain"],
+                               "/databases/%s/stats" % db,
+                               p["client_cert"], p["ca_cert"])
             else:
                 tag = target[-1].upper()
-                path = "/databases/%s/stats?nodeTag=%s&shardNumber=%s" % (db, tag, shard_id)
-            s, b = request("GET", target, p["ravendb_domain"], path,
-                           p["client_cert"], p["ca_cert"])
+                s, b = probe_shard_endpoint(
+                    target, p["ravendb_domain"], db, tag, shard_id,
+                    p["client_cert"], p["ca_cert"])
             if s == 200:
                 out[target] = json.loads(b).get(field)
         return out
@@ -1664,11 +1669,11 @@ def k_shard_placement_check(p):
     for doc_id in probe_ids:
         owners = []
         for shard_id in shard_ids:
-            path = "/databases/%s/docs?id=%s&nodeTag=%s&shardNumber=%s" % (
-                db, quote(doc_id), tag, shard_id)
+            suffix = "docs?id=%s" % quote(doc_id)
             try:
-                status, body = request("GET", target, p["ravendb_domain"], path,
-                                       p["client_cert"], p["ca_cert"])
+                status, body = probe_shard_endpoint(
+                    target, p["ravendb_domain"], db, tag, shard_id,
+                    p["client_cert"], p["ca_cert"], suffix=suffix)
             except Exception:
                 # Treat transport failure as "can't determine placement" -- fail loud
                 # rather than silently dropping the shard from the comparison.
