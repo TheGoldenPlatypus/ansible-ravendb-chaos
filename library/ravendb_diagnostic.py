@@ -43,7 +43,11 @@ from urllib.parse import quote
 
 from ansible.module_utils.basic import AnsibleModule
 from ansible.module_utils.ravendb_client import (
-    request, request_per_node, resolve_db_admin_route,
+    prefix_match,
+    request,
+    request_per_node,
+    resolve_db_admin_route,
+    stream_all_doc_ids,
 )
 
 
@@ -943,6 +947,63 @@ def k_extension_stats_parity(p):
     return lines
 
 
+def k_hub_sink_doc_set(p):
+    hub_leader = p["hub_cluster_leader"]
+    sink_leader = p["sink_cluster_leader"]
+    db = p["db_name"]
+    allowed = p["allowed_prefixes"] or []
+    sink_local = p["sink_local_prefixes"] or []
+    assert_mode = bool(p["assert_mode"])
+    sample_cap = int(p["sample_cap"] or 25)
+
+    if not hub_leader or not sink_leader:
+        raise ValueError(
+            "kind=hub_sink_doc_set requires `hub_cluster_leader` and `sink_cluster_leader`")
+    if not allowed:
+        raise ValueError(
+            "kind=hub_sink_doc_set requires `allowed_prefixes` (hub->sink filter)")
+
+    hub_ids = set(stream_all_doc_ids(
+        hub_leader, p["ravendb_domain"], db, p["client_cert"], p["ca_cert"]))
+    sink_ids = set(stream_all_doc_ids(
+        sink_leader, p["ravendb_domain"], db, p["client_cert"], p["ca_cert"]))
+
+    expected_on_sink = {i for i in hub_ids if prefix_match(i, allowed)}
+    expected_on_hub  = {i for i in sink_ids if not prefix_match(i, sink_local)}
+
+    missing_on_sink = sorted(expected_on_sink - sink_ids)
+    missing_on_hub  = sorted(expected_on_hub - hub_ids)
+
+    lines = [
+        "hub-sink doc-set completeness  hub=%s  sink=%s  db=%s"
+        % (hub_leader, sink_leader, db),
+        "  hub ids: %d   sink ids: %d" % (len(hub_ids), len(sink_ids)),
+        "  filter (hub->sink): %s" % allowed,
+        "  sink-local allowlist: %s" % (sink_local or "[]"),
+        "  expected-on-sink (hub ids matching filter): %d" % len(expected_on_sink),
+        "  expected-on-hub  (sink ids not in sink-local): %d" % len(expected_on_hub),
+        "  MISSING on sink: %d" % len(missing_on_sink),
+        "  MISSING on hub:  %d" % len(missing_on_hub),
+    ]
+    if missing_on_sink:
+        lines.append("  missing-on-sink sample (first %d of %d): %s"
+                     % (min(sample_cap, len(missing_on_sink)),
+                        len(missing_on_sink),
+                        missing_on_sink[:sample_cap]))
+    if missing_on_hub:
+        lines.append("  missing-on-hub  sample (first %d of %d): %s"
+                     % (min(sample_cap, len(missing_on_hub)),
+                        len(missing_on_hub),
+                        missing_on_hub[:sample_cap]))
+
+    if missing_on_sink or missing_on_hub:
+        return violation(assert_mode, lines + [
+            "FAIL  hub-sink completeness: %d missing on sink, %d missing on hub"
+            % (len(missing_on_sink), len(missing_on_hub))])
+    lines.append("PASS  every expected doc is present on both sides")
+    return lines
+
+
 def k_stats_parity(p):
     """Print a per-node stats table and assert uniformity on `assert_fields`.
 
@@ -1744,6 +1805,7 @@ KINDS = {
     # --- leak / orphan ---
     "cross_sink_isolation":       k_cross_sink_isolation,
     "filter_compliance":          k_filter_compliance,
+    "hub_sink_doc_set":           k_hub_sink_doc_set,
     "lane_inert":                 k_lane_inert,
     "orphan_revisions":           k_orphan_revisions,
     "scan_fltr":                  k_scan_fltr,
@@ -1822,10 +1884,14 @@ def main():
                              None]),
         delimiter=dict(default=None),
 
-        # filter_compliance / cross_sink_isolation
+        # filter_compliance / cross_sink_isolation / hub_sink_doc_set
         sink_cluster_leader=dict(default=None),
         allowed_prefixes=dict(type="list", elements="str", default=None),
         forbidden_prefixes=dict(type="list", elements="str", default=None),
+        # hub_sink_doc_set
+        hub_cluster_leader=dict(default=None),
+        sink_local_prefixes=dict(type="list", elements="str", default=None),
+        sample_cap=dict(type="int", default=None),
 
         # cv_boundary_by_dbid
         source_nodes=dict(type="list", elements="str", default=None),

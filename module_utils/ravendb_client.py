@@ -214,6 +214,48 @@ def request(method, target, domain, path, client_cert, ca_cert,
         "request() exhausted retries without an exception -- this is a bug")
 
 
+def stream_all_doc_ids(target, domain, db, client_cert, ca_cert,
+                       page_size=4096, timeout=30):
+    """Enumerate every live doc id on target/db.  Paginates /databases/<db>/docs
+    until the server stops returning rows.  Returns a list in server order."""
+    ids = []
+    start = 0
+    while True:
+        path = ("/databases/%s/docs?start=%d&pageSize=%d&metadataOnly=true"
+                % (db, start, page_size))
+        status, body = request("GET", target, domain, path,
+                               client_cert, ca_cert, timeout=timeout)
+        if status != 200:
+            raise RuntimeError("list docs on %s/%s start=%d failed: HTTP %d"
+                               % (target, db, start, status))
+        results = json.loads(body).get("Results") or []
+        if not results:
+            break
+        for r in results:
+            md = r.get("@metadata") or {}
+            i = md.get("@id")
+            if i is not None:
+                ids.append(i)
+        if len(results) < page_size:
+            break
+        start += page_size
+    return ids
+
+
+def prefix_match(doc_id, prefixes):
+    """True if doc_id is covered by any of the given prefix patterns.
+    Accepts trailing '*' or '/' on a prefix; both mean 'starts with stem/'."""
+    if not prefixes:
+        return False
+    for raw in prefixes:
+        stem = raw.rstrip("*").rstrip("/")
+        if not stem:
+            continue
+        if doc_id == stem or doc_id.startswith(stem + "/"):
+            return True
+    return False
+
+
 def request_per_node(method, targets, domain, path, client_cert, ca_cert,
                      body=None, content_type=None, timeout=30):
     def call_one(target):

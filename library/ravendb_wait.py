@@ -6,7 +6,12 @@ import time
 from urllib.parse import quote
 
 from ansible.module_utils.basic import AnsibleModule
-from ansible.module_utils.ravendb_client import request, request_per_node
+from ansible.module_utils.ravendb_client import (
+    prefix_match,
+    request,
+    request_per_node,
+    stream_all_doc_ids,
+)
 from ansible.module_utils.polling import poll_until
 
 
@@ -687,6 +692,66 @@ def k_doc_count_match(p):
             (src_target, src_db, tgt_target, tgt_db, elapsed, value))
 
 
+def k_hub_sink_doc_set_converged(p):
+    hub_leader = p["hub_cluster_leader"]
+    sink_leader = p["sink_cluster_leader"]
+    db = p["db_name"]
+    allowed = p["allowed_prefixes"] or []
+    sink_local = p["sink_local_prefixes"] or []
+    timeout = p["timeout"]
+    interval = p["poll_interval"]
+    sample_cap = int(p["sample_cap"] or 25)
+
+    if not hub_leader or not sink_leader:
+        raise ValueError(
+            "kind=hub_sink_doc_set_converged requires `hub_cluster_leader` and `sink_cluster_leader`")
+    if not allowed:
+        raise ValueError(
+            "kind=hub_sink_doc_set_converged requires `allowed_prefixes` (hub->sink filter)")
+
+    def predicate():
+        hub_ids = set(stream_all_doc_ids(
+            hub_leader, p["ravendb_domain"], db, p["client_cert"], p["ca_cert"]))
+        sink_ids = set(stream_all_doc_ids(
+            sink_leader, p["ravendb_domain"], db, p["client_cert"], p["ca_cert"]))
+        expected_on_sink = {i for i in hub_ids if prefix_match(i, allowed)}
+        expected_on_hub  = {i for i in sink_ids if not prefix_match(i, sink_local)}
+        missing_on_sink = sorted(expected_on_sink - sink_ids)
+        missing_on_hub  = sorted(expected_on_hub - hub_ids)
+        if not missing_on_sink and not missing_on_hub:
+            return True, (len(hub_ids), len(sink_ids),
+                          len(expected_on_sink), len(expected_on_hub))
+        return False, (missing_on_sink, missing_on_hub)
+
+    done, value, elapsed = poll_until(predicate, timeout=timeout, interval=interval)
+    if not done:
+        missing_on_sink, missing_on_hub = value
+        lines = [
+            "TIMEOUT after %.1fs -- hub-sink doc-set never converged" % elapsed,
+            "  hub=%s  sink=%s  db=%s" % (hub_leader, sink_leader, db),
+            "  filter (hub->sink): %s" % allowed,
+            "  sink-local allowlist: %s" % (sink_local or "[]"),
+            "  MISSING on sink: %d" % len(missing_on_sink),
+            "  MISSING on hub:  %d" % len(missing_on_hub),
+        ]
+        if missing_on_sink:
+            lines.append("  missing-on-sink sample (first %d of %d): %s"
+                         % (min(sample_cap, len(missing_on_sink)),
+                            len(missing_on_sink),
+                            missing_on_sink[:sample_cap]))
+        if missing_on_hub:
+            lines.append("  missing-on-hub  sample (first %d of %d): %s"
+                         % (min(sample_cap, len(missing_on_hub)),
+                            len(missing_on_hub),
+                            missing_on_hub[:sample_cap]))
+        raise RuntimeError("\n".join(lines))
+
+    hub_n, sink_n, exp_sink, exp_hub = value
+    return ("CONVERGED -- hub-sink doc-set complete in %.1fs "
+            "(hub=%d, sink=%d, expected-on-sink=%d, expected-on-hub=%d)"
+            % (elapsed, hub_n, sink_n, exp_sink, exp_hub))
+
+
 KINDS = {
     "leader":              k_leader,
     "member":              k_member,
@@ -698,6 +763,7 @@ KINDS = {
     "conflicts_resolved":  k_conflicts_resolved,
     "marker_propagation":  k_marker_propagation,
     "doc_count_match":     k_doc_count_match,
+    "hub_sink_doc_set_converged": k_hub_sink_doc_set_converged,
 }
 
 
@@ -722,6 +788,12 @@ def main():
         target_db_name=dict(default=None),
         # stats_field_parity
         fields=dict(type="list", elements="str", default=None),
+        # hub_sink_doc_set_converged
+        hub_cluster_leader=dict(default=None),
+        sink_cluster_leader=dict(default=None),
+        allowed_prefixes=dict(type="list", elements="str", default=None),
+        sink_local_prefixes=dict(type="list", elements="str", default=None),
+        sample_cap=dict(type="int", default=None),
         # timing
         timeout=dict(type="int", default=60),
         poll_interval=dict(type="int", default=2),

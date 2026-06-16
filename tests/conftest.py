@@ -56,6 +56,54 @@ def _install_ansible_shim():
 _install_ansible_shim()
 
 
+# ---------------------------------------------------------------------------
+# Unit-test isolation: stub resolve_db_admin_route.
+#
+# Every write/smuggler/tasks/revisions/diagnostic kind starts by calling
+# resolve_db_admin_route(target, db, ...) to route past a sharded
+# orchestrator.  In a unit test that helper would hit the real network
+# (load a cert, open an HTTPS socket).  Tests monkeypatch the kind's own
+# `request` but not the one called from inside resolve_db_admin_route, so
+# the helper dies on a fake cert path before the kind's own logic runs.
+#
+# This autouse fixture replaces resolve_db_admin_route with a pure
+# passthrough across all modules that import it.  Integration tests opt
+# out via marker (they need real routing against an embedded RavenDB).
+# ---------------------------------------------------------------------------
+
+_KINDS_WITH_ROUTE = (
+    "ravendb_writes", "ravendb_smuggler", "ravendb_tasks",
+    "ravendb_revisions", "ravendb_diagnostic",
+)
+
+
+def _passthrough_route(target, db, domain, client_cert, ca_cert):
+    return target
+
+
+@pytest.fixture(autouse=True)
+def _stub_resolve_db_admin_route_for_unit(request, monkeypatch):
+    """Auto-applied in unit tests; skipped in integration tests (real routing
+    against an embedded RavenDB), and skipped in tests that specifically
+    exercise resolve_db_admin_route itself (opt out by adding the marker
+    `needs_real_route` to the test or by naming the file `*resolve_db_admin*`
+    or `*_sharded.py`)."""
+    fspath = str(getattr(request.node, "fspath", "")).replace("\\", "/")
+    if "/integration/" in fspath:
+        return
+    fname = fspath.rsplit("/", 1)[-1]
+    if "resolve_db_admin" in fname or fname.endswith("_sharded.py"):
+        return
+    if request.node.get_closest_marker("needs_real_route"):
+        return
+    import importlib
+    for mod_name in _KINDS_WITH_ROUTE:
+        try:
+            mod = importlib.import_module(mod_name)
+        except Exception:
+            continue
+        if hasattr(mod, "resolve_db_admin_route"):
+            monkeypatch.setattr(mod, "resolve_db_admin_route", _passthrough_route)
 
 
 _BANNER_SEEN = set()
