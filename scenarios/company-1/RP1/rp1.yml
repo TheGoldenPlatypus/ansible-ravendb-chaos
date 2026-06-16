@@ -11,12 +11,24 @@
 #         (hub -> sink, allowed path = users/sink1/*).
 #   3.    Baseline snapshot: capture each cluster leader's DatabaseChangeVector while the DB
 #         is still empty.  This is the "before" picture step 6 will diff against.
-#   2.    Seed the hub with users + orders + inventory docs.  Wait for the filtered set
-#         to land on the sink.
+#   2.    Seed:
+#           - bulk: 10k users/sink1/* on hub, 10k orders/hub/* on hub, sink-local pool on sink
+#           - per-family inventory under users/sink1/family/*:
+#               1. live doc
+#               2. tombstone (PUT then DELETE)
+#               3. conflict  -- PARTITION hub<->sink, dual PUT (different bodies), HEAL
+#               4. 3-revision doc
+#               5. attachment
+#               6. counter
+#               7. timeseries (append + range-delete)
+#         Drain the filtered pull + sink internal replication; baseline filter-compliance check
+#         AND exhaustive hub-sink doc-set completeness (every users/sink1/* on hub is on sink;
+#         every sink doc that's not sink1-local/* is also on hub).
 #   4.    Burst workload: a wave of new users/sink1/active/* writes plus 2000 rounds of
 #         "delete a doc, then restore its previous revision".  Stresses the filter + the
 #         revisions path.
-#   5.    Wait for replication to settle and for tombstone cleanup to converge.
+#   5.    Wait for replication to settle and for tombstone cleanup to converge, then run a
+#         hub-sink doc-set completeness wait (polls until every doc is on the side it should be).
 #   6.    Post-batch snapshot: capture each cluster leader's DatabaseChangeVector again and
 #         print baseline-vs-post side by side so you can eyeball the delta -- hub should have
 #         advanced, sink should have moved with it, no rogue dbId entries appeared.
@@ -513,6 +525,26 @@
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
+    # Stronger check: enumerate every live doc on hub + sink and verify by set
+    # containment that every users/sink1/* on hub is on sink, and every sink doc
+    # that's NOT under sink1-local/ is also on hub.  Catches missing replicas
+    # AND sink-side orphans that filter_compliance alone would miss.
+    - name: "Hub-sink doc-set completeness (post-seed)"
+      ravendb_diagnostic:
+        kind: hub_sink_doc_set
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        hub_cluster_leader:  "{{ hub_id | default(1) }}a"
+        sink_cluster_leader: "{{ sink_id | default(2) }}a"
+        allowed_prefixes:    ["users/sink1/*"]
+        sink_local_prefixes: ["sink1-local/"]
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
 
 # ----- step 3: baseline CV snapshot AFTER the post-seed drain ---------------------------------
 # Per the RP-1 spec recipe: step 3 captures the baseline AFTER step 2 (seed + drain) and
@@ -673,6 +705,27 @@
         fields: ["CountOfTombstones"]
         timeout: "{{ tombstone_settle_timeout_secs | default(300) | int }}"
         poll_interval: 3
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Post-burst hub-sink doc-set completeness.  Same shape as the post-seed
+    # check, but now run AFTER the burst (new writes + delete-restore loop) has
+    # had time to fully drain.  Polls until convergence so a slow link doesn't
+    # produce a spurious failure.
+    - name: "Hub-sink doc-set completeness (post-burst)"
+      ravendb_wait:
+        kind: hub_sink_doc_set_converged
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        hub_cluster_leader:  "{{ hub_id | default(1) }}a"
+        sink_cluster_leader: "{{ sink_id | default(2) }}a"
+        allowed_prefixes:    ["users/sink1/*"]
+        sink_local_prefixes: ["sink1-local/"]
+        timeout: "{{ doc_set_settle_timeout_secs | default(300) | int }}"
+        poll_interval: 5
       register: r
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
