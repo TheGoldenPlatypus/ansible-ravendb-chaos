@@ -73,7 +73,7 @@ _install_ansible_shim()
 
 _KINDS_WITH_ROUTE = (
     "ravendb_writes", "ravendb_smuggler", "ravendb_tasks",
-    "ravendb_revisions", "ravendb_diagnostic",
+    "ravendb_revisions", "ravendb_diagnostic", "ravendb_features",
 )
 
 
