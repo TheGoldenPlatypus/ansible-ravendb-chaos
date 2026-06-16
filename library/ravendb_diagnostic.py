@@ -1014,14 +1014,49 @@ def k_stats_parity(p):
 
     Fields not in `assert_fields` are still printed (marked "OK (info)" or
     "DRIFT (info)") so drift on intrinsic-per-node fields is visible but not fatal.
-    SizeOnDisk is always info-only."""
+    SizeOnDisk is always info-only.
+
+    Optional `settle_secs`: before reading the table, poll the asserted fields
+    until they agree across all has_db nodes (or timeout).  /stats counters
+    update asynchronously a few seconds behind the etag; a preceding wait
+    (etag_parity / quiescence) returns the instant the etag stops moving but
+    the materialized CountOfDocuments / CountOfRevisionDocuments counters
+    can still lag by a poll interval or two.  When `settle_secs > 0`, the
+    pre-settle loop closes that race so the final assertion is reliable."""
     nodes = p["nodes"]
     assert_mode = bool(p["assert_mode"])
     assert_fields = p["assert_fields"] or _STATS_DEFAULT_ASSERTED
+    settle_secs = int(p["settle_secs"] or 0)
+    settle_interval = int(p["settle_interval"] or 3)
 
     has_db, skipped = classify_nodes(p, nodes)
     if not has_db:
         raise ValueError("no probed node has database '%s'" % p["db_name"])
+
+    settle_elapsed = 0.0
+    settle_polls = 0
+    if settle_secs > 0:
+        settle_start = time.time()
+        deadline = settle_start + settle_secs
+        last_drift = None
+        while True:
+            settle_polls += 1
+            per_field = {}
+            for field in assert_fields:
+                per_field[field] = per_node_field(p, has_db, field)
+            drift = [(f, per_field[f]) for f in assert_fields
+                     if len(set(per_field[f].values())) > 1]
+            if not drift:
+                settle_elapsed = time.time() - settle_start
+                break
+            last_drift = drift
+            if time.time() >= deadline:
+                settle_elapsed = time.time() - settle_start
+                raise RuntimeError(
+                    "stats_parity: pre-settle TIMEOUT after %.1fs (%d poll(s)) -- "
+                    "asserted field(s) never converged across %s: %s"
+                    % (settle_elapsed, settle_polls, list(has_db), last_drift))
+            time.sleep(settle_interval)
 
     per_node = {}
     for target, shard_id in (has_db.items() if isinstance(has_db, dict)
@@ -1044,7 +1079,12 @@ def k_stats_parity(p):
         node_widths[n] = max(widest, len(n), 8)
     field_width = max(len(f) for f in _STATS_ALL_FIELDS + ["SizeOnDisk (info only)"])
 
-    lines = ["/stats parity  db=%s  nodes=%s" % (p["db_name"], node_order)]
+    if settle_secs > 0:
+        lines = ["/stats parity  db=%s  nodes=%s  pre-settle=%.1fs (%d poll(s))"
+                 % (p["db_name"], node_order, settle_elapsed, settle_polls)]
+    else:
+        lines = ["/stats parity  db=%s  nodes=%s  pre-settle=disabled"
+                 % (p["db_name"], node_order)]
     if skipped:
         lines.append("  SKIPPED (DB not present): %s" % skipped)
 
@@ -1909,6 +1949,11 @@ def main():
 
         # stats_parity
         assert_fields=dict(type="list", elements="str", default=None),
+        # stats_parity pre-settle: poll asserted fields until they agree across
+        # all has_db nodes before running the final assert.  Closes the gap
+        # between etag-stable and counter-caught-up.  0 = no pre-settle.
+        settle_secs=dict(type="int", default=None),
+        settle_interval=dict(type="int", default=None),
 
     ))
 
