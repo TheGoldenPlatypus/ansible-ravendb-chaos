@@ -1076,8 +1076,8 @@
       register: rec_r1h
     - ansible.builtin.debug:
         msg:
-          - "r1-snap HubPullReplications:  {{ (rec_r1h.json.HubPullReplications  | default([])) | map('combine', {'CertificateWithPrivateKey':'<redacted>','CertificatePassword':'<redacted>','CertificateBase64':'<redacted>','PublicKey':'<redacted>'}) | list }}"
-          - "r1-snap SinkPullReplications: {{ (rec_r1h.json.SinkPullReplications | default([])) | map('combine', {'CertificateWithPrivateKey':'<redacted>','CertificatePassword':'<redacted>','CertificateBase64':'<redacted>','PublicKey':'<redacted>'}) | list }}"
+          - "r1-snap HubPullReplications:  {{ (rec_r1h.json.HubPullReplications  | default([])) | map('combine', {'Certificate':'<redacted>','CertificateWithPrivateKey':'<redacted>','CertificatePassword':'<redacted>','CertificateBase64':'<redacted>','PublicKey':'<redacted>'}) | list }}"
+          - "r1-snap SinkPullReplications: {{ (rec_r1h.json.SinkPullReplications | default([])) | map('combine', {'Certificate':'<redacted>','CertificateWithPrivateKey':'<redacted>','CertificatePassword':'<redacted>','CertificateBase64':'<redacted>','PublicKey':'<redacted>'}) | list }}"
 
     - name: "Dump resink config -- r1-smug ({{ r1_fresh_sink_db }})"
       ansible.builtin.uri:
@@ -1089,8 +1089,8 @@
       register: rec_r1s
     - ansible.builtin.debug:
         msg:
-          - "r1-smug HubPullReplications:  {{ (rec_r1s.json.HubPullReplications  | default([])) | map('combine', {'CertificateWithPrivateKey':'<redacted>','CertificatePassword':'<redacted>','CertificateBase64':'<redacted>','PublicKey':'<redacted>'}) | list }}"
-          - "r1-smug SinkPullReplications: {{ (rec_r1s.json.SinkPullReplications | default([])) | map('combine', {'CertificateWithPrivateKey':'<redacted>','CertificatePassword':'<redacted>','CertificateBase64':'<redacted>','PublicKey':'<redacted>'}) | list }}"
+          - "r1-smug HubPullReplications:  {{ (rec_r1s.json.HubPullReplications  | default([])) | map('combine', {'Certificate':'<redacted>','CertificateWithPrivateKey':'<redacted>','CertificatePassword':'<redacted>','CertificateBase64':'<redacted>','PublicKey':'<redacted>'}) | list }}"
+          - "r1-smug SinkPullReplications: {{ (rec_r1s.json.SinkPullReplications | default([])) | map('combine', {'Certificate':'<redacted>','CertificateWithPrivateKey':'<redacted>','CertificatePassword':'<redacted>','CertificateBase64':'<redacted>','PublicKey':'<redacted>'}) | list }}"
 
     # W-1 burst against the restored source for 5 min.
     - name: Launch W-1 burst against r1-snap-target (the restored source)
@@ -1965,8 +1965,8 @@
       register: rec_r2h
     - ansible.builtin.debug:
         msg:
-          - "r2-snap HubPullReplications:  {{ (rec_r2h.json.HubPullReplications  | default([])) | map('combine', {'CertificateWithPrivateKey':'<redacted>','CertificatePassword':'<redacted>','CertificateBase64':'<redacted>','PublicKey':'<redacted>'}) | list }}"
-          - "r2-snap SinkPullReplications: {{ (rec_r2h.json.SinkPullReplications | default([])) | map('combine', {'CertificateWithPrivateKey':'<redacted>','CertificatePassword':'<redacted>','CertificateBase64':'<redacted>','PublicKey':'<redacted>'}) | list }}"
+          - "r2-snap HubPullReplications:  {{ (rec_r2h.json.HubPullReplications  | default([])) | map('combine', {'Certificate':'<redacted>','CertificateWithPrivateKey':'<redacted>','CertificatePassword':'<redacted>','CertificateBase64':'<redacted>','PublicKey':'<redacted>'}) | list }}"
+          - "r2-snap SinkPullReplications: {{ (rec_r2h.json.SinkPullReplications | default([])) | map('combine', {'Certificate':'<redacted>','CertificateWithPrivateKey':'<redacted>','CertificatePassword':'<redacted>','CertificateBase64':'<redacted>','PublicKey':'<redacted>'}) | list }}"
 
     - name: "Dump resink config -- r2-smug ({{ r2_fresh_sink_db }})"
       ansible.builtin.uri:
@@ -1978,8 +1978,8 @@
       register: rec_r2s
     - ansible.builtin.debug:
         msg:
-          - "r2-smug HubPullReplications:  {{ (rec_r2s.json.HubPullReplications  | default([])) | map('combine', {'CertificateWithPrivateKey':'<redacted>','CertificatePassword':'<redacted>','CertificateBase64':'<redacted>','PublicKey':'<redacted>'}) | list }}"
-          - "r2-smug SinkPullReplications: {{ (rec_r2s.json.SinkPullReplications | default([])) | map('combine', {'CertificateWithPrivateKey':'<redacted>','CertificatePassword':'<redacted>','CertificateBase64':'<redacted>','PublicKey':'<redacted>'}) | list }}"
+          - "r2-smug HubPullReplications:  {{ (rec_r2s.json.HubPullReplications  | default([])) | map('combine', {'Certificate':'<redacted>','CertificateWithPrivateKey':'<redacted>','CertificatePassword':'<redacted>','CertificateBase64':'<redacted>','PublicKey':'<redacted>'}) | list }}"
+          - "r2-smug SinkPullReplications: {{ (rec_r2s.json.SinkPullReplications | default([])) | map('combine', {'Certificate':'<redacted>','CertificateWithPrivateKey':'<redacted>','CertificatePassword':'<redacted>','CertificateBase64':'<redacted>','PublicKey':'<redacted>'}) | list }}"
 
     - name: Launch W-1 burst against r2-snap-target
       ansible.builtin.command:

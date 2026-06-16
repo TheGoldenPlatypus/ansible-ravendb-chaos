@@ -6,12 +6,13 @@
 # when reading the scenario's stdout -- no need to re-derive them from the wire-up calls.
 #
 # Sensitive fields are redacted before printing:
-#   * CertificateWithPrivateKey  -- the per-sink PFX (sink pull task)
-#   * CertificatePassword
+#   * Certificate                -- PEM body of the per-sink mint
+#   * CertificateWithPrivateKey  -- per-sink PFX (sink pull task)
 #   * CertificateBase64          -- public key of an access entry
+#   * CertificatePassword
 #   * PublicKey
-# The redacted version shows '<redacted len=N>' so you can still tell whether the field
-# was present and the certificate is being negotiated, without leaking the key material.
+# The redacted version shows '<redacted>' so you can still tell whether the field was
+# present and a certificate is being negotiated, without leaking the key material.
 #
 # What it prints (after redaction):
 #   * HubPullReplications  -- per hub-side task: Name, Mode, WithFiltering, DelayReplicationFor,
@@ -45,6 +46,7 @@
     # presence is still visible but the key material isn't.  combine() merges
     # the right-hand dict over the left, so any matching key gets overridden.
     _redaction_overrides:
+      Certificate: "<redacted>"
       CertificateWithPrivateKey: "<redacted>"
       CertificatePassword: "<redacted>"
       CertificateBase64: "<redacted>"
