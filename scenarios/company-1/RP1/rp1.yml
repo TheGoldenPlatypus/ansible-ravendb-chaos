@@ -9,6 +9,9 @@
 #   pre.  Sanity-check inputs.
 #   1.    Create the database on both clusters and wire up the filtered pull
 #         (hub -> sink, allowed path = users/sink1/*).
+#   1b.   Enable post-create feature flags on hub + sink (PullReplicationCompositeChangeVectors
+#         and any other v_new gated behavior listed in vars.yml's post_create_feature_flags).
+#         The module re-fetches each DatabaseRecord to verify the flag took, raises loud if not.
 #   3.    Baseline snapshot: capture each cluster leader's DatabaseChangeVector while the DB
 #         is still empty.  This is the "before" picture step 6 will diff against.
 #   2.    Seed:
@@ -134,6 +137,36 @@
       register: r
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ----- step 1b: enable post-create v_new feature flags -----------------------------------------
+# Some v_new behaviors (e.g. PullReplicationCompositeChangeVectors) are gated behind a feature
+# flag.  RP-1 runs all-v_new from start (no rolling upgrade), so we flip the flag(s) on right
+# after the pull is wired and before any data flows.  Module verifies the change is reflected
+# in each DatabaseRecord before returning -- raises loud if a flag didn't take.
+- name: RP-1 step 1b -- enable post-create feature flags on hub + sink
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Enable post-create features on {{ item }}/db1"
+      ravendb_features:
+        kind: enable
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ item }}"
+        db_name: db1
+        add: "{{ post_create_feature_flags }}"
+      register: r
+      when: (post_create_feature_flags | default([])) | length > 0
+      loop:
+        - "{{ hub_id  | default(1) }}a"
+        - "{{ sink_id | default(2) }}a"
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.results | map(attribute='msg') | list }}" }
+      when: (post_create_feature_flags | default([])) | length > 0
 
 
 # ----- pre-step 2: wipe capture dir so step 3 below starts on a clean slate -------------------
