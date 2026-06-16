@@ -27,6 +27,9 @@
 #   8.  Upgrade the second batch of three nodes.
 #   9.  Repeat the same shape of mid-roll checkpoint.
 #   10. Upgrade the final batch of three nodes -- the whole topology is now on the new binary.
+#   10b. Enable post-upgrade feature flags (PullReplicationCompositeChangeVectors and any other
+#        v_new gated behavior listed in vars.yml's post_upgrade_feature_flags).  The module
+#        verifies each flag is reflected in the DatabaseRecord before returning.
 #   11. Run an endpoint checkpoint while writers are still going: schema parity across all
 #       nine nodes, filter compliance and cross-sink isolation hold, and an extra change-vector
 #       boundary check on both sink directions.
@@ -1063,6 +1066,37 @@
       loop: "{{ upgrade_step_3 }}"
       async: 2400
       poll: 30
+
+
+# ----- step 10b: enable post-upgrade feature flags now that every node is on v_new -----------
+# The whole topology (hub + sink-1 + sink-2, 9 nodes) is on the new binary at this point.
+# Some v_new-only behaviors are gated behind feature flags so they don't auto-activate on a
+# mixed-binary cluster.  Flip them on now; the module verifies the flag is reflected in each
+# DatabaseRecord before returning.  Empty list -> no-op.
+- name: RPV-1 step 10b -- enable post-upgrade feature flags on every cluster
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Enable post-upgrade features on {{ item }}/db1"
+      ravendb_features:
+        kind: enable
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ item }}"
+        db_name: db1
+        add: "{{ post_upgrade_feature_flags }}"
+      register: r
+      when: (post_upgrade_feature_flags | default([])) | length > 0
+      loop:
+        - "{{ hub_id   | default(1) }}a"
+        - "{{ sink1_id | default(2) }}a"
+        - "{{ sink2_id | default(3) }}a"
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.results | map(attribute='msg') | list }}" }
+      when: (post_upgrade_feature_flags | default([])) | length > 0
 
 
 # ----- step 11: endpoint checkpoint -- every node on the new binary, writers still flowing ---

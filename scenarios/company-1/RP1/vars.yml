@@ -64,13 +64,6 @@ burst_restore_pool_size: "{{ bulk_users_sink1| default(10000) | int }}"
 # ---------- Sample sizes for parity probes ----------------------------------
 parity_probe_count: 50
 
-# ---------- Post-create feature flags ---------------------------------------
-# Feature flags to enable on hub + sink right after db creation + pull wiring.
-# Some v_new behaviors are gated and must be flipped on explicitly even on a
-# fresh v_new install.  Empty list = no flips.
-post_create_feature_flags:
-  - PullReplicationCompositeChangeVectors
-
 # ---------- Budgets (seconds) -----------------------------------------------
 drain_budget_secs: 180
 filter_drain_budget_secs: 600

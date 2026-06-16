@@ -5,7 +5,15 @@
 # after define_hub / attach_sinks so the actual filter, mode, and allowed paths are visible
 # when reading the scenario's stdout -- no need to re-derive them from the wire-up calls.
 #
-# What it prints:
+# Sensitive fields are redacted before printing:
+#   * CertificateWithPrivateKey  -- the per-sink PFX (sink pull task)
+#   * CertificatePassword
+#   * CertificateBase64          -- public key of an access entry
+#   * PublicKey
+# The redacted version shows '<redacted len=N>' so you can still tell whether the field
+# was present and the certificate is being negotiated, without leaking the key material.
+#
+# What it prints (after redaction):
 #   * HubPullReplications  -- per hub-side task: Name, Mode, WithFiltering, DelayReplicationFor,
 #                             PreventDeletionsMode, Disabled, MentorNode.
 #   * SinkPullReplications -- per sink-side task: Name, HubName, Mode, ConnectionStringName,
@@ -32,6 +40,15 @@
   hosts: localhost
   connection: local
   gather_facts: false
+  vars:
+    # Replace each sensitive value with '<redacted len=N>' so the field's
+    # presence is still visible but the key material isn't.  combine() merges
+    # the right-hand dict over the left, so any matching key gets overridden.
+    _redaction_overrides:
+      CertificateWithPrivateKey: "<redacted>"
+      CertificatePassword: "<redacted>"
+      CertificateBase64: "<redacted>"
+      PublicKey: "<redacted>"
   tasks:
     - name: GET DatabaseRecord
       ansible.builtin.uri:
@@ -44,11 +61,15 @@
 
     - name: "Pull-replication config on {{ target }}/{{ db_name }} -- HubPullReplications"
       ansible.builtin.debug:
-        msg: "{{ rec.json.HubPullReplications | default([]) }}"
+        msg: >-
+          {{ rec.json.HubPullReplications | default([])
+             | map('combine', _redaction_overrides) | list }}
 
     - name: "Pull-replication config on {{ target }}/{{ db_name }} -- SinkPullReplications"
       ansible.builtin.debug:
-        msg: "{{ rec.json.SinkPullReplications | default([]) }}"
+        msg: >-
+          {{ rec.json.SinkPullReplications | default([])
+             | map('combine', _redaction_overrides) | list }}
 
     - name: "GET hub access entries for task '{{ hub_task_name | default('') }}'"
       ansible.builtin.uri:
@@ -65,5 +86,7 @@
 
     - name: "Hub access entries for '{{ hub_task_name | default('') }}'"
       ansible.builtin.debug:
-        msg: "{{ access.json | default({}) }}"
+        msg: >-
+          {{ (access.json.Results | default([]))
+             | map('combine', _redaction_overrides) | list }}
       when: hub_task_name | default('') | length > 0

@@ -137,6 +137,13 @@ filter_drain_budget_secs: 600
 # bump for slower labs.
 tombstone_settle_timeout_secs: 300
 
+# ---------- Post-upgrade feature flags ---------------------------------------
+# Flags to enable on hub + sink-1 + sink-2 once every node is on v_new (step 10b).
+# Some v_new behaviors are gated behind these flags so they don't auto-activate on a
+# mixed-binary cluster mid-roll.  Empty list = no flips.
+post_upgrade_feature_flags:
+  - PullReplicationCompositeChangeVectors
+
 t0_stats_assert_fields:
   - CountOfAttachments
   - CountOfConflicts
