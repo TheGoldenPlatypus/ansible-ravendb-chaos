@@ -653,6 +653,14 @@ def k_doc_count_match(p):
             total = 0
             orphans = []
             shard_failures = []
+            # Route each per-shard probe to a node that ACTUALLY owns the shard.
+            # The cursor 7.x per-shard endpoint serves only local data, so asking
+            # the orchestrator for non-owned shards returns 410 -- which would
+            # show up here as shard_failures for every non-local shard and trip
+            # the "partial coverage" raise below.  Map members[0] (a tag) to a
+            # container name via the same cluster_prefix + tag.lower() pattern
+            # used elsewhere.
+            cluster_prefix = target[:-1]
             for shard_id, shard_rec in shards.items():
                 members = shard_rec.get("Members") or []
                 if not members:
@@ -661,11 +669,14 @@ def k_doc_count_match(p):
                     # could let the aggregate 'match' on remaining shards.
                     orphans.append(shard_id)
                     continue
+                member_tag = members[0]
+                member_target = "%s%s" % (cluster_prefix, member_tag.lower())
                 s2, b2 = probe_shard_endpoint(
-                    target, p["ravendb_domain"], db, members[0], shard_id,
+                    member_target, p["ravendb_domain"], db, member_tag, shard_id,
                     p["client_cert"], p["ca_cert"])
                 if s2 != 200:
-                    shard_failures.append("shard %s -> HTTP %d" % (shard_id, s2))
+                    shard_failures.append("shard %s @ %s -> HTTP %d"
+                                          % (shard_id, member_target, s2))
                     continue
                 total += json.loads(b2).get("CountOfDocuments") or 0
             if orphans:

@@ -185,7 +185,15 @@ def classify_nodes(p, nodes):
 def aggregate_sharded_stats(p, target, db):
     """For sharded DBs without a per-tag route, sum per-shard /stats into one dict.
 
-    Integer fields are summed; non-integer fields take the first-seen value."""
+    Integer fields are summed; non-integer fields take the first-seen value.
+
+    Each shard's stats are fetched from a node that ACTUALLY owns the shard
+    (not from the original `target`).  The cursor 7.x per-shard endpoint
+    serves only LOCAL shard data -- asking the orchestrator for shard N's
+    stats returns 410, even via /databases/<db>$N/stats.  Old code (which
+    probed `target` for every shard) was silently only capturing the one
+    shard `target` happened to own locally; for a 3-shard DB that meant
+    the aggregate was 1/3 of the true value."""
     rec_path = "/admin/databases?name=%s" % db
     s, b = request("GET", target, p["ravendb_domain"], rec_path,
                    p["client_cert"], p["ca_cert"])
@@ -195,13 +203,17 @@ def aggregate_sharded_stats(p, target, db):
     shards = sharding.get("Shards") or {}
     if not shards:
         return None
+    cluster_prefix = target[:-1]   # "62a" -> "62"; "1a" -> "1"
     aggregate = {}
     for shard_id, shard_rec in shards.items():
         members = shard_rec.get("Members") or []
         if not members:
             continue
+        # Pick a node that owns this shard, not `target`.
+        member_tag = members[0]
+        member_target = "%s%s" % (cluster_prefix, member_tag.lower())
         s, b = probe_shard_endpoint(
-            target, p["ravendb_domain"], db, members[0], shard_id,
+            member_target, p["ravendb_domain"], db, member_tag, shard_id,
             p["client_cert"], p["ca_cert"])
         if s != 200:
             continue
@@ -1704,22 +1716,38 @@ def k_shard_placement_check(p):
             % (target, db))
     shard_ids = sorted(shards.keys(), key=lambda s: int(s))
 
-    tag = target[-1].upper()
+    # Route each per-shard docs?id=X probe to a node that ACTUALLY owns the
+    # shard.  The cursor 7.x per-shard endpoint serves only local data, so
+    # asking the orchestrator (or any single node) for non-owned shards
+    # returns 410 -- the doc would be silently classified as missing on every
+    # shard except the one the orchestrator happens to own locally.
+    cluster_prefix = target[:-1]
+    shard_owner = {}
+    for shard_id in shard_ids:
+        members = shards.get(shard_id, {}).get("Members") or []
+        if not members:
+            raise RuntimeError(
+                "%s/%s: shard %s has no Members -- can't determine placement"
+                % (target, db, shard_id))
+        owner_tag = members[0]
+        shard_owner[shard_id] = (owner_tag, "%s%s" % (cluster_prefix, owner_tag.lower()))
+
     per_id_owners = {}
     for doc_id in probe_ids:
         owners = []
         for shard_id in shard_ids:
+            owner_tag, owner_target = shard_owner[shard_id]
             suffix = "docs?id=%s" % quote(doc_id)
             try:
                 status, body = probe_shard_endpoint(
-                    target, p["ravendb_domain"], db, tag, shard_id,
+                    owner_target, p["ravendb_domain"], db, owner_tag, shard_id,
                     p["client_cert"], p["ca_cert"], suffix=suffix)
             except Exception:
                 # Treat transport failure as "can't determine placement" -- fail loud
                 # rather than silently dropping the shard from the comparison.
                 raise RuntimeError(
-                    "%s/%s shard=%s: transport error during placement probe for id=%s"
-                    % (target, db, shard_id, doc_id))
+                    "%s/%s shard=%s @ %s: transport error during placement probe for id=%s"
+                    % (target, db, shard_id, owner_target, doc_id))
             if status == 200 and (json.loads(body).get("Results") or []):
                 owners.append(shard_id)
         per_id_owners[doc_id] = owners
