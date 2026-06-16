@@ -580,6 +580,7 @@
     - name: "T0: assert /stats parity across hub a/b/c (tombstones excluded)"
       ravendb_diagnostic:
         kind: stats_parity
+        settle_secs: "{{ stats_parity_settle_secs | default(120) | int }}"
         ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
         ca_cert: "{{ cert_ca_crt }}"
@@ -594,6 +595,7 @@
     - name: "T0: assert /stats parity across sink-1 a/b/c (tombstones excluded)"
       ravendb_diagnostic:
         kind: stats_parity
+        settle_secs: "{{ stats_parity_settle_secs | default(120) | int }}"
         ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
         ca_cert: "{{ cert_ca_crt }}"
@@ -608,6 +610,7 @@
     - name: "T0: assert /stats parity across sink-2 a/b/c (tombstones excluded)"
       ravendb_diagnostic:
         kind: stats_parity
+        settle_secs: "{{ stats_parity_settle_secs | default(120) | int }}"
         ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
         ca_cert: "{{ cert_ca_crt }}"
@@ -1426,6 +1429,7 @@
     - name: "Final: assert /stats parity across hub a/b/c (I-1+I-5+I-6)"
       ravendb_diagnostic:
         kind: stats_parity
+        settle_secs: "{{ stats_parity_settle_secs | default(120) | int }}"
         ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
         ca_cert: "{{ cert_ca_crt }}"
@@ -1439,6 +1443,7 @@
     - name: "Final: assert /stats parity across sink-1 a/b/c"
       ravendb_diagnostic:
         kind: stats_parity
+        settle_secs: "{{ stats_parity_settle_secs | default(120) | int }}"
         ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
         ca_cert: "{{ cert_ca_crt }}"
@@ -1452,6 +1457,7 @@
     - name: "Final: assert /stats parity across sink-2 a/b/c"
       ravendb_diagnostic:
         kind: stats_parity
+        settle_secs: "{{ stats_parity_settle_secs | default(120) | int }}"
         ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
         ca_cert: "{{ cert_ca_crt }}"

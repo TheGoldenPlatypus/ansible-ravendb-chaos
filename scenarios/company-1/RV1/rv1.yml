@@ -174,6 +174,7 @@
     - name: "T0 baseline: assert /stats parity across a/b/c (quiet v_old)"
       ravendb_diagnostic:
         kind: stats_parity
+        settle_secs: "{{ stats_parity_settle_secs | default(120) | int }}"
         ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
         ca_cert: "{{ cert_ca_crt }}"
@@ -491,6 +492,7 @@
     - name: "Phase 1 final: assert /stats parity across a/b/c"
       ravendb_diagnostic:
         kind: stats_parity
+        settle_secs: "{{ stats_parity_settle_secs | default(120) | int }}"
         ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
         ca_cert: "{{ cert_ca_crt }}"
@@ -676,6 +678,7 @@
     - name: "Phase 2 checkpoint: assert /stats parity across a/b/c"
       ravendb_diagnostic:
         kind: stats_parity
+        settle_secs: "{{ stats_parity_settle_secs | default(120) | int }}"
         ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
         ca_cert: "{{ cert_ca_crt }}"
@@ -846,6 +849,7 @@
     - name: "Phase 3 checkpoint: assert /stats parity across a/b/c"
       ravendb_diagnostic:
         kind: stats_parity
+        settle_secs: "{{ stats_parity_settle_secs | default(120) | int }}"
         ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
         ca_cert: "{{ cert_ca_crt }}"

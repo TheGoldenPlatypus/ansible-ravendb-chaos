@@ -925,6 +925,7 @@
     - name: "Assert /stats parity across sink a/b/c (docs+tombstones+attachments+counters+TS)"
       ravendb_diagnostic:
         kind: stats_parity
+        settle_secs: "{{ stats_parity_settle_secs | default(120) | int }}"
         ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
         ca_cert: "{{ cert_ca_crt }}"

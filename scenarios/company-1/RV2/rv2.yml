@@ -436,6 +436,7 @@
     - name: Sx stats parity
       ravendb_diagnostic:
         kind: stats_parity
+        settle_secs: "{{ stats_parity_settle_secs | default(120) | int }}"
         ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
         ca_cert: "{{ cert_ca_crt }}"
@@ -449,6 +450,7 @@
     - name: Sy stats parity
       ravendb_diagnostic:
         kind: stats_parity
+        settle_secs: "{{ stats_parity_settle_secs | default(120) | int }}"
         ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
         ca_cert: "{{ cert_ca_crt }}"
@@ -462,6 +464,7 @@
     - name: Sz stats parity
       ravendb_diagnostic:
         kind: stats_parity
+        settle_secs: "{{ stats_parity_settle_secs | default(120) | int }}"
         ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
         ca_cert: "{{ cert_ca_crt }}"
