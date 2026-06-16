@@ -29,7 +29,8 @@
 #   12. Stop both workloads, wait for every cluster to drain, then run the strict final
 #       asserts on a quiet topology: doc-id-set parity per bucket, revision-count parity
 #       per bucket, no orphan revisions, filter compliance, cross-sink isolation, /stats
-#       parity.
+#       parity, AND hub-sink doc-set completeness (every doc the filter says should be on
+#       sink-1 is on sink-1, and same for sink-2; no sink-side orphans except sink<N>-local).
 #
 # The mid-roll checkpoints (7, 9, 11) only run checks that are safe under live writes; the
 # strict everything-must-match parity checks are deferred to step 12 once the workloads stop.
@@ -1329,6 +1330,44 @@
         fields: ["CountOfTombstones"]
         timeout: "{{ tombstone_settle_timeout_secs | default(300) | int }}"
         poll_interval: 3
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Cross-cluster doc-set completeness.  Enumerate every live doc on hub +
+    # each sink and verify by set containment that every doc the filter allows
+    # is present, and every sink-side doc that's not sink-local has a hub twin.
+    # Two independent links (hub <-> sink-1 and hub <-> sink-2) -- check each.
+    - name: "Final: hub <-> sink-1 doc-set completeness"
+      ravendb_wait:
+        kind: hub_sink_doc_set_converged
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        hub_cluster_leader:  "{{ hub_id   | default(1) }}a"
+        sink_cluster_leader: "{{ sink1_id | default(2) }}a"
+        allowed_prefixes:    ["users/sink1/*", "orders/sink1/*"]
+        sink_local_prefixes: ["sink1-local/"]
+        timeout: "{{ doc_set_settle_timeout_secs | default(300) | int }}"
+        poll_interval: 5
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Final: hub <-> sink-2 doc-set completeness"
+      ravendb_wait:
+        kind: hub_sink_doc_set_converged
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        hub_cluster_leader:  "{{ hub_id   | default(1) }}a"
+        sink_cluster_leader: "{{ sink2_id | default(3) }}a"
+        allowed_prefixes:    ["users/sink2/*", "orders/sink2/*"]
+        sink_local_prefixes: ["sink2-local/"]
+        timeout: "{{ doc_set_settle_timeout_secs | default(300) | int }}"
+        poll_interval: 5
       register: r
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }

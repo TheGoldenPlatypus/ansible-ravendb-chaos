@@ -33,6 +33,13 @@
 #     16  phase (e) checkpoint
 #     17  round-1 finish + capture state
 #
+# Each phase (a)/(b) checkpoint (both rounds) ends with a hub-sink doc-set
+# completeness wait: enumerate every live doc id on hub + sink-1 and verify
+# by set containment that every users/sink1/* on hub is on sink-1, and every
+# sink-1 doc has a hub twin (RPV-2 has no sink-local writes, so the second
+# half is total).  Phase (e) is NOT covered (cross-db sink db1_resink not
+# yet supported by hub_sink_doc_set -- see scenarios/company-1/TODO).
+#
 # Deep version (invariants, risks, validators) -> company-1_TESTING_PLAN/scenarios.md (RPV-2).
 #
 # PREREQ -- bring up a clean 6-cluster lab at v_new via run.sh (per-cluster provision + form,
@@ -405,6 +412,26 @@
   gather_facts: false
   vars_files: [vars.yml]
   tasks:
+    # Exhaustive doc-set completeness: every users/sink1/* on hub must be on
+    # sink-1, and every sink-1 doc must have a hub twin (no sink-local writes
+    # in RPV-2).  Polls until convergence so a slow link doesn't false-fail.
+    - name: "Phase (a) drain: hub <-> sink-1 doc-set completeness"
+      ravendb_wait:
+        kind: hub_sink_doc_set_converged
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        hub_cluster_leader:  "{{ hub_id   | default(1) }}a"
+        sink_cluster_leader: "{{ sink1_id | default(2) }}a"
+        allowed_prefixes:    "{{ sink1_allowed_prefixes }}"
+        sink_local_prefixes: []
+        timeout: "{{ doc_set_settle_timeout_secs | default(300) | int }}"
+        poll_interval: 5
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
     - name: "Doc count parity across hub a/b/c"
       ravendb_diagnostic:
         kind: doc_count_parity
@@ -533,6 +560,26 @@
   gather_facts: false
   vars_files: [vars.yml]
   tasks:
+    # Post-tombstone-drain doc-set completeness: every users/sink1/* on hub
+    # must still be on sink-1 (after the W-3 delete storm completed, only
+    # surviving live docs).
+    - name: "Phase (b) drain: hub <-> sink-1 doc-set completeness"
+      ravendb_wait:
+        kind: hub_sink_doc_set_converged
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        hub_cluster_leader:  "{{ hub_id   | default(1) }}a"
+        sink_cluster_leader: "{{ sink1_id | default(2) }}a"
+        allowed_prefixes:    "{{ sink1_allowed_prefixes }}"
+        sink_local_prefixes: []
+        timeout: "{{ doc_set_settle_timeout_secs | default(300) | int }}"
+        poll_interval: 5
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
     - name: "Revision-count parity post-purge across hub + sink-1"
       ravendb_diagnostic:
         kind: revision_count_parity
@@ -1295,6 +1342,26 @@
   gather_facts: false
   vars_files: [vars.yml]
   tasks:
+    # Post-failover doc-set completeness.  2a is still down -- hit 2b as the
+    # sink-side entry point.  Verifies the surviving sink-1 members still
+    # carry every doc the filter says they should have.
+    - name: "Phase (a) r2 drain: hub <-> sink-1 doc-set completeness (probe 2b)"
+      ravendb_wait:
+        kind: hub_sink_doc_set_converged
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        hub_cluster_leader:  "{{ hub_id   | default(1) }}a"
+        sink_cluster_leader: "{{ sink1_id | default(2) }}b"
+        allowed_prefixes:    "{{ sink1_allowed_prefixes }}"
+        sink_local_prefixes: []
+        timeout: "{{ doc_set_settle_timeout_secs | default(300) | int }}"
+        poll_interval: 5
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
     - name: "Doc count parity across hub + sink-1 surviving members (2a still down)"
       ravendb_diagnostic:
         kind: doc_count_parity
@@ -1456,6 +1523,32 @@
                  (sink1_id | default(2)) ~ 'a', (sink1_id | default(2)) ~ 'b', (sink1_id | default(2)) ~ 'c'] }}"
     fields: ["CountOfTombstones"]
     timeout_secs: "{{ tombstone_settle_timeout_secs | default(300) }}"
+
+# Post-tombstone-drain doc-set completeness on the rejoined 3-replica sink-1.
+# Verifies 2a's back-fill is complete: every doc the filter allows is present
+# on sink-1 as a whole, no orphan from the failover window.
+- name: RPV-2 step 24 -- phase (b) round-2 doc-set completeness
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Phase (b) r2 drain: hub <-> sink-1 doc-set completeness"
+      ravendb_wait:
+        kind: hub_sink_doc_set_converged
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        hub_cluster_leader:  "{{ hub_id   | default(1) }}a"
+        sink_cluster_leader: "{{ sink1_id | default(2) }}a"
+        allowed_prefixes:    "{{ sink1_allowed_prefixes }}"
+        sink_local_prefixes: []
+        timeout: "{{ doc_set_settle_timeout_secs | default(300) | int }}"
+        poll_interval: 5
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
 
 # ===== step 25: round-2 phase (c) -- snapshot + smuggler backups while W-1+W-2 keep going ======
