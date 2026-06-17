@@ -242,50 +242,64 @@ def stream_all_doc_ids(target, domain, db, client_cert, ca_cert,
     return ids
 
 
-def shard_endpoint_path(db, shard_id, suffix="stats"):
-    """7.x per-shard endpoint:  /databases/<db>$<shard>/<suffix>
-
-    `suffix` is everything after the db name, e.g.:
-        'stats'              -> /databases/db1$0/stats
-        'docs?id=users/0'    -> /databases/db1$0/docs?id=users/0
-
-    The literal '$' is the shard-suffix separator RavenDB 7.x uses internally
-    to address one shard's data on a node."""
-    return "/databases/%s$%s/%s" % (db, shard_id, suffix)
-
-
-def shard_endpoint_path_legacy(db, tag, shard_id, suffix="stats"):
-    """6.x per-shard endpoint:  /databases/<db>/<suffix>[?&]nodeTag=<tag>&shardNumber=<shard>
-
-    Picks '?' or '&' for the nodeTag/shardNumber params based on whether
-    `suffix` already contains a '?' (e.g. 'docs?id=...').  The cursor 7.x
-    build returns 410 DatabaseNotRelevant on this URL form; only 6.x serves
-    it.  Kept for mid-rolling-upgrade mixed-binary clusters."""
-    base = "/databases/%s/%s" % (db, suffix)
-    sep = "&" if "?" in base else "?"
-    return "%s%snodeTag=%s&shardNumber=%s" % (base, sep, tag, shard_id)
+# ---------------------------------------------------------------------------
+# Sharded DB routing.
+#
+# Rule (verified against the cursor 7.2 build and the official client, see
+# Raven.Client/Documents/Operations/GetStatisticsOperation.cs and the handler
+# attributes in Raven.Server/Documents/Sharding/Handlers/):
+#
+#   For every read against a sharded DB, send the call to the ORCHESTRATOR
+#   node.  The orchestrator either:
+#     - fan-outs and aggregates (e.g. /stats/essential, /streams/docs,
+#       /docs paginated, /replication/conflicts)
+#     - routes by id / by changeVector (e.g. /docs?id=X, /revisions?cv=...)
+#     - proxies to a specific node when caller supplies ?nodeTag=<X>
+#       (e.g. /stats, /stats/detailed, /replication/active-connections)
+#
+# Addressing shards directly via /databases/<db>$N/... is INTERNAL storage
+# addressing; clients do not use it and the cursor build refuses some of
+# those URLs with HTTP 410 DatabaseNotRelevant from non-owning nodes.
+# ---------------------------------------------------------------------------
 
 
-def probe_shard_endpoint(target, domain, db, tag, shard_id,
-                         client_cert, ca_cert, suffix="stats", timeout=30):
-    """Probe a per-shard endpoint with build-version compatibility.
+def orchestrator_for(target, domain, db, client_cert, ca_cert, timeout=30):
+    """Return the orchestrator's container name for `db` as seen from `target`,
+    or `target` unchanged if `db` is not sharded.
 
-    Tries the 7.x form (db$N) first since the steady-state v_new install hits
-    on the first call.  On non-200, falls back to the 6.x query-param form
-    so mid-rolling-upgrade clusters with still-on-old-binary nodes are
-    handled correctly without forcing the caller to know the build.
+    Looks up DatabaseRecord.Sharding.Orchestrator.Topology.Members and maps
+    the first member tag -> container name using the convention
+    container = <cluster_prefix><tag.lower()>, where cluster_prefix is
+    target[:-1] (e.g. '62a' -> '62', 'A' tag -> '62a').
 
-    Returns (status, body) of whichever call succeeded; if both fail,
-    returns the last (non-200) response so the caller can route on the code."""
-    new_path = shard_endpoint_path(db, shard_id, suffix=suffix)
-    status, body = request("GET", target, domain, new_path,
-                           client_cert, ca_cert, timeout=timeout)
-    if status == 200:
-        return status, body
-
-    legacy_path = shard_endpoint_path_legacy(db, tag, shard_id, suffix=suffix)
-    return request("GET", target, domain, legacy_path,
+    Returns the container name to address.  Raises RuntimeError on a
+    non-200 admin/databases response so callers fail loud rather than
+    silently calling the wrong node."""
+    s, b = request("GET", target, domain,
+                   "/admin/databases?name=%s" % db,
                    client_cert, ca_cert, timeout=timeout)
+    if s != 200:
+        raise RuntimeError(
+            "orchestrator_for: %s/%s -- /admin/databases returned HTTP %d, "
+            "can't determine routing" % (target, db, s))
+    rec = json.loads(b)
+    orch = (rec.get("Sharding") or {}).get("Orchestrator") or {}
+    members = (orch.get("Topology") or {}).get("Members") or []
+    if not members:
+        # Not sharded; orchestrator concept doesn't apply.  The caller can
+        # talk to `target` directly for any non-sharded endpoint.
+        return target
+    cluster_prefix = target[:-1]
+    return "%s%s" % (cluster_prefix, members[0].lower())
+
+
+def with_node_tag(path, tag):
+    """Append ?nodeTag=<tag> (or &nodeTag=<tag> if a query already exists) to
+    `path`.  Used for endpoints the orchestrator proxies per-node (/stats,
+    /stats/detailed, /replication/active-connections).  Pass the cluster
+    tag of the target node (e.g. 'A' for container '<prefix>a')."""
+    sep = "&" if "?" in path else "?"
+    return "%s%snodeTag=%s" % (path, sep, tag)
 
 
 def prefix_match(doc_id, prefixes):

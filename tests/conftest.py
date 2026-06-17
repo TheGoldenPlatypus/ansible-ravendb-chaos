@@ -74,6 +74,7 @@ _install_ansible_shim()
 _KINDS_WITH_ROUTE = (
     "ravendb_writes", "ravendb_smuggler", "ravendb_tasks",
     "ravendb_revisions", "ravendb_diagnostic", "ravendb_features",
+    "ravendb_wait",
 )
 
 
@@ -81,18 +82,29 @@ def _passthrough_route(target, db, domain, client_cert, ca_cert):
     return target
 
 
+def _passthrough_orchestrator(target, domain, db, client_cert, ca_cert,
+                              timeout=30):
+    """Stub for orchestrator_for in unit tests.  Pretend `target` is its own
+    orchestrator -- tests that exercise sharded routing import the real one
+    and monkeypatch it themselves (file name suffix `_orchestrator` or
+    `_sharded` skips this stub)."""
+    return target
+
+
 @pytest.fixture(autouse=True)
 def _stub_resolve_db_admin_route_for_unit(request, monkeypatch):
     """Auto-applied in unit tests; skipped in integration tests (real routing
     against an embedded RavenDB), and skipped in tests that specifically
-    exercise resolve_db_admin_route itself (opt out by adding the marker
-    `needs_real_route` to the test or by naming the file `*resolve_db_admin*`
-    or `*_sharded.py`)."""
+    exercise resolve_db_admin_route / orchestrator_for themselves (opt out by
+    adding the marker `needs_real_route` or naming the file
+    `*resolve_db_admin*`, `*_sharded.py`, or `*orchestrator*`)."""
     fspath = str(getattr(request.node, "fspath", "")).replace("\\", "/")
     if "/integration/" in fspath:
         return
     fname = fspath.rsplit("/", 1)[-1]
-    if "resolve_db_admin" in fname or fname.endswith("_sharded.py"):
+    if ("resolve_db_admin" in fname
+            or "orchestrator" in fname
+            or fname.endswith("_sharded.py")):
         return
     if request.node.get_closest_marker("needs_real_route"):
         return
@@ -104,6 +116,8 @@ def _stub_resolve_db_admin_route_for_unit(request, monkeypatch):
             continue
         if hasattr(mod, "resolve_db_admin_route"):
             monkeypatch.setattr(mod, "resolve_db_admin_route", _passthrough_route)
+        if hasattr(mod, "orchestrator_for"):
+            monkeypatch.setattr(mod, "orchestrator_for", _passthrough_orchestrator)
 
 
 _BANNER_SEEN = set()

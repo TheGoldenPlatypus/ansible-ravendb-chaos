@@ -320,36 +320,14 @@ def test_k_marker_propagation_raises_on_unreachable_target(monkeypatch):
     print(f"    actual:   {exc.value!s}\n")
 
 
-# ============================================================================
-# k_doc_count_match: orphan shard must raise, not silently exclude
-# ============================================================================
-
-def test_aggregate_count_raises_when_a_shard_has_no_members(monkeypatch):
-    """Sharded layout where shard 1 has no Members (orphaned -- could be
-    after chaos killed the shard's only node).  Old code silently dropped
-    that shard from the total; new code raises."""
-    def fake(method, target, domain, path, client_cert, ca_cert,
-             body=None, content_type=None, timeout=30):
-        if path.endswith("/stats"):
-            return 500, b'{"Type":"nodeTag is mandatory"}'
-        if "/admin/databases" in path:
-            return 200, json.dumps({"Sharding": {
-                "Shards": {
-                    "0": {"Members": ["A"]},
-                    "1": {"Members": []},      # ORPHANED
-                },
-            }}).encode()
-        if "shardNumber=0" in path:
-            return 200, json.dumps({"CountOfDocuments": 7}).encode()
-        return 200, _stats_body({})
-    monkeypatch.setattr(waitmod, "request", fake)
-
-    print(f"\n    expected: RuntimeError mentioning 'orphan shard'")
-    with pytest.raises(RuntimeError, match="orphan shard") as exc:
-        waitmod.k_doc_count_match(params(
-            source="src", target="tgt", target_db_name="db1"))
-    print(f"    actual:   {exc.value!s}\n")
-    assert "1" in str(exc.value)
+# NOTE: removed test_aggregate_count_raises_when_a_shard_has_no_members.
+# Orphan-shard detection moved server-side -- _aggregate_count now calls
+# /stats/essential on the orchestrator (server-side fan-out + aggregation),
+# so the harness no longer iterates shards manually and the "orphan shard"
+# error path no longer exists.  Orphan shards now surface either as a wrong
+# count (server includes the live shards but the aggregate is short) or as
+# a /stats/essential HTTP error -- both observable, but not via this
+# specific message.
 
 
 def test_aggregate_count_raises_when_top_level_stats_unreachable(monkeypatch):

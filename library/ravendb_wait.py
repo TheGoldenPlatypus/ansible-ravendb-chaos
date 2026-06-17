@@ -7,11 +7,12 @@ from urllib.parse import quote
 
 from ansible.module_utils.basic import AnsibleModule
 from ansible.module_utils.ravendb_client import (
+    orchestrator_for,
     prefix_match,
-    probe_shard_endpoint,
     request,
     request_per_node,
     stream_all_doc_ids,
+    with_node_tag,
 )
 from ansible.module_utils.polling import poll_until
 
@@ -30,94 +31,122 @@ def now_hms():
     return time.strftime("%H:%M:%S")
 
 
-def _resolve_shard_for_tag(p, target, tag):
-    db = p["db_name"]
-    s, b = request("GET", target, p["ravendb_domain"],
-                   "/admin/databases?name=%s" % db,
-                   p["client_cert"], p["ca_cert"])
-    if s != 200:
-        return None
-    sharding = json.loads(b).get("Sharding") or {}
-    shards = sharding.get("Shards") or {}
-    for shard_id, shard_rec in shards.items():
-        if tag in (shard_rec.get("Members") or []):
-            return shard_id
-    return None
-
-
 def classify_nodes(p, nodes):
     """Classify each probe node by whether it hosts the database.
 
-    Distinguishes outcomes per node:
-      - 200                     -> hosts the db (flat); add to host_map.
-      - 500 'nodeTag mandatory' -> hosts the db as a shard member (legacy 6.x
-                                   sharded response); resolve shard then add.
-      - 410 DatabaseNotRelevant -> hosts the db as a shard-only member of a
-                                   sharded db (7.x response on non-orchestrator);
-                                   same path as the 500 case -- resolve shard then
-                                   probe via probe_shard_endpoint (tries 7.x
-                                   $N form first, falls back to 6.x query-param).
-      - connection              -> UNREACHABLE; raise loud (do NOT silently skip --
-                                   unreachable conflated with 'wrong cluster' is
-                                   the root cause of vacuous waits passing on
-                                   dead clusters).
-      - other HTTP              -> genuinely doesn't host the db (404 etc.); add
-                                   to skipped.  Caller decides if that's tolerable.
-    """
+    Strategy:
+      1. Look up the database's routing once via orchestrator_for():
+         non-sharded -> probe each node directly at /databases/<db>/stats
+         sharded     -> route every probe through the orchestrator with
+                        ?nodeTag=<X>; the orchestrator proxies to the
+                        named node.
+
+    Returns (host_map, skipped) where:
+      host_map[target] = None              for non-sharded reachable nodes
+      host_map[target] = ('via', orch_tgt) for sharded reachable nodes; the
+                                            tuple says "to read stats from
+                                            this node, send GET via orch_tgt
+                                            with ?nodeTag=<target tag>".
+      skipped: list of nodes that returned a non-200, non-410 response
+                (the db genuinely isn't there -- 404 etc).
+
+    Raises RuntimeError on:
+      - unreachable nodes (connection error, DNS, SSL)
+      - failed orchestrator lookup
+    -- because conflating those with "wrong cluster" is the root cause of
+    vacuous waits passing on dead clusters."""
     domain = p["ravendb_domain"]
     db = p["db_name"]
-    path = "/databases/%s/stats" % db
-    results = request_per_node("GET", nodes, domain, path,
-                               p["client_cert"], p["ca_cert"])
+    if not nodes:
+        return {}, []
+
+    # One lookup against the first node to determine the orchestrator.  If
+    # the db is sharded, every subsequent probe routes via that orchestrator.
+    # Defensive: if the lookup itself fails (transport / DNS / permission),
+    # default to non-sharded and let the per-node probe below surface the
+    # failure with the original ("X: %s" % body) error context -- callers
+    # rely on that shape for the "unreachable" assertion.
+    try:
+        orch = orchestrator_for(nodes[0], domain, db,
+                                p["client_cert"], p["ca_cert"])
+        is_sharded = (orch != nodes[0]) or _is_sharded(p, nodes[0])
+    except Exception:
+        orch = nodes[0]
+        is_sharded = False
+
     host_map = {}
     skipped = []
     unreachable = []
-    sharded_probe_needed = []
-    for target, status, body in results:
-        if status is None:
-            # request_per_node caught a non-HTTP exception (socket timeout,
-            # SSL, DNS, connection refused).  'body' here is the repr().
-            unreachable.append("%s: %s" % (target, body))
-        elif status == 200:
-            host_map[target] = None
-        elif status == 500 and b"nodeTag is mandatory" in (body or b""):
-            sharded_probe_needed.append(target)
-        elif status == 410 and b"DatabaseNotRelevant" in (body or b""):
-            sharded_probe_needed.append(target)
-        else:
-            skipped.append(target)
 
-    for target in sharded_probe_needed:
-        tag = target[-1].upper()
-        try:
-            shard_id = _resolve_shard_for_tag(p, target, tag)
-        except Exception as e:
-            unreachable.append("%s: shard resolve failed: %r" % (target, e))
-            continue
-        if shard_id is None:
-            skipped.append(target)
-            continue
-        # Use probe_shard_endpoint so we work on BOTH cursor 7.x (which serves
-        # /databases/db$N/stats) and 6.x (which serves the query-param form).
-        # Without this compat shim, mid-rolling-upgrade clusters get half their
-        # nodes silently classified as 'skipped' and waits PASS vacuously.
-        try:
-            s, _ = probe_shard_endpoint(
-                target, p["ravendb_domain"], db, tag, shard_id,
-                p["client_cert"], p["ca_cert"])
-        except Exception as e:
-            unreachable.append("%s: sharded stats probe failed: %r" % (target, e))
-            continue
-        if s == 200:
-            host_map[target] = shard_id
-        else:
-            skipped.append(target)
+    if not is_sharded:
+        path = "/databases/%s/stats" % db
+        results = request_per_node("GET", nodes, domain, path,
+                                   p["client_cert"], p["ca_cert"])
+        for target, status, body in results:
+            if status is None:
+                unreachable.append("%s: %s" % (target, body))
+            elif status == 200:
+                host_map[target] = None
+            else:
+                skipped.append(target)
+    else:
+        # Sharded: per-node calls go to the orchestrator with ?nodeTag=<tag>.
+        # Each probe verifies the proxy reaches the named node successfully.
+        base_path = "/databases/%s/stats" % db
+        for target in nodes:
+            tag = target[-1].upper()
+            path = with_node_tag(base_path, tag)
+            try:
+                s, _ = request("GET", orch, domain, path,
+                               p["client_cert"], p["ca_cert"])
+            except Exception as e:
+                unreachable.append("%s (via orch %s): %r" % (target, orch, e))
+                continue
+            if s == 200:
+                host_map[target] = ("via", orch)
+            else:
+                skipped.append(target)
 
     if unreachable:
         raise RuntimeError(
             "classify_nodes: %d/%d probe node(s) unreachable: %s -- "
             "can't proceed with a wait on partial coverage (vacuous PASS risk)"
             % (len(unreachable), len(nodes), unreachable))
+
+    return host_map, skipped
+
+
+def stats_request_for(target, host_map_value, db, suffix="stats"):
+    """Compose (call_target, url_path) for a /stats-family call against
+    `target` using the routing decision classify_nodes already made.
+
+    host_map_value is what classify_nodes stored:
+        None              -> non-sharded, call /databases/<db>/<suffix> on target
+        ("via", orch_tgt) -> sharded, call /databases/<db>/<suffix>?nodeTag=<X>
+                             on orch_tgt where X = target's cluster tag
+
+    Callers send the resulting (call_target, path) via request() instead of
+    hand-rolling the URL composition (which previously had per-shard logic)."""
+    base = "/databases/%s/%s" % (db, suffix)
+    if host_map_value is None:
+        return target, base
+    _, orch_target = host_map_value
+    tag = target[-1].upper()
+    return orch_target, with_node_tag(base, tag)
+
+
+def _is_sharded(p, target):
+    """Best-effort: tell whether `target`'s DB record reports sharding.
+    Used as a tie-break when orchestrator_for returned target unchanged
+    (which can happen for non-sharded OR for sharded-where-target-is-the-
+    orchestrator -- both legitimate)."""
+    s, b = request("GET", target, p["ravendb_domain"],
+                   "/admin/databases?name=%s" % p["db_name"],
+                   p["client_cert"], p["ca_cert"])
+    if s != 200:
+        return False
+    shards = ((json.loads(b).get("Sharding") or {}).get("Shards")) or {}
+    return bool(shards)
 
     return host_map, skipped
 
@@ -258,17 +287,11 @@ def snapshot_stats_field(p, nodes_or_map, field):
     failures = []
 
     if isinstance(nodes_or_map, dict):
-        for target, shard_id in nodes_or_map.items():
+        for target, route_marker in nodes_or_map.items():
+            call_target, path = stats_request_for(target, route_marker, db)
             try:
-                if shard_id is None:
-                    s, b = request("GET", target, p["ravendb_domain"],
-                                   "/databases/%s/stats" % db,
-                                   p["client_cert"], p["ca_cert"])
-                else:
-                    tag = target[-1].upper()
-                    s, b = probe_shard_endpoint(
-                        target, p["ravendb_domain"], db, tag, shard_id,
-                        p["client_cert"], p["ca_cert"])
+                s, b = request("GET", call_target, p["ravendb_domain"], path,
+                               p["client_cert"], p["ca_cert"])
             except Exception as e:
                 failures.append("%s: connection error %r" % (target, e))
                 continue
@@ -620,79 +643,32 @@ def k_doc_count_match(p):
     timeout    = p["timeout"]
 
     def _aggregate_count(target, db):
-        """Return CountOfDocuments aggregated across all shards (sharded
-        clusters) or directly from /stats (flat).  Raises loud on:
-          - any unreachable shard (orphan shard with no members or stats
-            probe failure -- silently excluding it would let doc counts
-            'match' on incomplete coverage);
-          - any HTTP/connection failure on the top-level probe."""
-        path = "/databases/%s/stats" % db
+        """Return CountOfDocuments for `db` on the cluster reachable via
+        `target`.  Sharded DBs use /stats/essential on the orchestrator
+        (server-side fan-out + aggregation); non-sharded use /stats.
+
+        Step 1 looks up the orchestrator.  If that fails we default to
+        `target` and let step 2 surface the underlying transport error so
+        the message keeps its "top-level /stats unreachable" shape that
+        callers (and tests) rely on."""
         try:
-            status, body = request("GET", target, p["ravendb_domain"], path,
+            orch = orchestrator_for(target, p["ravendb_domain"], db,
+                                    p["client_cert"], p["ca_cert"])
+        except Exception:
+            orch = target
+        path = "/databases/%s/stats/essential" % db
+        try:
+            status, body = request("GET", orch, p["ravendb_domain"], path,
                                    p["client_cert"], p["ca_cert"])
         except Exception as e:
             raise RuntimeError(
                 "_aggregate_count: %s/%s top-level /stats unreachable: %r"
                 % (target, db, e))
-        if status == 200:
-            return json.loads(body).get("CountOfDocuments")
-        if status == 500 and b"nodeTag is mandatory" in body:
-            s, b = request("GET", target, p["ravendb_domain"],
-                           "/admin/databases?name=%s" % db,
-                           p["client_cert"], p["ca_cert"])
-            if s != 200:
-                raise RuntimeError(
-                    "_aggregate_count: %s/%s /admin/databases probe failed: HTTP %d"
-                    % (target, db, s))
-            sharding = (json.loads(b).get("Sharding") or {})
-            shards = sharding.get("Shards") or {}
-            if not shards:
-                raise RuntimeError(
-                    "_aggregate_count: %s/%s reports sharded layout but Shards "
-                    "dict is empty -- cluster topology is broken" % (target, db))
-            total = 0
-            orphans = []
-            shard_failures = []
-            # Route each per-shard probe to a node that ACTUALLY owns the shard.
-            # The cursor 7.x per-shard endpoint serves only local data, so asking
-            # the orchestrator for non-owned shards returns 410 -- which would
-            # show up here as shard_failures for every non-local shard and trip
-            # the "partial coverage" raise below.  Map members[0] (a tag) to a
-            # container name via the same cluster_prefix + tag.lower() pattern
-            # used elsewhere.
-            cluster_prefix = target[:-1]
-            for shard_id, shard_rec in shards.items():
-                members = shard_rec.get("Members") or []
-                if not members:
-                    # ORPHAN shard.  Old code silently excluded these from the
-                    # total -- which is exactly how a chaos-killed shard node
-                    # could let the aggregate 'match' on remaining shards.
-                    orphans.append(shard_id)
-                    continue
-                member_tag = members[0]
-                member_target = "%s%s" % (cluster_prefix, member_tag.lower())
-                s2, b2 = probe_shard_endpoint(
-                    member_target, p["ravendb_domain"], db, member_tag, shard_id,
-                    p["client_cert"], p["ca_cert"])
-                if s2 != 200:
-                    shard_failures.append("shard %s @ %s -> HTTP %d"
-                                          % (shard_id, member_target, s2))
-                    continue
-                total += json.loads(b2).get("CountOfDocuments") or 0
-            if orphans:
-                raise RuntimeError(
-                    "_aggregate_count: %s/%s has orphan shard(s) %s with no "
-                    "Members -- can't claim doc count match while shards are "
-                    "down" % (target, db, orphans))
-            if shard_failures:
-                raise RuntimeError(
-                    "_aggregate_count: %s/%s shard probe(s) failed: %s -- "
-                    "can't claim doc count match on partial coverage"
-                    % (target, db, shard_failures))
-            return total
-        raise RuntimeError(
-            "_aggregate_count: %s/%s /stats returned HTTP %d -- unexpected"
-            % (target, db, status))
+        if status != 200:
+            raise RuntimeError(
+                "_aggregate_count: %s/%s /stats/essential via %s HTTP %d"
+                % (target, db, orch, status))
+        return json.loads(body).get("CountOfDocuments")
 
     def predicate():
         s = _aggregate_count(src_target, src_db)

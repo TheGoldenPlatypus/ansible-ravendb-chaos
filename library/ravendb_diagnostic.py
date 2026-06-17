@@ -43,12 +43,13 @@ from urllib.parse import quote
 
 from ansible.module_utils.basic import AnsibleModule
 from ansible.module_utils.ravendb_client import (
+    orchestrator_for,
     prefix_match,
-    probe_shard_endpoint,
     request,
     request_per_node,
     resolve_db_admin_route,
     stream_all_doc_ids,
+    with_node_tag,
 )
 
 
@@ -120,164 +121,149 @@ def expand_id_set(p):
 # HTTP / stats helpers
 # ============================================================================
 
-def _resolve_shard_for_tag(p, target, tag):
-    """For a sharded DB, return the shard id whose Members list contains `tag`."""
-    db = p["db_name"]
-    s, b = request("GET", target, p["ravendb_domain"],
-                   "/admin/databases?name=%s" % db,
-                   p["client_cert"], p["ca_cert"])
-    if s != 200:
-        return None
-    sharding = json.loads(b).get("Sharding") or {}
-    for shard_id, shard_rec in (sharding.get("Shards") or {}).items():
-        if tag in (shard_rec.get("Members") or []):
-            return shard_id
-    return None
+def _stats_request_for(target, host_map_value, db, suffix="stats"):
+    """Compose (call_target, url_path) for a stats-family call against
+    `target` using the routing decision classify_nodes made.
+
+      None              -> non-sharded, direct call on target
+      ("via", orch)     -> sharded, route via orch with ?nodeTag=<tag>"""
+    base = "/databases/%s/%s" % (db, suffix)
+    if host_map_value is None:
+        return target, base
+    _, orch = host_map_value
+    tag = target[-1].upper()
+    return orch, with_node_tag(base, tag)
 
 
 def classify_nodes(p, nodes):
-    """Probe /stats on each node and return ({target: shard_id_or_None}, skipped).
+    """Probe each node and return ({target: route_marker}, skipped).
 
-    A shard_id of None means non-sharded (or the node hosts the DB plainly);
-    a non-None shard_id means we discovered the per-shard route to use for
-    follow-up stat requests on that node.  Two server responses indicate a
-    shard-only member that needs the per-shard route resolved:
-      * 500 'nodeTag is mandatory'     -- legacy 6.x sharded response
-      * 410 DatabaseNotRelevant       -- 7.x sharded response on a non-orchestrator
-    Anything else goes in `skipped`."""
+    route_marker:
+        None              -> non-sharded; call /databases/<db>/<x> on target
+        ("via", orch)     -> sharded; the orchestrator is `orch` and per-node
+                             calls go to orch with ?nodeTag=<target's tag>
+
+    A non-200 reply (other than the proxy success on the sharded path) lands
+    the target in `skipped`.  Returns the routing decision, not raw HTTP
+    codes -- the wait/diag callers use _stats_request_for() to compose URLs."""
     domain = p["ravendb_domain"]
     db = p["db_name"]
-    path = "/databases/%s/stats" % db
-    results = request_per_node("GET", nodes, domain, path,
-                               p["client_cert"], p["ca_cert"])
+    if not nodes:
+        return {}, []
+
+    # Single lookup to determine routing.  Defensive: if either the
+    # orchestrator lookup or the sharding check fails (transport, missing
+    # cert in unit tests, permission), default to non-sharded and let the
+    # per-node probes below surface any real failure.
+    try:
+        orch = orchestrator_for(nodes[0], domain, db,
+                                p["client_cert"], p["ca_cert"])
+    except Exception:
+        orch = nodes[0]
+
+    is_sharded = False
+    try:
+        s, b = request("GET", nodes[0], p["ravendb_domain"],
+                       "/admin/databases?name=%s" % db,
+                       p["client_cert"], p["ca_cert"])
+        if s == 200:
+            shards = ((json.loads(b).get("Sharding") or {}).get("Shards")) or {}
+            is_sharded = bool(shards)
+    except Exception:
+        pass
+
     host_map = {}
     skipped = []
-    sharded_probe_needed = []
-    for target, status, body in results:
-        if status == 200:
-            host_map[target] = None
-        elif status == 500 and b"nodeTag is mandatory" in (body or b""):
-            sharded_probe_needed.append(target)
-        elif status == 410 and b"DatabaseNotRelevant" in (body or b""):
-            sharded_probe_needed.append(target)
-        else:
-            skipped.append(target)
 
-    for target in sharded_probe_needed:
-        tag = target[-1].upper()
-        shard_id = _resolve_shard_for_tag(p, target, tag)
-        if shard_id is None:
-            skipped.append(target)
-            continue
-        # probe_shard_endpoint tries 7.x form (db$N) first, falls back to 6.x
-        # query-param.  Required for mid-rolling-upgrade mixed-binary clusters.
-        s, _ = probe_shard_endpoint(
-            target, p["ravendb_domain"], db, tag, shard_id,
-            p["client_cert"], p["ca_cert"])
-        if s == 200:
-            host_map[target] = shard_id
-        else:
-            skipped.append(target)
+    if not is_sharded:
+        path = "/databases/%s/stats" % db
+        results = request_per_node("GET", nodes, domain, path,
+                                   p["client_cert"], p["ca_cert"])
+        for target, status, body in results:
+            if status == 200:
+                host_map[target] = None
+            else:
+                skipped.append(target)
+    else:
+        base_path = "/databases/%s/stats" % db
+        for target in nodes:
+            tag = target[-1].upper()
+            try:
+                s, _ = request("GET", orch, domain,
+                               with_node_tag(base_path, tag),
+                               p["client_cert"], p["ca_cert"])
+            except Exception:
+                skipped.append(target)
+                continue
+            if s == 200:
+                host_map[target] = ("via", orch)
+            else:
+                skipped.append(target)
 
     return host_map, skipped
-
-
-def aggregate_sharded_stats(p, target, db):
-    """For sharded DBs without a per-tag route, sum per-shard /stats into one dict.
-
-    Integer fields are summed; non-integer fields take the first-seen value.
-
-    Each shard's stats are fetched from a node that ACTUALLY owns the shard
-    (not from the original `target`).  The cursor 7.x per-shard endpoint
-    serves only LOCAL shard data -- asking the orchestrator for shard N's
-    stats returns 410, even via /databases/<db>$N/stats.  Old code (which
-    probed `target` for every shard) was silently only capturing the one
-    shard `target` happened to own locally; for a 3-shard DB that meant
-    the aggregate was 1/3 of the true value."""
-    rec_path = "/admin/databases?name=%s" % db
-    s, b = request("GET", target, p["ravendb_domain"], rec_path,
-                   p["client_cert"], p["ca_cert"])
-    if s != 200:
-        return None
-    sharding = (json.loads(b).get("Sharding") or {})
-    shards = sharding.get("Shards") or {}
-    if not shards:
-        return None
-    cluster_prefix = target[:-1]   # "62a" -> "62"; "1a" -> "1"
-    aggregate = {}
-    for shard_id, shard_rec in shards.items():
-        members = shard_rec.get("Members") or []
-        if not members:
-            continue
-        # Pick a node that owns this shard, not `target`.
-        member_tag = members[0]
-        member_target = "%s%s" % (cluster_prefix, member_tag.lower())
-        s, b = probe_shard_endpoint(
-            member_target, p["ravendb_domain"], db, member_tag, shard_id,
-            p["client_cert"], p["ca_cert"])
-        if s != 200:
-            continue
-        for k, v in json.loads(b).items():
-            if isinstance(v, int):
-                aggregate[k] = aggregate.get(k, 0) + v
-            else:
-                aggregate.setdefault(k, v)
-    return aggregate or None
 
 
 def get_stats(p, target, shard_id=None):
     """Return parsed /stats dict for `target` (or None on failure).
 
-    If `shard_id` is given, query that shard explicitly.  Otherwise try plain
-    /stats first and fall back to aggregating across shards on a 500
-    'nodeTag is mandatory' response."""
+    For sharded DBs, /stats requires per-node addressing via the orchestrator
+    (?nodeTag=<X>).  When no specific shard is requested, /stats/essential on
+    the orchestrator returns the aggregated counts.  For non-sharded DBs we
+    just hit /stats directly.
+
+    `shard_id` parameter is kept for backward-compat with callers that
+    explicitly want per-shard stats -- they should pass a route_marker
+    (("via", orch)) and the caller can use _stats_request_for() instead."""
     db = p["db_name"]
     if shard_id is not None:
-        tag = target[-1].upper()
+        # Caller already knows the route_marker shape -- use it directly.
+        call_target, path = _stats_request_for(target, shard_id, db)
         try:
-            status, body = probe_shard_endpoint(
-                target, p["ravendb_domain"], db, tag, shard_id,
-                p["client_cert"], p["ca_cert"])
+            status, body = request("GET", call_target, p["ravendb_domain"],
+                                   path, p["client_cert"], p["ca_cert"])
         except Exception:
-            return None      # connection refused / DNS error / timeout -> treat as unreachable
+            return None
         return json.loads(body) if status == 200 else None
 
-    path = "/databases/%s/stats" % db
+    # No shard_id given: figure out routing on the fly.
+    try:
+        orch = orchestrator_for(target, p["ravendb_domain"], db,
+                                p["client_cert"], p["ca_cert"])
+    except Exception:
+        return None
+    if orch == target:
+        # Non-sharded OR target IS the orchestrator.  Check via /stats/essential
+        # which works for both: on non-sharded it's just the essential counts;
+        # on sharded the orchestrator fans out and aggregates.
+        path = "/databases/%s/stats/essential" % db
+    else:
+        # Sharded.  Aggregated counts via the orchestrator's /stats/essential
+        # (server-side fan-out, no nodeTag needed).
+        path = "/databases/%s/stats/essential" % db
+        target = orch
     try:
         status, body = request("GET", target, p["ravendb_domain"], path,
                                p["client_cert"], p["ca_cert"])
     except Exception:
         return None
-    if status == 200:
-        return json.loads(body)
-    # Sharded responses: 6.x returned 500 'nodeTag is mandatory'; 7.x returns
-    # 410 DatabaseNotRelevantException on a shard-only member.  Both mean
-    # "this node hosts the db as a shard, ask via per-shard route".
-    if status == 500 and b"nodeTag is mandatory" in body:
-        return aggregate_sharded_stats(p, target, db)
-    if status == 410 and b"DatabaseNotRelevant" in body:
-        return aggregate_sharded_stats(p, target, db)
-    return None
+    return json.loads(body) if status == 200 else None
 
 
 def per_node_field(p, nodes_or_map, field):
-    """Return {target: stats[field]} for each reachable node.
+    """Return {target: stats[field]} for each reachable node in nodes_or_map.
 
-    Accepts either a list of targets (uses plain /stats) or a {target: shard_id}
-    map produced by classify_nodes() (uses per-shard route when shard_id is set)."""
+    Accepts the dict produced by classify_nodes (route_marker per target)
+    or a plain list of node names (non-sharded only, direct /stats)."""
     db = p["db_name"]
     out = {}
     if isinstance(nodes_or_map, dict):
-        for target, shard_id in nodes_or_map.items():
-            if shard_id is None:
-                s, b = request("GET", target, p["ravendb_domain"],
-                               "/databases/%s/stats" % db,
+        for target, marker in nodes_or_map.items():
+            call_target, path = _stats_request_for(target, marker, db)
+            try:
+                s, b = request("GET", call_target, p["ravendb_domain"], path,
                                p["client_cert"], p["ca_cert"])
-            else:
-                tag = target[-1].upper()
-                s, b = probe_shard_endpoint(
-                    target, p["ravendb_domain"], db, tag, shard_id,
-                    p["client_cert"], p["ca_cert"])
+            except Exception:
+                continue
             if s == 200:
                 out[target] = json.loads(b).get(field)
         return out
@@ -1716,38 +1702,45 @@ def k_shard_placement_check(p):
             % (target, db))
     shard_ids = sorted(shards.keys(), key=lambda s: int(s))
 
-    # Route each per-shard docs?id=X probe to a node that ACTUALLY owns the
-    # shard.  The cursor 7.x per-shard endpoint serves only local data, so
-    # asking the orchestrator (or any single node) for non-owned shards
-    # returns 410 -- the doc would be silently classified as missing on every
-    # shard except the one the orchestrator happens to own locally.
+    # All sharded reads route through the orchestrator (the cursor 7.2 build
+    # serves only local-shard data on non-orchestrator nodes -- direct
+    # per-shard URLs return 410).  We probe each shard by asking the
+    # orchestrator with ?nodeTag=<member_of_shard_N> -- the orchestrator
+    # proxies the GET to that node, which returns the doc iff this shard
+    # owns it.  Documents that the orchestrator's id-routing did NOT place
+    # on this shard show up as empty Results.
     cluster_prefix = target[:-1]
-    shard_owner = {}
+    try:
+        orch = orchestrator_for(target, p["ravendb_domain"], db,
+                                p["client_cert"], p["ca_cert"])
+    except Exception as e:
+        raise RuntimeError(
+            "%s/%s: orchestrator lookup failed: %r" % (target, db, e))
+
+    shard_probe_node = {}
     for shard_id in shard_ids:
         members = shards.get(shard_id, {}).get("Members") or []
         if not members:
             raise RuntimeError(
                 "%s/%s: shard %s has no Members -- can't determine placement"
                 % (target, db, shard_id))
-        owner_tag = members[0]
-        shard_owner[shard_id] = (owner_tag, "%s%s" % (cluster_prefix, owner_tag.lower()))
+        shard_probe_node[shard_id] = members[0]   # tag, e.g. 'A'
 
     per_id_owners = {}
     for doc_id in probe_ids:
         owners = []
         for shard_id in shard_ids:
-            owner_tag, owner_target = shard_owner[shard_id]
-            suffix = "docs?id=%s" % quote(doc_id)
+            tag = shard_probe_node[shard_id]
+            path = with_node_tag(
+                "/databases/%s/docs?id=%s" % (db, quote(doc_id)), tag)
             try:
-                status, body = probe_shard_endpoint(
-                    owner_target, p["ravendb_domain"], db, owner_tag, shard_id,
-                    p["client_cert"], p["ca_cert"], suffix=suffix)
+                status, body = request("GET", orch, p["ravendb_domain"], path,
+                                       p["client_cert"], p["ca_cert"])
             except Exception:
-                # Treat transport failure as "can't determine placement" -- fail loud
-                # rather than silently dropping the shard from the comparison.
                 raise RuntimeError(
-                    "%s/%s shard=%s @ %s: transport error during placement probe for id=%s"
-                    % (target, db, shard_id, owner_target, doc_id))
+                    "%s/%s shard=%s @ orchestrator %s: transport error during "
+                    "placement probe for id=%s"
+                    % (target, db, shard_id, orch, doc_id))
             if status == 200 and (json.loads(body).get("Results") or []):
                 owners.append(shard_id)
         per_id_owners[doc_id] = owners

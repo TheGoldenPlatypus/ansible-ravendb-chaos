@@ -31,10 +31,18 @@ def params(**kwargs):
     return p
 
 
+# Map tag -> shard_id.  Test setup: 3 shards each with a single member tag.
+# Shard "0" -> tag "A", "1" -> "B", "2" -> "C".  k_shard_placement_check now
+# probes via the orchestrator with ?nodeTag=<X>, so the test maps the tag back
+# to a shard id.
+_TAG_TO_SHARD = {"A": "0", "B": "1", "C": "2"}
+
+
 def _sharded_admin_body(shard_ids=("0", "1", "2")):
+    members_by_shard = {"0": ["A"], "1": ["B"], "2": ["C"]}
     return json.dumps({
         "Sharding": {
-            "Shards": {s: {"Members": ["A"]} for s in shard_ids},
+            "Shards": {s: {"Members": members_by_shard[s]} for s in shard_ids},
             "Orchestrator": {"Topology": {"Members": ["A"]}},
         }
     }).encode()
@@ -48,11 +56,13 @@ def _docs_body(present):
 
 
 def _shard_from_path(path):
-    """Pull the shardNumber=N value out of a /docs?...&shardNumber=N path."""
+    """Pull shard id from /databases/db1/docs?id=X&nodeTag=<tag> by mapping
+    the tag back to a shard via _TAG_TO_SHARD."""
     for part in path.split("&"):
-        if part.startswith("shardNumber="):
-            return part.split("=", 1)[1]
-    raise AssertionError("no shardNumber in %r" % path)
+        if part.startswith("nodeTag="):
+            tag = part.split("=", 1)[1]
+            return _TAG_TO_SHARD[tag]
+    raise AssertionError("no nodeTag in %r" % path)
 
 
 def _id_from_path(path):
@@ -64,7 +74,8 @@ def _id_from_path(path):
 
 def _build_request(placement):
     """Build a fake request() that pretends each id lives on the shards listed
-    in `placement` ({doc_id: [shard_id_str, ...]})."""
+    in `placement` ({doc_id: [shard_id_str, ...]}).  Handles BOTH the
+    /admin/databases lookup (sharding info) AND the per-shard docs probe."""
     def fake_request(method, target, domain, path, *a, **kw):
         if path.startswith("/admin/databases?name="):
             return 200, _sharded_admin_body()
