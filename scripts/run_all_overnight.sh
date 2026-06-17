@@ -113,18 +113,24 @@ declare -A DONE_SCENARIOS=()
 
 # -------------------------------------------------------------------------
 # Per-iteration runner -- runs ONE iteration with a wall-clock timeout,
-# captures rc, renames log, appends to summary.
+# captures rc, renames log, appends to summary.  After the run completes,
+# `docker stop`s every container attached to `net` so the containers stay
+# around (preserved state, devs can `docker start` them in the morning to
+# inspect Studio) without burning CPU all night.  Subsequent iters of the
+# same scenario use a DIFFERENT network + CID (computed by the caller) so
+# names never collide with stopped earlier-iter containers.
 #
-# Args: <scenario-name> <iter-number> <cmd...>
+# Args: <scenario-name> <iter-number> <network-name> <cmd...>
 # -------------------------------------------------------------------------
 run_iter() {
   local name="$1"; shift
   local iter="$1"; shift
+  local net="$1"; shift
   local logfile="$OUT_DIR/${name}-iter${iter}.running.log"
 
   {
     echo "===================================================================="
-    echo "  SCENARIO: $name   iter=$iter"
+    echo "  SCENARIO: $name   iter=$iter   net=$net"
     echo "  STARTED:  $(date)"
     echo "  TIMEOUT:  $TIMEOUT_PER_SCENARIO"
     echo "  CMD:      $*"
@@ -134,11 +140,30 @@ run_iter() {
   timeout --foreground "$TIMEOUT_PER_SCENARIO" "$@" >> "$logfile" 2>&1
   local rc=$?
 
+  # Stop (don't remove) every container still attached to this iter's
+  # network.  RavenDB gets a clean SIGTERM, flushes Voron, shuts down.
+  # The container + data dir + logs survive for morning inspection.
+  local stop_names
+  stop_names=$(docker network inspect "$net" \
+                  --format '{{range .Containers}}{{.Name}} {{end}}' \
+                  2>/dev/null | tr -s ' ' '\n' | grep -v '^$' || true)
+  if [ -n "$stop_names" ]; then
+    {
+      echo "--------------------------------------------------------------------"
+      echo "  Stopping (NOT removing) containers for post-mortem on net=$net:"
+      echo "$stop_names" | sed 's/^/    /'
+      echo "--------------------------------------------------------------------"
+    } >> "$logfile"
+    # shellcheck disable=SC2086
+    docker stop $stop_names >> "$logfile" 2>&1 || true
+  fi
+
   {
     echo "===================================================================="
     echo "  SCENARIO: $name   iter=$iter"
     echo "  ENDED:    $(date)"
     echo "  EXIT_RC:  $rc"
+    echo "  NET (kept for inspection): $net"
     echo "===================================================================="
   } >> "$logfile"
 
@@ -151,8 +176,8 @@ run_iter() {
   local final="$OUT_DIR/${name}-iter${iter}.${suffix}.log"
   mv "$logfile" "$final"
 
-  printf '%-12s  iter=%-3s  %-12s  %s\n' \
-    "$name" "$iter" "$suffix" "$(basename "$final")" >> "$SUMMARY"
+  printf '%-12s  iter=%-3s  %-12s  net=%-22s  %s\n' \
+    "$name" "$iter" "$suffix" "$net" "$(basename "$final")" >> "$SUMMARY"
 }
 
 # -------------------------------------------------------------------------
@@ -172,24 +197,58 @@ run_batch() {
     iter=$(( ${ITER_COUNTS[$name]} + 1 ))
     ITER_COUNTS[$name]=$iter
 
+    # Per-iter CID + NET so iters of the same scenario never collide on
+    # container names (Docker requires globally-unique names per host).
+    # Step is 100 -- leaves room for RV-3's 5-cluster CID range without
+    # bleeding into the next iter's bucket.  Each iter also gets its own
+    # docker network so form_clusters.yml's per-network /etc/hosts marker
+    # isolates the host block.
+    local cid_bump=$(( (iter - 1) * 100 ))
+    local net cid cid2
+
     # Dispatch the per-scenario command in a background subshell.
     case "$name" in
-      rv1)    run_iter "$name" "$iter" \
-                ./scenarios/company-1/RV1/run.sh "$V_OLD" "$V_NEW" 1 net_rv1 & ;;
-      rp1)    run_iter "$name" "$iter" \
-                ./scenarios/company-1/RP1/run.sh "$V_NEW" 10 net_rp1 & ;;
-      rpv1-A) run_iter "$name" "$iter" \
-                ./scenarios/company-1/RPV1/run.sh "$V_OLD" "$V_NEW" 20 net_rpv1_a & ;;
-      rpv1-B) run_iter "$name" "$iter" \
-                ./scenarios/company-1/RPV1/run.sh "$V_OLD" "$V_NEW" 30 net_rpv1_b \
-                -e '{"upgrade_step_1":["30a","30b","30c"],"upgrade_step_2":["31a","31b","31c"],"upgrade_step_3":["32a","32b","32c"]}' & ;;
-      rpv1-C) run_iter "$name" "$iter" \
-                ./scenarios/company-1/RPV1/run.sh "$V_OLD" "$V_NEW" 40 net_rpv1_c \
-                -e '{"upgrade_step_1":["41a","40b","42c"],"upgrade_step_2":["40a","42b","41c"],"upgrade_step_3":["42a","40c","41b"]}' & ;;
-      rv2)    run_iter "$name" "$iter" \
-                ./scenarios/company-1/RV2/run.sh "$V_OLD" "$V_NEW" 50 net_rv2 & ;;
-      rv3)    run_iter "$name" "$iter" \
-                ./scenarios/company-1/RV3/run.sh "$V_NEW" 60 net_rv3 & ;;
+      rv1)
+        cid=$(( 1 + cid_bump ))
+        net="net_rv1_iter${iter}"
+        run_iter "$name" "$iter" "$net" \
+          ./scenarios/company-1/RV1/run.sh "$V_OLD" "$V_NEW" "$cid" "$net" & ;;
+      rp1)
+        cid=$(( 10 + cid_bump ))
+        net="net_rp1_iter${iter}"
+        run_iter "$name" "$iter" "$net" \
+          ./scenarios/company-1/RP1/run.sh "$V_NEW" "$cid" "$net" & ;;
+      rpv1-A)
+        cid=$(( 20 + cid_bump ))
+        net="net_rpv1_a_iter${iter}"
+        run_iter "$name" "$iter" "$net" \
+          ./scenarios/company-1/RPV1/run.sh "$V_OLD" "$V_NEW" "$cid" "$net" & ;;
+      rpv1-B)
+        cid=$(( 30 + cid_bump ))
+        cid2=$(( cid + 1 ))
+        local cid3=$(( cid + 2 ))
+        net="net_rpv1_b_iter${iter}"
+        run_iter "$name" "$iter" "$net" \
+          ./scenarios/company-1/RPV1/run.sh "$V_OLD" "$V_NEW" "$cid" "$net" \
+          -e "{\"upgrade_step_1\":[\"${cid}a\",\"${cid}b\",\"${cid}c\"],\"upgrade_step_2\":[\"${cid2}a\",\"${cid2}b\",\"${cid2}c\"],\"upgrade_step_3\":[\"${cid3}a\",\"${cid3}b\",\"${cid3}c\"]}" & ;;
+      rpv1-C)
+        cid=$(( 40 + cid_bump ))
+        cid2=$(( cid + 1 ))
+        local cid3c=$(( cid + 2 ))
+        net="net_rpv1_c_iter${iter}"
+        run_iter "$name" "$iter" "$net" \
+          ./scenarios/company-1/RPV1/run.sh "$V_OLD" "$V_NEW" "$cid" "$net" \
+          -e "{\"upgrade_step_1\":[\"${cid2}a\",\"${cid}b\",\"${cid3c}c\"],\"upgrade_step_2\":[\"${cid}a\",\"${cid3c}b\",\"${cid2}c\"],\"upgrade_step_3\":[\"${cid3c}a\",\"${cid}c\",\"${cid2}b\"]}" & ;;
+      rv2)
+        cid=$(( 50 + cid_bump ))
+        net="net_rv2_iter${iter}"
+        run_iter "$name" "$iter" "$net" \
+          ./scenarios/company-1/RV2/run.sh "$V_OLD" "$V_NEW" "$cid" "$net" & ;;
+      rv3)
+        cid=$(( 60 + cid_bump ))
+        net="net_rv3_iter${iter}"
+        run_iter "$name" "$iter" "$net" \
+          ./scenarios/company-1/RV3/run.sh "$V_NEW" "$cid" "$net" & ;;
       *)      echo "ERROR: unknown scenario '$name'" >&2; continue ;;
     esac
     pids+=($!)
