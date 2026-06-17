@@ -144,6 +144,9 @@ tombstone_settle_timeout_secs: 300
 post_upgrade_feature_flags:
   - PullReplicationCompositeChangeVectors
 
+pre_cv_toggle_phase:  pre_cv_toggle
+post_cv_toggle_phase: post_cv_toggle
+
 t0_stats_assert_fields:
   - CountOfAttachments
   - CountOfConflicts

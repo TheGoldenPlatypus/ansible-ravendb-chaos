@@ -295,6 +295,7 @@
     - name: "Seed users/sink1/* on hub {{ hub_id | default(1) }}a/db1 (count={{ bucket_users_sink1 }}, 1 rev)"
       ravendb_writes:
         kind: docs_revisions
+        phase: "{{ pre_cv_toggle_phase }}"
         ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
         ca_cert: "{{ cert_ca_crt }}"
@@ -311,6 +312,7 @@
     - name: "Seed users/sink2/* on hub {{ hub_id | default(1) }}a/db1 (count={{ bucket_users_sink2 }}, 1 rev)"
       ravendb_writes:
         kind: docs_revisions
+        phase: "{{ pre_cv_toggle_phase }}"
         ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
         ca_cert: "{{ cert_ca_crt }}"
@@ -327,6 +329,7 @@
     - name: "Seed users/hub/* on hub {{ hub_id | default(1) }}a/db1 (count={{ bucket_users_hub }}, 1 rev)"
       ravendb_writes:
         kind: docs_revisions
+        phase: "{{ pre_cv_toggle_phase }}"
         ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
         ca_cert: "{{ cert_ca_crt }}"
@@ -344,6 +347,7 @@
     - name: "Seed orders/sink1/* on hub {{ hub_id | default(1) }}a/db1 (count={{ bucket_orders_sink1 }}, 1 rev)"
       ravendb_writes:
         kind: docs_revisions
+        phase: "{{ pre_cv_toggle_phase }}"
         ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
         ca_cert: "{{ cert_ca_crt }}"
@@ -360,6 +364,7 @@
     - name: "Seed orders/sink2/* on hub {{ hub_id | default(1) }}a/db1 (count={{ bucket_orders_sink2 }}, 1 rev)"
       ravendb_writes:
         kind: docs_revisions
+        phase: "{{ pre_cv_toggle_phase }}"
         ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
         ca_cert: "{{ cert_ca_crt }}"
@@ -376,6 +381,7 @@
     - name: "Seed orders/hub/* on hub {{ hub_id | default(1) }}a/db1 (count={{ bucket_orders_hub }}, 1 rev)"
       ravendb_writes:
         kind: docs_revisions
+        phase: "{{ pre_cv_toggle_phase }}"
         ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
         ca_cert: "{{ cert_ca_crt }}"
@@ -393,6 +399,7 @@
     - name: "Seed Internal/* on hub {{ hub_id | default(1) }}a/db1 (count={{ bucket_internal }}, 1 rev)"
       ravendb_writes:
         kind: docs_revisions
+        phase: "{{ pre_cv_toggle_phase }}"
         ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
         ca_cert: "{{ cert_ca_crt }}"
@@ -414,6 +421,7 @@
     - name: "Seed sink-1 local (sink1-local/users/*, count={{ sink1_local_seed_count }}) on {{ sink1_id | default(2) }}a/db1"
       ravendb_writes:
         kind: docs
+        phase: "{{ pre_cv_toggle_phase }}"
         ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
         ca_cert: "{{ cert_ca_crt }}"
@@ -429,6 +437,7 @@
     - name: "Seed sink-2 local (sink2-local/users/*, count={{ sink2_local_seed_count }}) on {{ sink2_id | default(3) }}a/db1"
       ravendb_writes:
         kind: docs
+        phase: "{{ pre_cv_toggle_phase }}"
         ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
         ca_cert: "{{ cert_ca_crt }}"
