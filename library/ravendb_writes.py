@@ -30,6 +30,33 @@ _HTTP_RETRY_MAX = 3
 _HTTP_RETRY_BACKOFF_SECS = (0.2, 0.5, 1.0)
 
 
+def _format_failure(label, status, body):
+    """Format a per-write failure entry with the server's exception message
+    (when the body is RavenDB's JSON error envelope) or a truncated raw
+    snippet (when it isn't).  Without this every '41/2000 PUTs failed'
+    message was just a list of HTTP codes -- the actual server diagnostic
+    (e.g. 'transaction merger queue full', 'license expired') ended up in
+    the void.  Now the failure surface carries enough text to start
+    debugging without re-running the burst with a packet capture."""
+    snippet = ""
+    if body:
+        try:
+            data = json.loads(body)
+            msg = data.get("Message") or data.get("Error") or ""
+            if isinstance(msg, str) and msg.strip():
+                snippet = msg.strip()[:200]
+        except Exception:
+            pass
+        if not snippet:
+            try:
+                snippet = body.decode("utf-8", errors="replace").strip()[:200]
+            except Exception:
+                snippet = repr(body)[:200]
+    if snippet:
+        return "%s -> HTTP %s: %s" % (label, status, snippet)
+    return "%s -> HTTP %s" % (label, status)
+
+
 def put_idempotent(p, target, path, body):
     """PUT with a small bounded retry on transient server-overload statuses.
 
@@ -74,9 +101,9 @@ def k_docs(p):
         # Lets verification distinguish docs written before vs after a flag flip.
         if phase:
             body["Phase"] = phase
-        status, _ = put_idempotent(p, target, path, body)
+        status, resp = put_idempotent(p, target, path, body)
         if status not in (200, 201):
-            failures.append("%s -> HTTP %s" % (doc_id, status))
+            failures.append(_format_failure(doc_id, status, resp))
 
     if failures:
         raise RuntimeError("k_docs: %d/%d PUTs failed on %s/%s: %s" %
@@ -106,10 +133,10 @@ def k_docs_freeform(p):
         }
         if phase:
             body["Phase"] = phase
-        status, _ = request("PUT", target, p["ravendb_domain"], path,
-                            p["client_cert"], p["ca_cert"], body=body)
+        status, resp = request("PUT", target, p["ravendb_domain"], path,
+                               p["client_cert"], p["ca_cert"], body=body)
         if status not in (200, 201):
-            failures.append("%s -> HTTP %s" % (doc_id, status))
+            failures.append(_format_failure(doc_id, status, resp))
 
     if failures:
         raise RuntimeError("k_docs_freeform: %d/%d PUTs failed on %s/%s: %s" %
@@ -151,9 +178,10 @@ def k_docs_revisions(p):
             # briefly reject during a 50k-PUT sustained seed; the same write
             # succeeds a few hundred ms later.  Real 4xx / non-transient 5xx
             # surface unchanged via the failures list.
-            status, _ = put_idempotent(p, target, path, body)
+            status, resp = put_idempotent(p, target, path, body)
             if status not in (200, 201):
-                failures.append("%s rev=%d -> HTTP %s" % (doc_id, v, status))
+                failures.append(_format_failure(
+                    "%s rev=%d" % (doc_id, v), status, resp))
 
     if failures:
         raise RuntimeError("k_docs_revisions: %d/%d PUTs failed on %s/%s: %s" %
@@ -184,10 +212,10 @@ def k_docs_interleaved(p):
         body = {"@metadata": {"@collection": "MicroDocs"}}
         if phase:
             body["Phase"] = phase
-        status, _ = request("PUT", target, p["ravendb_domain"], path,
-                            p["client_cert"], p["ca_cert"], body=body)
+        status, resp = request("PUT", target, p["ravendb_domain"], path,
+                               p["client_cert"], p["ca_cert"], body=body)
         if status not in (200, 201):
-            failures.append("%s -> HTTP %s" % (doc_id, status))
+            failures.append(_format_failure(doc_id, status, resp))
 
     if failures:
         raise RuntimeError("k_docs_interleaved: %d/%d PUTs failed on %s/%s: %s" %
@@ -214,10 +242,10 @@ def k_attachments(p):
         payload = p["payload"] if p["payload"] is not None else "blob-%d" % n
         path = "/databases/%s/attachments?id=%s&name=%s" % (
             db, quote(doc_id), quote(name))
-        status, _ = request("PUT", target, p["ravendb_domain"], path,
-                            p["client_cert"], p["ca_cert"], body=payload)
+        status, resp = request("PUT", target, p["ravendb_domain"], path,
+                               p["client_cert"], p["ca_cert"], body=payload)
         if status not in (200, 201, 204):
-            failures.append("%s -> HTTP %s" % (name, status))
+            failures.append(_format_failure(name, status, resp))
 
     if failures:
         raise RuntimeError("k_attachments: %d/%d PUTs failed on %s/%s: %s" %
@@ -255,10 +283,10 @@ def k_counters(p):
 
     failures = []
     for i in range(repeat):
-        status, _b = request("POST", target, p["ravendb_domain"], path,
-                             p["client_cert"], p["ca_cert"], body=body)
+        status, resp = request("POST", target, p["ravendb_domain"], path,
+                               p["client_cert"], p["ca_cert"], body=body)
         if status not in (200, 201, 204):
-            failures.append("call #%d -> HTTP %s" % (i, status))
+            failures.append(_format_failure("call #%d" % i, status, resp))
 
     if failures:
         raise RuntimeError("k_counters: %d/%d POSTs failed on %s/%s/%s: %s" %
@@ -319,10 +347,10 @@ def k_timeseries(p):
             "Values": [72.0],
             "Tag": None,
         }]}
-        status, _ = request("POST", target, p["ravendb_domain"], path,
-                            p["client_cert"], p["ca_cert"], body=body)
+        status, resp = request("POST", target, p["ravendb_domain"], path,
+                               p["client_cert"], p["ca_cert"], body=body)
         if status not in (200, 201, 204):
-            failures.append("entry #%d -> HTTP %s" % (n, status))
+            failures.append(_format_failure("entry #%d" % n, status, resp))
 
     if failures:
         raise RuntimeError("k_timeseries append: %d/%d entries failed on %s/%s/%s: %s" %
@@ -354,12 +382,12 @@ def k_delete(p):
     errors = []
     for doc_id in ids:
         path = "/databases/%s/docs?id=%s" % (db, quote(doc_id))
-        status, _ = request("DELETE", target, p["ravendb_domain"], path,
-                            p["client_cert"], p["ca_cert"])
+        status, resp = request("DELETE", target, p["ravendb_domain"], path,
+                               p["client_cert"], p["ca_cert"])
         if status == 204:
             ok += 1
         else:
-            errors.append("%s -> HTTP %s" % (doc_id, status))
+            errors.append(_format_failure(doc_id, status, resp))
 
     if errors:
         raise RuntimeError(
