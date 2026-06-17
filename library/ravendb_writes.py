@@ -54,6 +54,7 @@ def k_docs(p):
     prefix = p["id_prefix"] or "micro/doc"
     count = p["count"]
     body_tag = p["body_tag"]
+    phase = p["phase"]
 
     if not count or count < 1:
         raise ValueError("kind=docs requires `count` >= 1 (got %r) -- "
@@ -69,6 +70,10 @@ def k_docs(p):
         # docId from different nodes produce DISTINCT content
         if body_tag:
             body["tag"] = body_tag
+        # phase = harness-side cohort marker (e.g. 'pre_cv_toggle' / 'post_cv_toggle').
+        # Lets verification distinguish docs written before vs after a flag flip.
+        if phase:
+            body["Phase"] = phase
         status, _ = put_idempotent(p, target, path, body)
         if status not in (200, 201):
             failures.append("%s -> HTTP %s" % (doc_id, status))
@@ -86,6 +91,7 @@ def k_docs_freeform(p):
     target = resolve_write_target(p)
     db = p["db_name"]
     count = p["count"]
+    phase = p["phase"]
 
     if not count or count < 1:
         raise ValueError("kind=docs_freeform requires `count` >= 1 (got %r)" % count)
@@ -98,6 +104,8 @@ def k_docs_freeform(p):
             "Name": "freeform-%d-on-%s" % (n, target),
             "@metadata": {"@collection": None},
         }
+        if phase:
+            body["Phase"] = phase
         status, _ = request("PUT", target, p["ravendb_domain"], path,
                             p["client_cert"], p["ca_cert"], body=body)
         if status not in (200, 201):
@@ -118,6 +126,7 @@ def k_docs_revisions(p):
     revs = p["revs_per_doc"]
     prefix = p["id_prefix"] or "seed"
     collection = p["collection"] or "MicroDocs"
+    phase = p["phase"]
 
     if not count or count < 1:
         raise ValueError("kind=docs_revisions requires `count` >= 1 (got %r)" % count)
@@ -135,6 +144,8 @@ def k_docs_revisions(p):
                 "src": "write_docs_revisions",
                 "@metadata": {"@collection": collection},
             }
+            if phase:
+                body["Phase"] = phase
             # Idempotent PUT with bounded retry on transient server overload
             # (500/502/503/504).  RavenDB's transaction merger queues can
             # briefly reject during a 50k-PUT sustained seed; the same write
@@ -158,6 +169,7 @@ def k_docs_interleaved(p):
     db = p["db_name"]
     count = p["count"]
     prefixes = p["prefixes"]
+    phase = p["phase"]
     if not prefixes:
         raise ValueError("kind=docs_interleaved requires `prefixes` (non-empty list)")
     if not count or count < 1:
@@ -170,6 +182,8 @@ def k_docs_interleaved(p):
         doc_id = "%s-%d" % (which, seq)
         path = "/databases/%s/docs?id=%s" % (db, quote(doc_id))
         body = {"@metadata": {"@collection": "MicroDocs"}}
+        if phase:
+            body["Phase"] = phase
         status, _ = request("PUT", target, p["ravendb_domain"], path,
                             p["client_cert"], p["ca_cert"], body=body)
         if status not in (200, 201):
@@ -418,6 +432,12 @@ def main():
         id_prefix=dict(default=None),
         prefixes=dict(type="list", elements="str", default=None),
         body_tag=dict(default=None),
+        # Optional cohort marker.  When set, every doc body created by k_docs /
+        # k_docs_freeform / k_docs_revisions / k_docs_interleaved includes a
+        # top-level "Phase": <value> field.  Used by scenarios that toggle
+        # behavior mid-run (e.g. enabling a feature flag) to distinguish docs
+        # written before vs after the toggle for downstream verification.
+        phase=dict(default=None),
         # docs_revisions
         revs_per_doc=dict(type="int", default=1),
         collection=dict(default=None),
