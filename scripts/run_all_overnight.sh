@@ -72,6 +72,11 @@ MAX_ITERS_PER_SCENARIO="${MAX_ITERS_PER_SCENARIO:-0}"
 docker info >/dev/null 2>&1 || { echo "ERROR: docker daemon not reachable"; exit 3; }
 command -v timeout >/dev/null || { echo "ERROR: 'timeout' (coreutils) not on PATH"; exit 4; }
 
+if grep -q 'ANSIBLE MANAGED CHAOS LAB' /etc/hosts 2>/dev/null; then
+  echo "Stripping stale ANSIBLE MANAGED CHAOS LAB blocks from /etc/hosts..."
+  sudo sed -i '/# BEGIN ANSIBLE MANAGED CHAOS LAB/,/# END ANSIBLE MANAGED CHAOS LAB/d' /etc/hosts
+fi
+
 # -------------------------------------------------------------------------
 # Dedicated per-run folder so each overnight session is self-contained.
 # Logs, summary, everything go under $OUT_DIR.
