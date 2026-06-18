@@ -561,6 +561,8 @@ The extended sharded coverage (reverse-direction smuggler import + ETL / backup 
 <a id="rv-3"></a>
 ### RV-3 — Sharded extended (reverse-direction import + ETL / backup 3-way cross-check)
 
+> **TODO — on hold pending Karmel re-spec.** Topology + phase scope have open questions (target clusters / ETL / backup-compare may collapse). Scenario directory renamed to `RV3-TODO/` and dropped from `scripts/run_all_overnight.sh`. The section below reflects the OLD spec; do not implement against it until Karmel confirms the new shape.
+
 **Purpose.** Extended sharded coverage on top of RV-2. Two additional surfaces:
 1. Non-sharded → sharded smuggler import routes every doc to the correct shard.
 2. ETL + parallel backup from a sharded source enables a 3-way cross-check (ETL target == backup-restored target == sharded source union).

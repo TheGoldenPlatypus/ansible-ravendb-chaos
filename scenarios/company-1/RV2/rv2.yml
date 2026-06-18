@@ -1,14 +1,16 @@
 ##################################################################################################
 # scenarios/company-1/RV2/rv2.yml
 #
-# Two clusters.  Cluster 1 is a sharded 9-node source (3 shards of 3 replicas each) starting on
-# RavenDB 6.2.15; we roll it onto the build under test shard by shard.  Cluster 2 is a single
-# non-sharded node already on the new build that will receive a dump from the source.
+# Two clusters.  Cluster 1 is a sharded 3-node source (3 shards x 1 replica each; one shard per
+# node; all 3 nodes also act as orchestrators) starting on RavenDB 6.2.15; we roll it onto the
+# build under test one shard / one node at a time.  Cluster 2 is a single non-sharded node
+# already on the new build that will receive a dump from the source.
 #
 #   Cluster 1 (sharded source, id=1):
-#     shard 0 (Sx) -> replicas on 1a, 1b, 1c
-#     shard 1 (Sy) -> replicas on 1d, 1e, 1f
-#     shard 2 (Sz) -> replicas on 1g, 1h, 1i
+#     shard 0 (Sx) -> replica on 1a
+#     shard 1 (Sy) -> replica on 1b
+#     shard 2 (Sz) -> replica on 1c
+#     orchestrators: 1a, 1b, 1c (all nodes)
 #   Cluster 2 (non-sharded target, id=2):
 #     single node 2a
 #
@@ -19,8 +21,8 @@
 #         empty non-sharded database on the target.
 #   2.    Phase (a): launch W-1 on the source leader so writes are happening throughout the
 #         upgrade window.  Sharding spreads the writes across the three shards.
-#   3-5.  Phase (a): upgrade each shard's three replicas one at a time -- Sx first, then Sy,
-#         then Sz.  Run a schema-version checkpoint after each shard finishes.
+#   3-5.  Phase (a): upgrade each shard's single replica one at a time -- Sx (1a), then Sy (1b),
+#         then Sz (1c).  Run a schema-version checkpoint after each shard finishes.
 #   6.    Phase (a): stop the writer, drain each shard, trigger tombstone cleanup, wait for
 #         tombstone counts to converge on every shard, then run the per-shard assertions
 #         (/stats parity, revision-count parity, no orphans) and confirm every source node is
@@ -34,14 +36,16 @@
 #
 # Deep version (invariants, risks, validators) -> company-1_TESTING_PLAN/scenarios.md (RV-2).
 #
-# PREREQ -- bring up a clean lab with 2 clusters (one of 9 nodes, one of 9 nodes).  The source
+# PREREQ -- bring up a clean lab with 2 clusters (3-node source + 1-node target).  The source
 # starts on the old build; the target node 2a is upgraded to the new build straight away so the
 # smuggler import in step 8 lands hashed-form revisions.
 #
 #   1. ansible-playbook playbooks/teardown_containers.yml -K
-#   2. ansible-playbook playbooks/provision_nodes.yml -K -e clusters_count=2 -e nodes_per_cluster=9
+#   2. ansible-playbook playbooks/provision_nodes.yml -K -e cluster_id_start=1 -e clusters_count=1 -e nodes_per_cluster=3
+#      ansible-playbook playbooks/provision_nodes.yml -K -e cluster_id_start=2 -e clusters_count=1 -e nodes_per_cluster=1
 #   3. ansible-playbook playbooks/install_ravendb.yml -K -e rdb_version=<v_old>
-#   4. ansible-playbook playbooks/form_clusters.yml -K -e clusters_count=2 -e nodes_per_cluster=9
+#   4. ansible-playbook playbooks/form_clusters.yml -K -e cluster_id_start=1 -e clusters_count=1 -e nodes_per_cluster=3
+#      ansible-playbook playbooks/form_clusters.yml -K -e cluster_id_start=2 -e clusters_count=1 -e nodes_per_cluster=1
 #   5. ansible-playbook toolbox/service/upgrade_node.yml -K -e target=2a -e custom_build=<v_new.deb> --skip-tags download
 #
 # RUN:
@@ -84,8 +88,9 @@
   gather_facts: false
   vars_files: [vars.yml]
   tasks:
-    # Source side: a sharded database with 3 shards spread across the 9 source nodes.
-    - name: "Create sharded db1 on source leader (3 shards x 3 replicas)"
+    # Source side: a sharded database with 3 shards spread across the 3 source nodes
+    # (one shard per node, 1 replica each).  All 3 nodes are also orchestrators.
+    - name: "Create sharded db1 on source leader (3 shards x 1 replica, all-orchestrators)"
       ravendb_sharding:
         kind: create_sharded
         ravendb_domain: "{{ ravendb_domain }}"
@@ -94,6 +99,7 @@
         cluster_leader: "{{ src_leader }}"
         db_name: db1
         shards: "{{ shard_topology }}"
+        orchestrator_members: "{{ orchestrator_members }}"
       register: r
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
@@ -181,7 +187,7 @@
 
 # ----- step 3: phase (a) -- upgrade shard Sx one replica at a time (1a, 1b, 1c) + checkpoint --
 
-- name: RV-2 step 3 -- upgrade shard Sx (3 replicas one at a time) + per-shard checkpoint
+- name: RV-2 step 3 -- upgrade shard Sx (1 replica) + per-shard checkpoint
   hosts: localhost
   connection: local
   gather_facts: false
@@ -205,7 +211,7 @@
       async: 2400
       poll: 30
 
-    - name: "Shard Sx checkpoint -- replicas ({{ src_cluster_id | default(1) }}a/b/c) all schema 72001"
+    - name: "Shard Sx checkpoint -- replica ({{ src_cluster_id | default(1) }}a) on schema 72001"
       ravendb_diagnostic:
         kind: schema_version
         ravendb_domain: "{{ ravendb_domain }}"
@@ -224,7 +230,7 @@
 
 # ----- step 4: phase (a) -- upgrade shard Sy one replica at a time (1d, 1e, 1f) + checkpoint --
 
-- name: RV-2 step 4 -- upgrade shard Sy (3 replicas one at a time) + per-shard checkpoint
+- name: RV-2 step 4 -- upgrade shard Sy (1 replica) + per-shard checkpoint
   hosts: localhost
   connection: local
   gather_facts: false
@@ -267,7 +273,7 @@
 
 # ----- step 5: phase (a) -- upgrade shard Sz one replica at a time (1g, 1h, 1i) + checkpoint --
 
-- name: RV-2 step 5 -- upgrade shard Sz (3 replicas one at a time) + per-shard checkpoint
+- name: RV-2 step 5 -- upgrade shard Sz (1 replica) + per-shard checkpoint
   hosts: localhost
   connection: local
   gather_facts: false
@@ -506,7 +512,7 @@
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
     # Every source node should now report the same new-build schema version.
-    - name: All 9 source nodes on v_new (schema parity)
+    - name: All 3 source nodes on v_new (schema parity)
       ravendb_diagnostic:
         kind: schema_version
         ravendb_domain: "{{ ravendb_domain }}"

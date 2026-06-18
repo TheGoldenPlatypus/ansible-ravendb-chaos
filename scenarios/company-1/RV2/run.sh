@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scenarios/company-1/RV2/run.sh -- teardown + T4 lab (sharded src @ v_old + non-sharded tgt @ v_new) + rv2.yml.
+# scenarios/company-1/RV2/run.sh -- teardown + lab (3-node sharded src @ v_old + 1-node non-sharded tgt @ v_new) + rv2.yml.
 # Usage: run.sh <v_old> <v_new_deb> [cluster_id_start=1] [docker_network=hubsinknet] [-e foo=bar ...]
 set -euo pipefail
 export PYTHONDONTWRITEBYTECODE=1  # CPython 3.12.0-3.12.3 marshal bug
@@ -25,14 +25,14 @@ C=( -e cluster_id_start="$CID" -e src_cluster_id="$SRC" -e tgt_cluster_id="$TGT"
 
 step() { printf '\n\033[1;36m[%s] %s\033[0m\n' "$(date +%H:%M:%S)" "$*"; }
 
-echo "RV-2  src=${SRC}a..i (sharded, 3x3 = 9 nodes) tgt=${TGT}a (non-sharded, 1 node)  net=$NET  v_old=$V_OLD"
+echo "RV-2  src=${SRC}a..c (sharded, 3 shards x 1 replica = 3 nodes; all-orchestrators) tgt=${TGT}a (non-sharded, 1 node)  net=$NET  v_old=$V_OLD"
 
-# 9 sharded source nodes + 1 non-sharded target = 10 containers total.
+# 3 sharded source nodes + 1 non-sharded target = 4 containers total.
 # Two provision passes because nodes_per_cluster is a single uniform knob; each pass is
 # scoped to its own cluster_id via cluster_id_start + clusters_count=1.  install_ravendb +
-# form_clusters discover containers from the docker network so both runs see all 10.
+# form_clusters discover containers from the docker network so both runs see all 4.
 step "teardown";        ansible-playbook playbooks/teardown_containers.yml "${C[@]}"
-step "provision src (9)"; ansible-playbook playbooks/provision_nodes.yml "${C[@]}" -e cluster_id_start=$SRC -e clusters_count=1 -e nodes_per_cluster=9
+step "provision src (3)"; ansible-playbook playbooks/provision_nodes.yml "${C[@]}" -e cluster_id_start=$SRC -e clusters_count=1 -e nodes_per_cluster=3
 step "provision tgt (1)"; ansible-playbook playbooks/provision_nodes.yml "${C[@]}" -e cluster_id_start=$TGT -e clusters_count=1 -e nodes_per_cluster=1
 
 # Default: role downloads v_old from S3.  Set V_OLD_DEB=<path> in env to use a cached .deb.
@@ -44,7 +44,7 @@ else
   ansible-playbook playbooks/install_ravendb.yml "${C[@]}" -e rdb_version="$V_OLD"
 fi
 
-step "form src (9)";    ansible-playbook playbooks/form_clusters.yml "${C[@]}" -e cluster_id_start=$SRC -e clusters_count=1 -e nodes_per_cluster=9
+step "form src (3)";    ansible-playbook playbooks/form_clusters.yml "${C[@]}" -e cluster_id_start=$SRC -e clusters_count=1 -e nodes_per_cluster=3
 step "form tgt (1)";    ansible-playbook playbooks/form_clusters.yml "${C[@]}" -e cluster_id_start=$TGT -e clusters_count=1 -e nodes_per_cluster=1
 
 # Upgrade target node to v_new so smuggler_import lands hashed-form revisions on it.

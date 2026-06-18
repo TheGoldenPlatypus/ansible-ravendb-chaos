@@ -109,7 +109,7 @@ DEADLINE=$(( $(date +%s) + (MAX_WALL_HRS * 3600) ))
 # 1, 2, 3, ... rather than restarting at 1 each batch.
 # -------------------------------------------------------------------------
 declare -A ITER_COUNTS=(
-  [rv1]=0 [rp1]=0 [rpv1-A]=0 [rpv1-B]=0 [rpv1-C]=0 [rv2]=0 [rv3]=0
+  [rv1]=0 [rp1]=0 [rpv1-A]=0 [rpv1-B]=0 [rpv1-C]=0 [rv2]=0
 )
 
 # Track scenarios that have hit MAX_ITERS_PER_SCENARIO so we skip them on
@@ -204,8 +204,8 @@ run_batch() {
 
     # Per-iter CID + NET so iters of the same scenario never collide on
     # container names (Docker requires globally-unique names per host).
-    # Step is 100 -- leaves room for RV-3's 5-cluster CID range without
-    # bleeding into the next iter's bucket.  Each iter also gets its own
+    # Step is 100 -- generous spacing keeps each iter's CID range well
+    # clear of the next iter's bucket.  Each iter also gets its own
     # docker network so form_clusters.yml's per-network /etc/hosts marker
     # isolates the host block.
     local cid_bump=$(( (iter - 1) * 100 ))
@@ -249,11 +249,6 @@ run_batch() {
         net="net_rv2_iter${iter}"
         run_iter "$name" "$iter" "$net" \
           ./scenarios/company-1/RV2/run.sh "$V_OLD" "$V_NEW" "$cid" "$net" & ;;
-      rv3)
-        cid=$(( 60 + cid_bump ))
-        net="net_rv3_iter${iter}"
-        run_iter "$name" "$iter" "$net" \
-          ./scenarios/company-1/RV3/run.sh "$V_NEW" "$cid" "$net" & ;;
       *)      echo "ERROR: unknown scenario '$name'" >&2; continue ;;
     esac
     pids+=($!)
@@ -272,18 +267,17 @@ run_batch() {
 
 # -------------------------------------------------------------------------
 # Batch layout -- chosen to keep peak container count under kaiju's memory
-# ceiling.  Heaviest scenarios paired with lighter ones; nothing pairs two
-# 9-node clusters with the 21-node RV-3.
+# ceiling.  Heaviest scenarios paired with lighter ones.
 #
-#   Batch A: rv3 (21) + rv1 (3) + rp1 (6)             = 30 nodes  ~75 GB
-#   Batch B: rv2 (10) + rpv1-A (9)                    = 19 nodes  ~48 GB
-#   Batch C: rpv1-B (9) + rpv1-C (9)                  = 18 nodes  ~45 GB
+#   Batch A: rv1 (3) + rp1 (6) + rv2 (4)              = 13 nodes  ~33 GB
+#   Batch B: rpv1-A (9) + rpv1-B (9)                  = 18 nodes  ~45 GB
+#   Batch C: rpv1-C (9)                               =  9 nodes  ~23 GB
 #
 # Override by setting BATCH_A/B/C env vars to space-separated scenario lists.
 # -------------------------------------------------------------------------
-BATCH_A="${BATCH_A:-rv3 rv1 rp1}"
-BATCH_B="${BATCH_B:-rv2 rpv1-A}"
-BATCH_C="${BATCH_C:-rpv1-B rpv1-C}"
+BATCH_A="${BATCH_A:-rv1 rp1 rv2}"
+BATCH_B="${BATCH_B:-rpv1-A rpv1-B}"
+BATCH_C="${BATCH_C:-rpv1-C}"
 
 # -------------------------------------------------------------------------
 # Main loop
@@ -291,7 +285,7 @@ BATCH_C="${BATCH_C:-rpv1-B rpv1-C}"
 all_done() {
   # Returns 0 (true) when every scenario has been marked done.
   local n
-  for n in rv1 rp1 rpv1-A rpv1-B rpv1-C rv2 rv3; do
+  for n in rv1 rp1 rpv1-A rpv1-B rpv1-C rv2; do
     [ -n "${DONE_SCENARIOS[$n]:-}" ] || return 1
   done
   return 0
@@ -308,7 +302,7 @@ while :; do
   else
     # All-parallel mode -- everything in one batch.
     echo "[$(date +%H:%M:%S)] >>> all-parallel batch" >> "$SUMMARY"
-    run_batch rv1 rp1 rpv1-A rpv1-B rpv1-C rv2 rv3
+    run_batch rv1 rp1 rpv1-A rpv1-B rpv1-C rv2
   fi
 
   # Stop conditions.
