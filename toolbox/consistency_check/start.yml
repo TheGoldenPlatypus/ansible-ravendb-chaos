@@ -178,6 +178,11 @@
       changed_when: false
 
     - name: Launch ConsistencyCheck in background
+      # NOTE: no `disown` -- ansible.builtin.shell runs under /bin/sh which doesn't
+      # have it as a builtin (got rc=127 'disown: not found' the first time).  nohup
+      # + & + redirected stdin/stdout/stderr is already enough to detach: nohup
+      # immunizes against SIGHUP when the playbook exits, & backgrounds the process,
+      # and the fd redirects sever any controlling-tty inheritance.
       ansible.builtin.shell: |
         cd {{ _tool_dir }}
         nohup ./ConsistencyCheck \
@@ -185,9 +190,8 @@
           --interval-minutes {{ _interval_minutes }} \
           --health-bind http://127.0.0.1:{{ _health_port }} \
           --health-path /health-check \
-          > {{ _logfile }} 2>&1 &
+          > {{ _logfile }} 2>&1 < /dev/null &
         echo $! > {{ _pidfile }}
-        disown
       changed_when: true
 
     # 5. confirm the tool started and the health endpoint is up
