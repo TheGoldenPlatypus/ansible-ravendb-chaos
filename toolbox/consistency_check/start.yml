@@ -129,6 +129,31 @@
       delay: 2
       until: ss_ready is succeeded
 
+    # Single-node unsecured RavenDB boots in PASSIVE state -- it answers /build/version
+    # but rejects database create/write with NodeIsPassiveException until promoted to
+    # leader of its own (one-member) cluster.  /admin/cluster/bootstrap performs that
+    # promotion.  Idempotent: returns 200 even if the node is already active.
+    - name: Bootstrap state-store node to leader (promote out of passive)
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ _state_store_host_port }}/admin/cluster/bootstrap"
+        method: POST
+        status_code: [200, 204]
+      register: ss_bootstrap
+      retries: 10
+      delay: 2
+      until: ss_bootstrap is succeeded
+
+    - name: Wait until state-store reports itself as cluster member (not passive)
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ _state_store_host_port }}/cluster/topology"
+        method: GET
+        return_content: true
+        status_code: [200]
+      register: ss_topo
+      retries: 15
+      delay: 2
+      until: (ss_topo.json.Status | default({})) != {} or (ss_topo.json.Topology.Members | default({}) | length) > 0
+
     # 3. config.json -- render with leader URLs + cert path + state-store URL
     - name: Ensure output dir exists
       ansible.builtin.file:
