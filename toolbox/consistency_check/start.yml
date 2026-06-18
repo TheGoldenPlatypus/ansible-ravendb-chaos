@@ -136,6 +136,21 @@
         state: directory
         mode: "0755"
 
+    # Wipe stale per-run artifacts (runs/<timestamp>... + cluster/database topology
+    # caches) so the tool doesn't try to resume a repair plan from an earlier
+    # scenario against a different cluster.  Symptom of leaving these around: the
+    # tool boots, finds a stale runs/<old-timestamp>/ entry, attempts to resume
+    # its patch-operation, fails with "RavenDB returned no operation state for
+    # patch operation NNN" repeatedly, and reports HTTP 503 on /health-check.
+    # State-store container is fresh per iter (state: absent + state: started
+    # above), so we just need to clean the local cache here too.
+    - name: Wipe stale local run artifacts (per-iter clean slate)
+      ansible.builtin.shell: |
+        cd {{ _tool_dir }}/output
+        rm -rf runs *.raven-cluster-topology *.raven-database-topology
+        echo "wiped"
+      changed_when: true
+
     - name: Render config.json
       ansible.builtin.copy:
         dest: "{{ _config_path }}"
