@@ -107,7 +107,7 @@
         env:
           RAVEN_License_Eula_Accepted: "true"
           RAVEN_Setup_Mode: "None"
-          RAVEN_Security_UnsecuredAccessAllowed: "PrivateNetwork"
+          RAVEN_Security_UnsecuredAccessAllowed: "PublicNetwork"
           RAVEN_ServerUrl: "http://0.0.0.0:8080"
           RAVEN_ServerUrl_Tcp: "tcp://0.0.0.0:38888"
         published_ports:
