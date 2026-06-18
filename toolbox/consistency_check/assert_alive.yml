@@ -23,7 +23,8 @@
   connection: local
   gather_facts: false
   vars:
-    health_port: "{{ health_port | default(8081) | int }}"
+    # leading underscore to avoid the `var: {{ var | default(...) }}` recursion footgun
+    _health_port: "{{ health_port | default(8081) | int }}"
     _pidfile: "/tmp/ccheck-{{ net }}.pid"
     _logfile: "/tmp/ccheck-{{ net }}.log"
 
@@ -35,7 +36,7 @@
         if [ -z "$pid" ]; then echo "NO_PIDFILE"; exit 2; fi
         if ! kill -0 "$pid" 2>/dev/null; then echo "DEAD pid=$pid"; exit 3; fi
         if ! curl -fsS --max-time 5 -o /dev/null \
-             http://127.0.0.1:{{ health_port }}/health-check; then
+             http://127.0.0.1:{{ _health_port }}/health-check; then
           echo "HEALTH_FAIL pid=$pid"; exit 4
         fi
         echo "ALIVE pid=$pid"

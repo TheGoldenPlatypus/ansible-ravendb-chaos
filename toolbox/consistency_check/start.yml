@@ -53,40 +53,43 @@
   connection: local
   gather_facts: true   # need ansible_env.HOME
   vars:
-    tool_dir: "{{ tool_dir | default(ansible_env.HOME ~ '/company-1/tools/ConsistencyCheck-linux-x64-2/linux-x64') }}"
-    client_pfx_path: "{{ client_pfx_path | default(ansible_env.HOME ~ '/company-1/selfsignedmaterials/client.pfx') }}"
-    state_store_image: "{{ state_store_image | default('ravendb/ravendb:latest') }}"
-    state_store_host_port: "{{ state_store_host_port | default(8084) | int }}"
-    health_port: "{{ health_port | default(8081) | int }}"
-    interval_minutes: "{{ interval_minutes | default(3) | int }}"
-    start_timeout_secs: "{{ start_timeout_secs | default(60) | int }}"
+    # NB: var names use a leading underscore so the `default(...)` lookup against the
+    # bare (override-able) param name doesn't recurse into the same var being defined.
+    # That recursion is what produced the infinite-template error we hit on first launch.
+    _tool_dir: "{{ tool_dir | default(ansible_env.HOME ~ '/company-1/tools/ConsistencyCheck-linux-x64-2/linux-x64') }}"
+    _client_pfx_path: "{{ client_pfx_path | default(ansible_env.HOME ~ '/company-1/selfsignedmaterials/client.pfx') }}"
+    _state_store_image: "{{ state_store_image | default('ravendb/ravendb:latest') }}"
+    _state_store_host_port: "{{ state_store_host_port | default(8084) | int }}"
+    _health_port: "{{ health_port | default(8081) | int }}"
+    _interval_minutes: "{{ interval_minutes | default(3) | int }}"
+    _start_timeout_secs: "{{ start_timeout_secs | default(60) | int }}"
     _state_store_name: "ccstate-{{ net }}"
     _pidfile: "/tmp/ccheck-{{ net }}.pid"
     _logfile: "/tmp/ccheck-{{ net }}.log"
-    _config_path: "{{ tool_dir }}/output/config.json"
+    _config_path: "{{ _tool_dir }}/output/config.json"
 
   tasks:
     # 1. validate binary + cert (fail loud and early if missing)
     - name: Validate ConsistencyCheck binary exists
       ansible.builtin.stat:
-        path: "{{ tool_dir }}/ConsistencyCheck"
+        path: "{{ _tool_dir }}/ConsistencyCheck"
       register: bin_stat
     - name: Assert binary present
       ansible.builtin.assert:
         that: [ bin_stat.stat.exists, bin_stat.stat.executable ]
         fail_msg: >-
           ConsistencyCheck binary missing or not executable at
-          {{ tool_dir }}/ConsistencyCheck.  Download the tool to that path
+          {{ _tool_dir }}/ConsistencyCheck.  Download the tool to that path
           (see scenarios that use it for details) before re-running.
 
     - name: Validate client cert exists
       ansible.builtin.stat:
-        path: "{{ client_pfx_path }}"
+        path: "{{ _client_pfx_path }}"
       register: cert_stat
     - name: Assert cert present
       ansible.builtin.assert:
         that: [ cert_stat.stat.exists ]
-        fail_msg: "Client cert PFX missing at {{ client_pfx_path }}"
+        fail_msg: "Client cert PFX missing at {{ _client_pfx_path }}"
 
     # 2. state store container -- unsecured single-node RavenDB on the iter's network
     - name: Pull ccstate container if a previous run is still around
@@ -100,7 +103,7 @@
     - name: Launch state-store RavenDB container
       community.docker.docker_container:
         name: "{{ _state_store_name }}"
-        image: "{{ state_store_image }}"
+        image: "{{ _state_store_image }}"
         state: started
         restart_policy: unless-stopped
         # Unsecured single-node setup.  The tool creates its own ConsistencyCheck.State db.
@@ -111,14 +114,14 @@
           RAVEN_ServerUrl: "http://0.0.0.0:8080"
           RAVEN_ServerUrl_Tcp: "tcp://0.0.0.0:38888"
         published_ports:
-          - "127.0.0.1:{{ state_store_host_port }}:8080"
+          - "127.0.0.1:{{ _state_store_host_port }}:8080"
         networks:
           - name: "{{ net }}"
         networks_cli_compatible: true
 
     - name: Wait for state-store endpoint to respond
       ansible.builtin.uri:
-        url: "http://127.0.0.1:{{ state_store_host_port }}/build/version"
+        url: "http://127.0.0.1:{{ _state_store_host_port }}/build/version"
         method: GET
         status_code: [200]
       register: ss_ready
@@ -129,7 +132,7 @@
     # 3. config.json -- render with leader URLs + cert path + state-store URL
     - name: Ensure output dir exists
       ansible.builtin.file:
-        path: "{{ tool_dir }}/output"
+        path: "{{ _tool_dir }}/output"
         state: directory
         mode: "0755"
 
@@ -144,7 +147,7 @@
           {% for n in node_leaders %}      { "Label": "{{ n.label }}", "Url": "https://{{ n.host }}.{{ ravendb_domain }}:443" }{% if not loop.last %},{% endif %}
           {% endfor %}    ],
             "SourceNodeIndex": 0,
-            "CertificatePath": "{{ client_pfx_path }}",
+            "CertificatePath": "{{ _client_pfx_path }}",
             "CertificatePassword": null,
             "Mode": "FirstMismatch",
             "RunMode": "ApplyRepair",
@@ -156,7 +159,7 @@
               "ClusterLookupBatchSize": 512
             },
             "StateStore": {
-              "ServerUrl": "http://127.0.0.1:{{ state_store_host_port }}",
+              "ServerUrl": "http://127.0.0.1:{{ _state_store_host_port }}",
               "DatabaseName": "ConsistencyCheck.State",
               "EnableDiagnostics": true
             },
@@ -176,11 +179,11 @@
 
     - name: Launch ConsistencyCheck in background
       ansible.builtin.shell: |
-        cd {{ tool_dir }}
+        cd {{ _tool_dir }}
         nohup ./ConsistencyCheck \
           --profile live-etag-all-nodes-recurring \
-          --interval-minutes {{ interval_minutes }} \
-          --health-bind http://127.0.0.1:{{ health_port }} \
+          --interval-minutes {{ _interval_minutes }} \
+          --health-bind http://127.0.0.1:{{ _health_port }} \
           --health-path /health-check \
           > {{ _logfile }} 2>&1 &
         echo $! > {{ _pidfile }}
@@ -197,11 +200,11 @@
 
     - name: Wait for /health-check to return 200
       ansible.builtin.uri:
-        url: "http://127.0.0.1:{{ health_port }}/health-check"
+        url: "http://127.0.0.1:{{ _health_port }}/health-check"
         method: GET
         status_code: [200]
       register: health_ready
-      retries: "{{ (start_timeout_secs | int) // 2 }}"
+      retries: "{{ (_start_timeout_secs | int) // 2 }}"
       delay: 2
       until: health_ready is succeeded
 
@@ -209,6 +212,6 @@
       ansible.builtin.debug:
         msg: >-
           ConsistencyCheck STARTED  net={{ net }}  pid={{ (pid_check.stdout | regex_replace('.*pid=', '')) }}
-          state-store=http://127.0.0.1:{{ state_store_host_port }}
-          health=http://127.0.0.1:{{ health_port }}/health-check
+          state-store=http://127.0.0.1:{{ _state_store_host_port }}
+          health=http://127.0.0.1:{{ _health_port }}/health-check
           log={{ _logfile }}  config={{ _config_path }}
