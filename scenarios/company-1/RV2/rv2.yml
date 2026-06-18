@@ -91,11 +91,12 @@
   vars_files: [vars.yml]
   tasks:
     # Source side: a sharded database with 3 shards spread across the 3 source nodes
-    # (one shard per node, 1 replica each).  RavenDB's create_sharded default makes
-    # ALL cluster members orchestrators when an explicit list isn't supplied -- which
-    # on this 3-node cluster gives the all-orchestrators topology Karmel specified.
-    # (The installed ravendb_sharding module doesn't accept orchestrator_members.)
-    - name: "Create sharded db1 on source leader (3 shards x 1 replica, all-orchestrators by default)"
+    # (one shard per node, 1 replica each).  All 3 nodes are also orchestrators -- the
+    # spec calls for explicit all-orchestrators, not the server's default (which picks
+    # a single node).  ravendb_sharding accepts orchestrator_members; on kaiju this
+    # requires main merged into feat/scenarios-fresh (the hybrid-override commit lives
+    # on main per the library-on-main convention).
+    - name: "Create sharded db1 on source leader (3 shards x 1 replica, all-orchestrators)"
       ravendb_sharding:
         kind: create_sharded
         ravendb_domain: "{{ ravendb_domain }}"
@@ -104,6 +105,7 @@
         cluster_leader: "{{ src_leader }}"
         db_name: db1
         shards: "{{ shard_topology }}"
+        orchestrator_members: "{{ orchestrator_members }}"
       register: r
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
