@@ -58,6 +58,8 @@
 
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
   vars: { pidfile: "/tmp/w1-{{ src_cluster_id | default(1) }}a-db1.pid" }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars: { pidfile: "/tmp/w1c-{{ src_cluster_id | default(1) }}a-db1.pid" }
 
 - name: RV-2 pre -- validate inputs + show plan
   hosts: localhost
@@ -161,7 +163,7 @@
 
 # ----- step 2: phase (a) -- start W-1; sharding spreads its writes across all 3 shards --------
 
-- name: RV-2 step 2 -- launch W-1 on source leader (sharding distributes per docId)
+- name: RV-2 step 2 -- launch W-1 + W-1C on source leader (sharding distributes per docId)
   hosts: localhost
   connection: local
   gather_facts: false
@@ -181,8 +183,26 @@
       async: 14400
       poll: 0
 
+    # W-1C sidecar -- cluster-wide-tx variant on the SAME doc pool as W-1.  Mirrors
+    # W-1's writer count 1:1 (here: 1 writer) per Karmel's "alongside W-1" rule.
+    - name: Launch W-1C (cluster-wide tx sidecar, background, async)
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w1c/workload_w1c.sh"
+      environment:
+        TARGET:       "{{ src_leader }}"
+        DB_NAME:      db1
+        ID_PREFIX:    "{{ seed_prefix | default('seed') }}"
+        POOL_SIZE:    "{{ seed_count | default(30000) | int }}"
+        RAVEN_DOMAIN: "{{ ravendb_domain }}"
+        CERT_PEM:     "{{ cert_dir }}/client.pem"
+        CA_CRT:       "{{ cert_ca_crt }}"
+      async: 14400
+      poll: 0
+
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
   vars: { pidfile: "/tmp/w1-{{ src_cluster_id | default(1) }}a-db1.pid", timeout_secs: 30 }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars: { pidfile: "/tmp/w1c-{{ src_cluster_id | default(1) }}a-db1.pid", timeout_secs: 30 }
 
 
 # ----- step 3: phase (a) -- upgrade shard Sx one replica at a time (1a, 1b, 1c) + checkpoint --
@@ -313,9 +333,13 @@
 
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/assert_workload_alive.yml
   vars: { pidfile: "/tmp/w1-{{ src_cluster_id | default(1) }}a-db1.pid" }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/assert_workload_alive.yml
+  vars: { pidfile: "/tmp/w1c-{{ src_cluster_id | default(1) }}a-db1.pid" }
 
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
   vars: { pidfile: "/tmp/w1-{{ src_cluster_id | default(1) }}a-db1.pid" }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars: { pidfile: "/tmp/w1c-{{ src_cluster_id | default(1) }}a-db1.pid" }
 
 - name: RV-2 step 6 -- drain + tombstone settle + per-shard final asserts
   hosts: localhost

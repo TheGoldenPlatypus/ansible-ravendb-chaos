@@ -102,6 +102,17 @@
   vars:
     pidfile: "/tmp/w2-{{ hub_id | default(1) }}a-db1.pid"
 
+# W-1C orphan-kill (sidecar pidfiles -- mirrors W-1 across hub + 2 sinks)
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars:
+    pidfile: "/tmp/w1c-{{ hub_id | default(1) }}a-db1.pid"
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars:
+    pidfile: "/tmp/w1c-{{ sink1_id | default(2) }}a-db1.pid"
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars:
+    pidfile: "/tmp/w1c-{{ sink2_id | default(3) }}a-db1.pid"
+
 - name: RPV-1 pre -- validate inputs + show plan
   hosts: localhost
   connection: local
@@ -653,6 +664,20 @@
       async: 14400
       poll: 0
 
+    # W-1C sidecar on hub -- cluster-wide-tx variant, same buckets_spec.
+    - name: Launch W-1C on hub (cluster-wide tx sidecar, background async)
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w1c/workload_w1c.sh"
+      environment:
+        TARGET:        "{{ hub_id | default(1) }}a"
+        DB_NAME:       "{{ db_name }}"
+        BUCKETS_SPEC:  "{{ workload_buckets_spec }}"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: 14400
+      poll: 0
+
     - name: Launch W-2 (doc-extension churn, same 7-bucket 40/40/20 split, background async)
       ansible.builtin.command:
         cmd: "bash {{ playbook_dir }}/../workloads/w2/workload_w2.sh"
@@ -682,9 +707,37 @@
       async: 14400
       poll: 0
 
+    # W-1C sidecar on sink-1 (mirrors W-1-Sink-1 with same pool).
+    - name: Launch W-1C-Sink-1 (cluster-wide tx sidecar on sink-1 leader, background async)
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w1c/workload_w1c.sh"
+      environment:
+        TARGET:        "{{ sink1_id | default(2) }}a"
+        DB_NAME:       "{{ db_name }}"
+        BUCKETS_SPEC:  "sink1-local/users:{{ sink1_local_seed_count | default(2000) | int }}:100"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: 14400
+      poll: 0
+
     - name: Launch W-1-Sink-2 (sink-local CRUD churn on sink-2 leader, background async)
       ansible.builtin.command:
         cmd: "bash {{ playbook_dir }}/../workloads/w1/workload_w1.sh"
+      environment:
+        TARGET:        "{{ sink2_id | default(3) }}a"
+        DB_NAME:       "{{ db_name }}"
+        BUCKETS_SPEC:  "sink2-local/users:{{ sink2_local_seed_count | default(2000) | int }}:100"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: 14400
+      poll: 0
+
+    # W-1C sidecar on sink-2 (mirrors W-1-Sink-2 with same pool).
+    - name: Launch W-1C-Sink-2 (cluster-wide tx sidecar on sink-2 leader, background async)
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w1c/workload_w1c.sh"
       environment:
         TARGET:        "{{ sink2_id | default(3) }}a"
         DB_NAME:       "{{ db_name }}"
@@ -713,6 +766,22 @@
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
   vars:
     pidfile: "/tmp/w1-{{ sink2_id | default(3) }}a-db1.pid"
+    timeout_secs: 30
+
+# W-1C wait_for_started (sidecar pidfiles -- one per W-1 launch above)
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars:
+    pidfile: "/tmp/w1c-{{ hub_id | default(1) }}a-db1.pid"
+    timeout_secs: 30
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars:
+    pidfile: "/tmp/w1c-{{ sink1_id | default(2) }}a-db1.pid"
+    timeout_secs: 30
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars:
+    pidfile: "/tmp/w1c-{{ sink2_id | default(3) }}a-db1.pid"
     timeout_secs: 30
 
 
@@ -1294,6 +1363,11 @@
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/assert_workload_alive.yml
   vars: { pidfile: "/tmp/w2-{{ hub_id | default(1) }}a-db1.pid" }
 
+# W-1C assert_alive (hub-side sidecar; sink-side sidecars left to die at scenario end,
+# mirroring how the existing W-1 sink launches are handled today).
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/assert_workload_alive.yml
+  vars: { pidfile: "/tmp/w1c-{{ hub_id | default(1) }}a-db1.pid" }
+
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
   vars:
     pidfile: "/tmp/w1-{{ hub_id | default(1) }}a-db1.pid"
@@ -1301,6 +1375,10 @@
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
   vars:
     pidfile: "/tmp/w2-{{ hub_id | default(1) }}a-db1.pid"
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars:
+    pidfile: "/tmp/w1c-{{ hub_id | default(1) }}a-db1.pid"
 
 - name: RPV-1 step 12 -- final convergence + deep parity (quiet cluster)
   hosts: localhost

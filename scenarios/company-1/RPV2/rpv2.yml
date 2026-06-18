@@ -67,6 +67,9 @@
   vars: { pidfile: "/tmp/w2-{{ hub_id | default(1) }}a-db1.pid" }
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
   vars: { pidfile: "/tmp/w3-{{ hub_id | default(1) }}a-db1.pid" }
+# W-1C orphan-kill (sidecar pidfiles on hub + the r1-snap-target burst from step 15)
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars: { pidfile: "/tmp/w1c-{{ hub_id | default(1) }}a-db1.pid" }
 
 - name: RPV-2 pre -- validate inputs + show plan
   hosts: localhost
@@ -356,6 +359,21 @@
       async: "{{ phase_a_w1_w2_duration_secs | int + 120 }}"
       poll: 0
 
+    # W-1C sidecar (cluster-wide tx variant on the same pool, same duration).
+    - name: Launch W-1C (background)
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w1c/workload_w1c.sh"
+      environment:
+        TARGET:        "{{ hub_cluster_leader }}"
+        DB_NAME:       db1
+        BUCKETS_SPEC:  "{{ workload_buckets_spec }}"
+        DURATION_SECS: "{{ phase_a_w1_w2_duration_secs | int }}"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: "{{ phase_a_w1_w2_duration_secs | int + 120 }}"
+      poll: 0
+
     - name: Launch W-2 (background)
       ansible.builtin.command:
         cmd: "bash {{ playbook_dir }}/../workloads/w2/workload_w2.sh"
@@ -374,10 +392,14 @@
   vars: { pidfile: "/tmp/w1-{{ hub_id | default(1) }}a-db1.pid", timeout_secs: 30 }
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
   vars: { pidfile: "/tmp/w2-{{ hub_id | default(1) }}a-db1.pid", timeout_secs: 30 }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars: { pidfile: "/tmp/w1c-{{ hub_id | default(1) }}a-db1.pid", timeout_secs: 30 }
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/assert_workload_alive.yml
   vars: { pidfile: "/tmp/w1-{{ hub_id | default(1) }}a-db1.pid" }
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/assert_workload_alive.yml
   vars: { pidfile: "/tmp/w2-{{ hub_id | default(1) }}a-db1.pid" }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/assert_workload_alive.yml
+  vars: { pidfile: "/tmp/w1c-{{ hub_id | default(1) }}a-db1.pid" }
 
 
 # ===== step 4: phase (a) checkpoint -- I-1, I-2 cross-form CV equality, I-3, I-6 ===============
@@ -385,28 +407,30 @@
 # and run the parity asserts.  W-1+W-2 will be restarted in phase (c) before backups; we
 # tear them down here so phase (a) -> (b) -> (c) form a clean sequence.
 
-- name: RPV-2 step 4 -- wait for W-1+W-2 to finish; drain; phase (a) checkpoint
+- name: RPV-2 step 4 -- wait for W-1+W-2+W-1C to finish; drain; phase (a) checkpoint
   hosts: localhost
   connection: local
   gather_facts: false
   vars_files: [vars.yml]
   tasks:
-    - name: Wait for W-1 to finish (internal loop, no retry spam)
+    - name: Wait for W-1 + W-1C to finish (both share DURATION_SECS; check sequentially)
       ansible.builtin.shell: |
         set -u
-        pidfile=/tmp/w1-{{ hub_id | default(1) }}a-db1.pid
         deadline=$(( $(date +%s) + {{ phase_a_w1_w2_duration_secs | int + 300 }} ))
-        while [ $(date +%s) -lt $deadline ]; do
-          if [ ! -f "$pidfile" ]; then echo "FINISHED"; exit 0; fi
-          PID=$(cat "$pidfile" 2>/dev/null || true)
-          if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then echo "FINISHED"; exit 0; fi
-          sleep 5
+        for pidfile in /tmp/w1-{{ hub_id | default(1) }}a-db1.pid \
+                       /tmp/w1c-{{ hub_id | default(1) }}a-db1.pid; do
+          while [ $(date +%s) -lt $deadline ]; do
+            if [ ! -f "$pidfile" ]; then break; fi
+            PID=$(cat "$pidfile" 2>/dev/null || true)
+            if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then break; fi
+            sleep 5
+          done
         done
-        echo "TIMEOUT"; exit 124
+        echo "FINISHED"
       register: w1_poll
       changed_when: false
-    - name: Show W-1 status
-      ansible.builtin.debug: { msg: "W-1 status: {{ w1_poll.stdout }}" }
+    - name: Show W-1/W-1C status
+      ansible.builtin.debug: { msg: "W-1+W-1C status: {{ w1_poll.stdout }}" }
 
     - name: Wait for W-2 to finish
       ansible.builtin.shell: |
@@ -649,6 +673,21 @@
       async: "{{ phase_c_w1_w2_extension_secs | int + 120 }}"
       poll: 0
 
+    # W-1C sidecar for the phase-(c) window.
+    - name: Launch W-1C for the phase-(c) window
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w1c/workload_w1c.sh"
+      environment:
+        TARGET:        "{{ hub_cluster_leader }}"
+        DB_NAME:       db1
+        BUCKETS_SPEC:  "{{ workload_buckets_spec }}"
+        DURATION_SECS: "{{ phase_c_w1_w2_extension_secs | int }}"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: "{{ phase_c_w1_w2_extension_secs | int + 120 }}"
+      poll: 0
+
     - name: Launch W-2 for the phase-(c) window
       ansible.builtin.command:
         cmd: "bash {{ playbook_dir }}/../workloads/w2/workload_w2.sh"
@@ -667,6 +706,8 @@
   vars: { pidfile: "/tmp/w1-{{ hub_id | default(1) }}a-db1.pid", timeout_secs: 30 }
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
   vars: { pidfile: "/tmp/w2-{{ hub_id | default(1) }}a-db1.pid", timeout_secs: 30 }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars: { pidfile: "/tmp/w1c-{{ hub_id | default(1) }}a-db1.pid", timeout_secs: 30 }
 
 - name: RPV-2 step 7 -- snapshot backup of hub (replication is live)
   hosts: localhost
@@ -1108,18 +1149,36 @@
       async: "{{ phase_a_w1_w2_duration_secs | int + 120 }}"
       poll: 0
 
-    - name: Wait for W-1 to finish on r1-snap-target
+    # W-1C sidecar against the restored source (same pool, cluster-wide tx).
+    - name: Launch W-1C burst against r1-snap-target
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w1c/workload_w1c.sh"
+      environment:
+        TARGET:        "{{ r1_snap_leader }}"
+        DB_NAME:       db1
+        ID_PREFIX:     users/sink1
+        POOL_SIZE:     "{{ seed_users_sink1_count | int }}"
+        DURATION_SECS: "{{ phase_a_w1_w2_duration_secs | int }}"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: "{{ phase_a_w1_w2_duration_secs | int + 120 }}"
+      poll: 0
+
+    - name: Wait for W-1 + W-1C to finish on r1-snap-target
       ansible.builtin.shell: |
         set -u
-        pidfile=/tmp/w1-{{ r1_snap_leader }}-db1.pid
         deadline=$(( $(date +%s) + {{ phase_a_w1_w2_duration_secs | int + 300 }} ))
-        while [ $(date +%s) -lt $deadline ]; do
-          if [ ! -f "$pidfile" ]; then echo "FINISHED"; exit 0; fi
-          PID=$(cat "$pidfile" 2>/dev/null || true)
-          if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then echo "FINISHED"; exit 0; fi
-          sleep 5
+        for pidfile in /tmp/w1-{{ r1_snap_leader }}-db1.pid \
+                       /tmp/w1c-{{ r1_snap_leader }}-db1.pid; do
+          while [ $(date +%s) -lt $deadline ]; do
+            if [ ! -f "$pidfile" ]; then break; fi
+            PID=$(cat "$pidfile" 2>/dev/null || true)
+            if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then break; fi
+            sleep 5
+          done
         done
-        echo "TIMEOUT"; exit 124
+        echo "FINISHED"
       register: w1_resink_poll
       changed_when: false
     - name: Show W-1 status
@@ -1288,6 +1347,21 @@
       async: "{{ (r2_failover_at_secs | int) + 180 + 120 }}"
       poll: 0
 
+    # W-1C sidecar for the round-2 phase-(a) window.
+    - name: Launch W-1C for the round-2 phase-(a) window
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w1c/workload_w1c.sh"
+      environment:
+        TARGET:        "{{ hub_cluster_leader }}"
+        DB_NAME:       db1
+        BUCKETS_SPEC:  "{{ workload_buckets_spec }}"
+        DURATION_SECS: "{{ (r2_failover_at_secs | int) + 180 }}"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: "{{ (r2_failover_at_secs | int) + 180 + 120 }}"
+      poll: 0
+
     - name: Launch W-2 for the round-2 phase-(a) window
       ansible.builtin.command:
         cmd: "bash {{ playbook_dir }}/../workloads/w2/workload_w2.sh"
@@ -1306,6 +1380,8 @@
   vars: { pidfile: "/tmp/w1-{{ hub_id | default(1) }}a-db1.pid", timeout_secs: 30 }
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
   vars: { pidfile: "/tmp/w2-{{ hub_id | default(1) }}a-db1.pid", timeout_secs: 30 }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars: { pidfile: "/tmp/w1c-{{ hub_id | default(1) }}a-db1.pid", timeout_secs: 30 }
 
 - name: RPV-2 step 19 -- sleep r2_failover_at_secs ({{ '{{' }} r2_failover_at_secs {{ '}}' }}s) baseline
   hosts: localhost
@@ -1507,6 +1583,21 @@
       async: "{{ phase_b_w3_duration_secs | int + 180 }}"
       poll: 0
 
+    # W-1C sidecar for the round-2 phase-(b) window.
+    - name: Launch W-1C for the round-2 phase-(b) window
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w1c/workload_w1c.sh"
+      environment:
+        TARGET:        "{{ hub_cluster_leader }}"
+        DB_NAME:       db1
+        BUCKETS_SPEC:  "{{ workload_buckets_spec }}"
+        DURATION_SECS: "{{ phase_b_w3_duration_secs | int + 60 }}"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: "{{ phase_b_w3_duration_secs | int + 180 }}"
+      poll: 0
+
     - name: Launch W-2 for the round-2 phase-(b) window
       ansible.builtin.command:
         cmd: "bash {{ playbook_dir }}/../workloads/w2/workload_w2.sh"
@@ -1549,13 +1640,14 @@
   gather_facts: false
   vars_files: [vars.yml]
   tasks:
-    - name: Wait for W-1+W-2+W-3 to finish
+    - name: Wait for W-1+W-2+W-3+W-1C to finish
       ansible.builtin.shell: |
         set -u
         deadline=$(( $(date +%s) + 400 ))
         for pf in /tmp/w1-{{ hub_id | default(1) }}a-db1.pid \
                   /tmp/w2-{{ hub_id | default(1) }}a-db1.pid \
-                  /tmp/w3-{{ hub_id | default(1) }}a-db1.pid; do
+                  /tmp/w3-{{ hub_id | default(1) }}a-db1.pid \
+                  /tmp/w1c-{{ hub_id | default(1) }}a-db1.pid; do
           while [ $(date +%s) -lt $deadline ] && [ -f "$pf" ]; do
             PID=$(cat "$pf" 2>/dev/null || true)
             [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null && break
@@ -1630,6 +1722,21 @@
       async: "{{ phase_c_w1_w2_extension_secs | int + 120 }}"
       poll: 0
 
+    # W-1C sidecar for the round-2 phase-(c) window.
+    - name: Launch W-1C for the phase-(c) window (round-2)
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w1c/workload_w1c.sh"
+      environment:
+        TARGET:        "{{ hub_cluster_leader }}"
+        DB_NAME:       db1
+        BUCKETS_SPEC:  "{{ workload_buckets_spec }}"
+        DURATION_SECS: "{{ phase_c_w1_w2_extension_secs | int }}"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: "{{ phase_c_w1_w2_extension_secs | int + 120 }}"
+      poll: 0
+
     - name: Launch W-2 for the phase-(c) window
       ansible.builtin.command:
         cmd: "bash {{ playbook_dir }}/../workloads/w2/workload_w2.sh"
@@ -1648,6 +1755,8 @@
   vars: { pidfile: "/tmp/w1-{{ hub_id | default(1) }}a-db1.pid", timeout_secs: 30 }
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
   vars: { pidfile: "/tmp/w2-{{ hub_id | default(1) }}a-db1.pid", timeout_secs: 30 }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars: { pidfile: "/tmp/w1c-{{ hub_id | default(1) }}a-db1.pid", timeout_secs: 30 }
 
 - name: RPV-2 step 25 -- snapshot + smuggler backups
   hosts: localhost
@@ -1996,18 +2105,36 @@
       async: "{{ phase_a_w1_w2_duration_secs | int + 120 }}"
       poll: 0
 
-    - name: Wait for W-1 to finish on r2-snap-target
+    # W-1C sidecar against the r2-snap-target.
+    - name: Launch W-1C burst against r2-snap-target
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w1c/workload_w1c.sh"
+      environment:
+        TARGET:        "{{ r2_snap_leader }}"
+        DB_NAME:       db1
+        ID_PREFIX:     users/sink1
+        POOL_SIZE:     "{{ seed_users_sink1_count | int }}"
+        DURATION_SECS: "{{ phase_a_w1_w2_duration_secs | int }}"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: "{{ phase_a_w1_w2_duration_secs | int + 120 }}"
+      poll: 0
+
+    - name: Wait for W-1 + W-1C to finish on r2-snap-target
       ansible.builtin.shell: |
         set -u
-        pidfile=/tmp/w1-{{ r2_snap_leader }}-db1.pid
         deadline=$(( $(date +%s) + {{ phase_a_w1_w2_duration_secs | int + 300 }} ))
-        while [ $(date +%s) -lt $deadline ]; do
-          [ -f "$pidfile" ] || { echo "FINISHED"; exit 0; }
-          PID=$(cat "$pidfile" 2>/dev/null || true)
-          [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null && { echo "FINISHED"; exit 0; }
-          sleep 5
+        for pidfile in /tmp/w1-{{ r2_snap_leader }}-db1.pid \
+                       /tmp/w1c-{{ r2_snap_leader }}-db1.pid; do
+          while [ $(date +%s) -lt $deadline ]; do
+            [ -f "$pidfile" ] || break
+            PID=$(cat "$pidfile" 2>/dev/null || true)
+            [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null && break
+            sleep 5
+          done
         done
-        echo "TIMEOUT"; exit 124
+        echo "FINISHED"
       register: w1_r2e
       changed_when: false
     - name: Show W-1 status

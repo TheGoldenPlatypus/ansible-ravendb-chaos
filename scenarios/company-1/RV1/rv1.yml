@@ -66,6 +66,15 @@
   vars: { pidfile: "/tmp/w1-{{ cluster_id | default(1) }}a-db1-w3.pid" }
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
   vars: { pidfile: "/tmp/w1-{{ cluster_id | default(1) }}a-db1-w4.pid" }
+# W-1C orphan-kill (sidecar pidfiles -- one per writer, mirrors W-1's 4-writer fan-out)
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars: { pidfile: "/tmp/w1c-{{ cluster_id | default(1) }}a-db1-w1.pid" }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars: { pidfile: "/tmp/w1c-{{ cluster_id | default(1) }}a-db1-w2.pid" }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars: { pidfile: "/tmp/w1c-{{ cluster_id | default(1) }}a-db1-w3.pid" }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars: { pidfile: "/tmp/w1c-{{ cluster_id | default(1) }}a-db1-w4.pid" }
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
   vars: { pidfile: "/tmp/w3-{{ cluster_id | default(1) }}a-db1.pid" }
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
@@ -189,7 +198,7 @@
 
 # ----- step 3: start the four background writers that keep traffic flowing during the upgrade -
 
-- name: RV-1 step 3 -- launch W-1 x {{ phase1_writers | default(4) }} writers in background
+- name: RV-1 step 3 -- launch W-1 + W-1C x {{ phase1_writers | default(4) }} writers each in background
   hosts: localhost
   connection: local
   gather_facts: false
@@ -213,6 +222,26 @@
       loop_control:
         label: "{{ item }}"
 
+    # W-1C sidecar -- cluster-wide-tx variant on the same pool, mirrors W-1 1:1
+    # (same writer count, same target, same ID_PREFIX / POOL_SIZE).
+    - name: Launch W-1C writer (cluster-wide tx sidecar, background, async)
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w1c/workload_w1c.sh"
+      environment:
+        TARGET:        "{{ cluster_id | default(1) }}a"
+        DB_NAME:       "{{ db_name }}"
+        ID_PREFIX:     "{{ phase1_seed_prefix }}"
+        POOL_SIZE:     "{{ phase1_seed_count }}"
+        WRITER_ID:     "{{ item }}"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: 14400
+      poll: 0
+      loop: "{{ range(1, (phase1_writers | int) + 1) | list }}"
+      loop_control:
+        label: "{{ item }}"
+
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
   vars: { pidfile: "/tmp/w1-{{ cluster_id | default(1) }}a-db1-w1.pid", timeout_secs: 30 }
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
@@ -221,6 +250,14 @@
   vars: { pidfile: "/tmp/w1-{{ cluster_id | default(1) }}a-db1-w3.pid", timeout_secs: 30 }
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
   vars: { pidfile: "/tmp/w1-{{ cluster_id | default(1) }}a-db1-w4.pid", timeout_secs: 30 }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars: { pidfile: "/tmp/w1c-{{ cluster_id | default(1) }}a-db1-w1.pid", timeout_secs: 30 }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars: { pidfile: "/tmp/w1c-{{ cluster_id | default(1) }}a-db1-w2.pid", timeout_secs: 30 }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars: { pidfile: "/tmp/w1c-{{ cluster_id | default(1) }}a-db1-w3.pid", timeout_secs: 30 }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars: { pidfile: "/tmp/w1c-{{ cluster_id | default(1) }}a-db1-w4.pid", timeout_secs: 30 }
 
 
 # ----- step 4: upgrade node 1a and run the light mid-roll checkpoint --------------------------
@@ -423,6 +460,14 @@
   vars: { pidfile: "/tmp/w1-{{ cluster_id | default(1) }}a-db1-w3.pid" }
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/assert_workload_alive.yml
   vars: { pidfile: "/tmp/w1-{{ cluster_id | default(1) }}a-db1-w4.pid" }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/assert_workload_alive.yml
+  vars: { pidfile: "/tmp/w1c-{{ cluster_id | default(1) }}a-db1-w1.pid" }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/assert_workload_alive.yml
+  vars: { pidfile: "/tmp/w1c-{{ cluster_id | default(1) }}a-db1-w2.pid" }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/assert_workload_alive.yml
+  vars: { pidfile: "/tmp/w1c-{{ cluster_id | default(1) }}a-db1-w3.pid" }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/assert_workload_alive.yml
+  vars: { pidfile: "/tmp/w1c-{{ cluster_id | default(1) }}a-db1-w4.pid" }
 
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
   vars: { pidfile: "/tmp/w1-{{ cluster_id | default(1) }}a-db1-w1.pid" }
@@ -432,6 +477,14 @@
   vars: { pidfile: "/tmp/w1-{{ cluster_id | default(1) }}a-db1-w3.pid" }
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
   vars: { pidfile: "/tmp/w1-{{ cluster_id | default(1) }}a-db1-w4.pid" }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars: { pidfile: "/tmp/w1c-{{ cluster_id | default(1) }}a-db1-w1.pid" }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars: { pidfile: "/tmp/w1c-{{ cluster_id | default(1) }}a-db1-w2.pid" }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars: { pidfile: "/tmp/w1c-{{ cluster_id | default(1) }}a-db1-w3.pid" }
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars: { pidfile: "/tmp/w1c-{{ cluster_id | default(1) }}a-db1-w4.pid" }
 
 - name: RV-1 step 6 -- post-W-1-stop drain + tombstone settle
   hosts: localhost
