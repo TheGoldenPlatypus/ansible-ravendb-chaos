@@ -22,6 +22,10 @@ cd "$(dirname "$0")/../../.."
 HUB="$CID"; SINK=$((CID + 1))
 C=( -e cluster_id_start="$CID" -e hub_id="$HUB" -e sink_id="$SINK"
     -e docker_network_name="$NET" -e backups_volume_name="lab_backups_$NET" )
+# Overnight runner sets DOCKER_NETWORK_SUBNET to pin container IPs so post-mortem
+# `docker start` returns each container to its original IP.  Single-scenario runs
+# leave it unset and fall back to Docker auto-assign.
+[ -n "${DOCKER_NETWORK_SUBNET:-}" ] && C+=( -e docker_network_subnet="$DOCKER_NETWORK_SUBNET" )
 
 step() { printf '\n\033[1;36m[%s] %s\033[0m\n' "$(date +%H:%M:%S)" "$*"; }
 

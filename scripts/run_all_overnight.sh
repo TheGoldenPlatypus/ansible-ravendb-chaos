@@ -186,6 +186,31 @@ run_iter() {
 }
 
 # -------------------------------------------------------------------------
+# Compute the docker-network subnet for one scenario+iter so containers get
+# pinned IPs across `docker stop` + `docker start` (post-mortem inspection).
+#
+# Each scenario reserves a 10-octet block under 172.30.0.0/16; iter N picks
+# offset N-1 inside that block.  Subnets across all 6 scenarios x ~10 iters
+# all stay disjoint (max 69 << 256).  provision_nodes.yml maps cluster_id +
+# letter -> a deterministic ipv4 inside this /24 (see its header for the
+# formula).
+# -------------------------------------------------------------------------
+compute_subnet() {
+  local scen="$1" iter="$2"
+  local base
+  case "$scen" in
+    rv1)    base=10 ;;
+    rp1)    base=20 ;;
+    rpv1-A) base=30 ;;
+    rpv1-B) base=40 ;;
+    rpv1-C) base=50 ;;
+    rv2)    base=60 ;;
+    *)      return 1 ;;
+  esac
+  printf '172.30.%d.0/24' "$(( base + iter - 1 ))"
+}
+
+# -------------------------------------------------------------------------
 # Launch ONE iteration of each scenario in a batch in parallel, wait for
 # the batch to fully drain (barrier), then return.  Skips scenarios that
 # have already hit MAX_ITERS_PER_SCENARIO.
@@ -209,46 +234,59 @@ run_batch() {
     # docker network so form_clusters.yml's per-network /etc/hosts marker
     # isolates the host block.
     local cid_bump=$(( (iter - 1) * 100 ))
-    local net cid cid2
+    local net cid cid2 subnet
 
-    # Dispatch the per-scenario command in a background subshell.
+    # Per-scenario+iter subnet for pinned container IPs.  Each scenario's
+    # run.sh propagates DOCKER_NETWORK_SUBNET to provision_nodes.yml so
+    # containers get deterministic ipv4s within the /24.
+    subnet=$(compute_subnet "$name" "$iter") || subnet=""
+
+    # Dispatch the per-scenario command in a background subshell.  The
+    # subshell wrapper scopes the DOCKER_NETWORK_SUBNET export so parallel
+    # scenarios don't race on the env var.
     case "$name" in
       rv1)
         cid=$(( 1 + cid_bump ))
         net="net_rv1_iter${iter}"
-        run_iter "$name" "$iter" "$net" \
-          ./scenarios/company-1/RV1/run.sh "$V_OLD" "$V_NEW" "$cid" "$net" & ;;
+        ( export DOCKER_NETWORK_SUBNET="$subnet"
+          run_iter "$name" "$iter" "$net" \
+            ./scenarios/company-1/RV1/run.sh "$V_OLD" "$V_NEW" "$cid" "$net" ) & ;;
       rp1)
         cid=$(( 10 + cid_bump ))
         net="net_rp1_iter${iter}"
-        run_iter "$name" "$iter" "$net" \
-          ./scenarios/company-1/RP1/run.sh "$V_NEW" "$cid" "$net" & ;;
+        ( export DOCKER_NETWORK_SUBNET="$subnet"
+          run_iter "$name" "$iter" "$net" \
+            ./scenarios/company-1/RP1/run.sh "$V_NEW" "$cid" "$net" ) & ;;
       rpv1-A)
         cid=$(( 20 + cid_bump ))
         net="net_rpv1_a_iter${iter}"
-        run_iter "$name" "$iter" "$net" \
-          ./scenarios/company-1/RPV1/run.sh "$V_OLD" "$V_NEW" "$cid" "$net" & ;;
+        ( export DOCKER_NETWORK_SUBNET="$subnet"
+          run_iter "$name" "$iter" "$net" \
+            ./scenarios/company-1/RPV1/run.sh "$V_OLD" "$V_NEW" "$cid" "$net" ) & ;;
       rpv1-B)
         cid=$(( 30 + cid_bump ))
         cid2=$(( cid + 1 ))
         local cid3=$(( cid + 2 ))
         net="net_rpv1_b_iter${iter}"
-        run_iter "$name" "$iter" "$net" \
-          ./scenarios/company-1/RPV1/run.sh "$V_OLD" "$V_NEW" "$cid" "$net" \
-          -e "{\"upgrade_step_1\":[\"${cid}a\",\"${cid}b\",\"${cid}c\"],\"upgrade_step_2\":[\"${cid2}a\",\"${cid2}b\",\"${cid2}c\"],\"upgrade_step_3\":[\"${cid3}a\",\"${cid3}b\",\"${cid3}c\"]}" & ;;
+        ( export DOCKER_NETWORK_SUBNET="$subnet"
+          run_iter "$name" "$iter" "$net" \
+            ./scenarios/company-1/RPV1/run.sh "$V_OLD" "$V_NEW" "$cid" "$net" \
+            -e "{\"upgrade_step_1\":[\"${cid}a\",\"${cid}b\",\"${cid}c\"],\"upgrade_step_2\":[\"${cid2}a\",\"${cid2}b\",\"${cid2}c\"],\"upgrade_step_3\":[\"${cid3}a\",\"${cid3}b\",\"${cid3}c\"]}" ) & ;;
       rpv1-C)
         cid=$(( 40 + cid_bump ))
         cid2=$(( cid + 1 ))
         local cid3c=$(( cid + 2 ))
         net="net_rpv1_c_iter${iter}"
-        run_iter "$name" "$iter" "$net" \
-          ./scenarios/company-1/RPV1/run.sh "$V_OLD" "$V_NEW" "$cid" "$net" \
-          -e "{\"upgrade_step_1\":[\"${cid2}a\",\"${cid}b\",\"${cid3c}c\"],\"upgrade_step_2\":[\"${cid}a\",\"${cid3c}b\",\"${cid2}c\"],\"upgrade_step_3\":[\"${cid3c}a\",\"${cid}c\",\"${cid2}b\"]}" & ;;
+        ( export DOCKER_NETWORK_SUBNET="$subnet"
+          run_iter "$name" "$iter" "$net" \
+            ./scenarios/company-1/RPV1/run.sh "$V_OLD" "$V_NEW" "$cid" "$net" \
+            -e "{\"upgrade_step_1\":[\"${cid2}a\",\"${cid}b\",\"${cid3c}c\"],\"upgrade_step_2\":[\"${cid}a\",\"${cid3c}b\",\"${cid2}c\"],\"upgrade_step_3\":[\"${cid3c}a\",\"${cid}c\",\"${cid2}b\"]}" ) & ;;
       rv2)
         cid=$(( 50 + cid_bump ))
         net="net_rv2_iter${iter}"
-        run_iter "$name" "$iter" "$net" \
-          ./scenarios/company-1/RV2/run.sh "$V_OLD" "$V_NEW" "$cid" "$net" & ;;
+        ( export DOCKER_NETWORK_SUBNET="$subnet"
+          run_iter "$name" "$iter" "$net" \
+            ./scenarios/company-1/RV2/run.sh "$V_OLD" "$V_NEW" "$cid" "$net" ) & ;;
       *)      echo "ERROR: unknown scenario '$name'" >&2; continue ;;
     esac
     pids+=($!)

@@ -8,9 +8,21 @@
 # INPUTS (all overridable via `-e key=value`; defaults live in inventory/group_vars/all.yml):
 #   clusters_count       how many cluster ids to generate names for          (default: 1)
 #   nodes_per_cluster    how many letters per cluster id (max 26)            (default: 3)
-#   docker_network_name  shared docker network the containers attach to      (default: hubsinknet)
-#   docker_image         image to launch                                     (default: ubuntu2204-ansible)
-#   container_memory     per-container cgroup memory cap                     (default: 2500m)
+#   docker_network_name    shared docker network the containers attach to    (default: hubsinknet)
+#   docker_network_subnet  optional CIDR (e.g. 172.30.10.0/24).  When set,    (default: unset -> Docker
+#                          the network is created with this subnet and every  auto-assign)
+#                          container is pinned to a deterministic ipv4 inside
+#                          it so `docker stop` + `docker start` returns each
+#                          container to its ORIGINAL IP (so the host's stale
+#                          /etc/hosts entries stay valid for morning post-
+#                          mortem on overnight runs).  IP formula:
+#                          ipv4 = <subnet_base>.<(cluster_id mod 8)*16 + letter_pos + 1>
+#                          (letter_pos: a=1..z=26).  Each cluster gets a
+#                          16-IP bucket within the /24; cluster_ids used by
+#                          the company-1 scenarios are collision-free under
+#                          mod-8.
+#   docker_image           image to launch                                   (default: ubuntu2204-ansible)
+#   container_memory       per-container cgroup memory cap                   (default: 2500m)
 #
 # RUN EXAMPLES:
 #   # use all defaults (1 cluster x 3 nodes = 3 containers)
@@ -45,10 +57,30 @@
           {% endfor %}
           {% endfor %}
 
-    - name: Create the shared docker network
+    # When docker_network_subnet is set, derive subnet_base (first three octets, e.g.
+    # "172.30.10" from "172.30.10.0/24") for use in the docker_container task below.
+    # The ipv4 per container is computed inline there from cluster_id + letter:
+    #   offset = (cluster_id mod 8) * 16 + letter_pos + 1     (letter_pos: a=1..z=26)
+    # The +1 keeps every container off .1 (the gateway).  Per-cluster 16-IP buckets
+    # don't collide under mod-8 for any cluster_id range used by the company-1 scenarios.
+    - name: Compute pinned subnet_base (when docker_network_subnet is set)
+      ansible.builtin.set_fact:
+        subnet_base: "{{ docker_network_subnet | regex_replace('\\.0/\\d+$', '') }}"
+      when: (docker_network_subnet | default('') | length) > 0
+
+    - name: Create the shared docker network (auto-assigned subnet)
       community.docker.docker_network:
         name: "{{ docker_network_name }}"
         state: present
+      when: (docker_network_subnet | default('') | length) == 0
+
+    - name: Create the shared docker network (pinned subnet for restart-stable IPs)
+      community.docker.docker_network:
+        name: "{{ docker_network_name }}"
+        state: present
+        ipam_config:
+          - subnet: "{{ docker_network_subnet }}"
+      when: (docker_network_subnet | default('') | length) > 0
 
     - name: Create the shared backups volume (mounted at /backups in every container)
       community.docker.docker_volume:
@@ -70,6 +102,16 @@
         memory_swap: "{{ container_memory | default('2500m') }}"
         networks:
           - name: "{{ docker_network_name }}"
+            # ipv4_address only set when docker_network_subnet is provided -- omit
+            # otherwise so Docker auto-assigns (back-compat with manual single-runs).
+            # Formula: <subnet_base>.<(cid mod 8)*16 + letter_pos + 1>  (letter_pos: a=1..z=26)
+            ipv4_address: >-
+              {{ (subnet_base ~ '.' ~
+                  (((item | regex_replace('[^0-9]+', '') | int) % 8) * 16
+                   + ('abcdefghijklmnopqrstuvwxyz'.index(item | regex_replace('^[0-9]+', '')) + 1)
+                   + 1))
+                 if (docker_network_subnet | default('') | length) > 0
+                 else omit }}
         networks_cli_compatible: true
         # community.docker >=4.0 dropped purge_networks; the equivalent is
         # comparisons.networks=strict (drop any extra networks not listed above).
