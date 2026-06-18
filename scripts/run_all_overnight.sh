@@ -109,8 +109,14 @@ DEADLINE=$(( $(date +%s) + (MAX_WALL_HRS * 3600) ))
 # 1, 2, 3, ... rather than restarting at 1 each batch.
 # -------------------------------------------------------------------------
 declare -A ITER_COUNTS=(
-  [rv1]=0 [rp1]=0 [rpv1-A]=0 [rpv1-B]=0 [rpv1-C]=0 [rv2]=0
+  [rv1]=0 [rp1]=0 [rpv1-B]=0 [rv2]=0
 )
+# NOTE: rpv1-A and rpv1-C are case-handled below for manual launches but
+# intentionally NOT included in the default batches.  Only ONE rpv1 variant
+# runs per overnight because ConsistencyCheck (started by RPV-1) binds a
+# fixed host port (8084) + writes a single tool/output/config.json -- two
+# rpv1 variants in parallel would race on those.  rpv1-B is the variant
+# chosen for the canonical overnight; switch by overriding BATCH_B.
 
 # Track scenarios that have hit MAX_ITERS_PER_SCENARIO so we skip them on
 # subsequent loop passes.
@@ -308,14 +314,17 @@ run_batch() {
 # ceiling.  Heaviest scenarios paired with lighter ones.
 #
 #   Batch A: rv1 (3) + rp1 (6) + rv2 (4)              = 13 nodes  ~33 GB
-#   Batch B: rpv1-A (9) + rpv1-B (9)                  = 18 nodes  ~45 GB
-#   Batch C: rpv1-C (9)                               =  9 nodes  ~23 GB
+#   Batch B: rpv1-B (9)                               =  9 nodes  ~23 GB
 #
-# Override by setting BATCH_A/B/C env vars to space-separated scenario lists.
+# Only rpv1-B is included by default.  rpv1-A and rpv1-C are excluded because
+# ConsistencyCheck (started by every RPV-1 variant) binds a fixed host port
+# and writes a single tool config -- running multiple variants in parallel
+# would race.  To run a different variant, override BATCH_B=rpv1-A (etc).
+# Override by setting BATCH_A/B env vars to space-separated scenario lists.
 # -------------------------------------------------------------------------
 BATCH_A="${BATCH_A:-rv1 rp1 rv2}"
-BATCH_B="${BATCH_B:-rpv1-A rpv1-B}"
-BATCH_C="${BATCH_C:-rpv1-C}"
+BATCH_B="${BATCH_B:-rpv1-B}"
+BATCH_C="${BATCH_C:-}"
 
 # -------------------------------------------------------------------------
 # Main loop
@@ -323,7 +332,7 @@ BATCH_C="${BATCH_C:-rpv1-C}"
 all_done() {
   # Returns 0 (true) when every scenario has been marked done.
   local n
-  for n in rv1 rp1 rpv1-A rpv1-B rpv1-C rv2; do
+  for n in rv1 rp1 rpv1-B rv2; do
     [ -n "${DONE_SCENARIOS[$n]:-}" ] || return 1
   done
   return 0
@@ -340,7 +349,7 @@ while :; do
   else
     # All-parallel mode -- everything in one batch.
     echo "[$(date +%H:%M:%S)] >>> all-parallel batch" >> "$SUMMARY"
-    run_batch rv1 rp1 rpv1-A rpv1-B rpv1-C rv2
+    run_batch rv1 rp1 rpv1-B rv2
   fi
 
   # Stop conditions.

@@ -294,6 +294,20 @@
     db_name: db1
 
 
+# ----- ConsistencyCheck: start background mismatch repair, runs through the upgrade window ----
+# The pull-replication task is already wired (step 2).  Start the tool BEFORE seed + workloads
+# so any mismatch introduced from the seed onwards gets caught/repaired across the upgrade.
+# Killed in stop.yml right after step 10b (enable_features).
+- ansible.builtin.import_playbook: ../../../toolbox/consistency_check/start.yml
+  vars:
+    db_name: db1
+    net: "{{ docker_network_name }}"
+    node_leaders:
+      - { label: "Hub-A",   host: "{{ hub_id   | default(1) }}a" }
+      - { label: "Sink1-A", host: "{{ sink1_id | default(2) }}a" }
+      - { label: "Sink2-A", host: "{{ sink2_id | default(3) }}a" }
+
+
 # ----- step 3: seed the hub with seven prefix buckets and wait for the filter to drain --------
 
 - name: RPV-1 step 3 -- seed Hub with 7 prefix buckets, then wait for filtered drain
@@ -953,6 +967,10 @@
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
+# Catch an early ConsistencyCheck death between upgrade sub-batches.
+- ansible.builtin.import_playbook: ../../../toolbox/consistency_check/assert_alive.yml
+  vars: { net: "{{ docker_network_name }}" }
+
 
 # ----- step 8: upgrade the second batch of three nodes (default variant A: the hub) ----------
 
@@ -1116,6 +1134,10 @@
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
+# Liveness check between the 2nd and 3rd upgrade sub-batches.
+- ansible.builtin.import_playbook: ../../../toolbox/consistency_check/assert_alive.yml
+  vars: { net: "{{ docker_network_name }}" }
+
 
 # ----- step 10: upgrade the final batch of three nodes (default variant A: sink-2) -----------
 
@@ -1178,6 +1200,15 @@
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.results | map(attribute='msg') | list }}" }
       when: (post_upgrade_feature_flags | default([])) | length > 0
+
+
+# ----- ConsistencyCheck: stop now that every node is on v_new + feature flags are flipped ----
+# Final liveness check first so a silent death inside the toggle window still surfaces.
+- ansible.builtin.import_playbook: ../../../toolbox/consistency_check/assert_alive.yml
+  vars: { net: "{{ docker_network_name }}" }
+
+- ansible.builtin.import_playbook: ../../../toolbox/consistency_check/stop.yml
+  vars: { net: "{{ docker_network_name }}" }
 
 
 # ----- step 11: endpoint checkpoint -- every node on the new binary, writers still flowing ---
