@@ -150,7 +150,7 @@
             "CertificatePath": "{{ _client_pfx_path }}",
             "CertificatePassword": null,
             "Mode": "FirstMismatch",
-            "RunMode": "ApplyRepair",
+            "RunMode": "ApplyRepairPlan",
             "Throttle": {
               "PageSize": 512,
               "DelayBetweenBatchesMs": 50,
