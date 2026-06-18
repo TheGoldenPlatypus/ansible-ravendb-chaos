@@ -230,14 +230,29 @@
             "StartEtag": 0
           }
 
-    # 4. launch in background.  nohup + disown so it survives this ansible-playbook exit.
-    - name: Kill any leftover ConsistencyCheck from a previous iter (defensive)
+    # 4. launch in background.  Belt-and-suspenders defensive kill:
+    #   (a) pidfile-based kill for THIS iter's expected pidfile,
+    #   (b) pkill -f ConsistencyCheck to catch orphans from earlier iters/sessions
+    #       whose pidfile got cleaned up but whose process detached and lived on.
+    # We hit (b) the hard way -- an orphan from a previous attempt kept writing to
+    # the cluster via cluster-wide-tx and corrupted seeds on every subsequent iter.
+    # The orphan was using the cluster's FQDN/IPs which stay stable across iters
+    # (pinned-IPs feature), so it kept reaching the new iter's RavenDB nodes.
+    # Only one ConsistencyCheck is ever meant to be alive on a host at a time, so
+    # a broad pkill is safe.
+    - name: Kill any leftover ConsistencyCheck (defensive, both pidfile + pkill)
       ansible.builtin.shell: |
+        # (a) per-iter pidfile
         if [ -f {{ _pidfile }} ]; then
           pid=$(cat {{ _pidfile }} 2>/dev/null || true)
           [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && kill "$pid" 2>/dev/null || true
           rm -f {{ _pidfile }}
         fi
+        # (b) catch-all by process name.  [C] trick prevents pkill matching itself.
+        pkill -f '[C]onsistencyCheck' 2>/dev/null || true
+        sleep 1
+        pkill -KILL -f '[C]onsistencyCheck' 2>/dev/null || true
+        echo "defensive-kill done"
       changed_when: false
 
     - name: Launch ConsistencyCheck in background
