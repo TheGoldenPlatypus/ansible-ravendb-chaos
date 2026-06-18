@@ -178,8 +178,9 @@ echo
 yellow "==> Stage 2 -- wrapping into .deb via ubuntu_native.Dockerfile"
 cd "$WORKDIR/scripts/linux/pkg/deb"
 
-# These setters mirror what build-deb_ubuntu-jammy_amd64.ps1 does in PowerShell.
-source ./set-ubuntu-jammy.sh                     # DISTRO_NAME=ubuntu, DISTRO_VERSION=22.04, DISTRO_VERSION_NAME=jammy
+# Target Ubuntu 24.04 (noble): kaiju's chaos-lab containers run ubuntu2404 and
+# need libicu74; jammy builds depend on libicu70 and won't install on noble.
+source ./set-ubuntu-noble.sh                     # DISTRO_NAME=ubuntu, DISTRO_VERSION=24.04, DISTRO_VERSION_NAME=noble
 source ./set-raven-platform-amd64.sh             # RAVEN_PLATFORM=linux-x64, DOCKER_BUILDPLATFORM=linux/amd64, DEB_ARCHITECTURE=amd64
 
 export RAVENDB_VERSION TEMP_DIR OUTPUT_DIR
