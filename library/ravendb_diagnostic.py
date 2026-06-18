@@ -502,15 +502,11 @@ def k_size_envelope(p):
     sizes = {}
     for target in nodes:
         stats = get_stats(p, target)
-        if stats:
-            sizes[target] = int((stats.get("SizeOnDisk") or {}).get("SizeInBytes") or 0)
-
-    # Fail loud if we couldn't read ANY node -- otherwise the capture path
-    # would write an empty baseline file and silently mark the run successful.
-    if not sizes:
-        raise RuntimeError(
-            "k_size_envelope: no /stats response from any node "
-            "(nodes=%s) -- can't capture or compare sizes" % nodes)
+        if not stats:
+            raise RuntimeError(
+                "k_size_envelope: /stats returned nothing for %s (db=%s) -- "
+                "cannot capture or compare size" % (target, p.get("db_name")))
+        sizes[target] = int((stats.get("SizeOnDisk") or {}).get("SizeInBytes") or 0)
 
     if not os.path.exists(baseline_file):
         os.makedirs(os.path.dirname(baseline_file), exist_ok=True)
