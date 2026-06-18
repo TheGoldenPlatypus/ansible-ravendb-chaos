@@ -1,0 +1,62 @@
+##################################################################################################
+# toolbox/consistency_check/assert_alive.yml
+#
+# Light-touch liveness check.  Called from scenarios at natural sync points (after each
+# upgrade sub-batch, after enable_features, etc.) to catch an early ConsistencyCheck
+# death without a continuous-poll background task.
+#
+# Two checks:
+#   1. PID in /tmp/ccheck-<net>.pid is still running (kill -0).
+#   2. /health-check returns 200.
+#
+# On failure: dump the last 60 lines of the tool's log and fail loud.
+#
+# REQUIRED:
+#   net                docker_network_name of the iter (same value used at start).
+#
+# OPTIONAL:
+#   health_port        Default 8081.
+##################################################################################################
+
+- name: ConsistencyCheck -- assert alive
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    health_port: "{{ health_port | default(8081) | int }}"
+    _pidfile: "/tmp/ccheck-{{ net }}.pid"
+    _logfile: "/tmp/ccheck-{{ net }}.log"
+
+  tasks:
+    - name: Probe PID + health endpoint
+      ansible.builtin.shell: |
+        set -u
+        pid=$(cat {{ _pidfile }} 2>/dev/null || true)
+        if [ -z "$pid" ]; then echo "NO_PIDFILE"; exit 2; fi
+        if ! kill -0 "$pid" 2>/dev/null; then echo "DEAD pid=$pid"; exit 3; fi
+        if ! curl -fsS --max-time 5 -o /dev/null \
+             http://127.0.0.1:{{ health_port }}/health-check; then
+          echo "HEALTH_FAIL pid=$pid"; exit 4
+        fi
+        echo "ALIVE pid=$pid"
+      register: probe
+      changed_when: false
+      failed_when: false
+
+    - name: Show last 60 lines of ConsistencyCheck log on failure
+      ansible.builtin.shell: "tail -n 60 {{ _logfile }} 2>/dev/null || echo '(log missing)'"
+      register: log_tail
+      changed_when: false
+      when: probe.rc != 0
+
+    - name: Fail loud if ConsistencyCheck died
+      ansible.builtin.fail:
+        msg: |-
+          ConsistencyCheck is not alive (probe rc={{ probe.rc }}, msg='{{ probe.stdout }}').
+          Last 60 log lines:
+          {{ log_tail.stdout | default('(no log)') }}
+      when: probe.rc != 0
+
+    - name: ALIVE
+      ansible.builtin.debug:
+        msg: "ConsistencyCheck alive on net={{ net }} -- {{ probe.stdout }}"

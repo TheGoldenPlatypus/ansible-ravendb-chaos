@@ -1,0 +1,214 @@
+##################################################################################################
+# toolbox/consistency_check/start.yml
+#
+# Launch the ConsistencyCheck tool in the background.  Used by hub-sink scenarios that
+# perform a rolling upgrade -- the tool scans nodes for ETag mismatches every few minutes
+# and repairs them, so the cluster's data stays converged across the upgrade window.
+#
+# What this playbook does (in order):
+#   1. Validate the binary + client cert exist on the controller.
+#   2. Spin up a small unsecured RavenDB container ("ccstate-<net>") on the iter's docker
+#      network, port-mapped to 127.0.0.1:<state_store_host_port> on the controller.  The
+#      tool stores its run/lookup state there.  The container is auto-removed at scenario
+#      end by stop.yml (and gets caught by the runner's network teardown too).
+#   3. Wait for the state-store endpoint to respond.
+#   4. Render <tool_dir>/output/config.json from the inputs below.
+#   5. nohup the tool with `--profile live-etag-all-nodes-recurring --interval-minutes 3
+#      --health-bind http://127.0.0.1:<health_port>`.  PID -> /tmp/ccheck-<net>.pid,
+#      stdout+stderr -> /tmp/ccheck-<net>.log.
+#   6. Poll the tool's health endpoint until it returns 200, fail loudly if not ready
+#      within `start_timeout_secs`.
+#
+# Scenarios call assert_alive.yml at sync points and stop.yml after the upgrade + toggle
+# completes (which dumps the run-summary box into the scenario log).
+#
+# REQUIRED inputs:
+#   db_name                    Database being replicated (the tool inspects this DB).
+#   node_leaders               List of dicts: { label, host } -- one entry per cluster
+#                              leader in the topology (hub leader + each sink leader).
+#                              The FIRST entry is SourceNodeIndex=0 (always the hub).
+#                              Example RPV-1:
+#                                [{label:"Node A", host:"1a"},
+#                                 {label:"Node B", host:"2a"},
+#                                 {label:"Node C", host:"3a"}]
+#   net                        docker_network_name of the iter (e.g. "net_rpv1_a_iter1").
+#                              Used to (a) attach the state-store container, (b) build
+#                              uniq filenames for the PID + log so parallel scenarios
+#                              don't collide.
+#
+# OPTIONAL inputs:
+#   tool_dir                   Default: "{{ ansible_env.HOME }}/company-1/tools/ConsistencyCheck-linux-x64-2/linux-x64".
+#                              Per-host tool location -- not in the repo.
+#   client_pfx_path            Default: "{{ ansible_env.HOME }}/company-1/selfsignedmaterials/client.pfx".
+#                              PFX with no password (CertificatePassword: null).
+#   state_store_image          Default: "ravendb/ravendb:latest".
+#   state_store_host_port      Default: 8084.  Mapped to container's 8080.
+#   health_port                Default: 8081.  Where the tool exposes /health-check.
+#   interval_minutes           Default: 3.  Scan interval per the recurring profile.
+#   start_timeout_secs         Default: 60.  Health-endpoint readiness timeout.
+##################################################################################################
+
+- name: ConsistencyCheck -- start (validate + state store + config + launch)
+  hosts: localhost
+  connection: local
+  gather_facts: true   # need ansible_env.HOME
+  vars:
+    tool_dir: "{{ tool_dir | default(ansible_env.HOME ~ '/company-1/tools/ConsistencyCheck-linux-x64-2/linux-x64') }}"
+    client_pfx_path: "{{ client_pfx_path | default(ansible_env.HOME ~ '/company-1/selfsignedmaterials/client.pfx') }}"
+    state_store_image: "{{ state_store_image | default('ravendb/ravendb:latest') }}"
+    state_store_host_port: "{{ state_store_host_port | default(8084) | int }}"
+    health_port: "{{ health_port | default(8081) | int }}"
+    interval_minutes: "{{ interval_minutes | default(3) | int }}"
+    start_timeout_secs: "{{ start_timeout_secs | default(60) | int }}"
+    _state_store_name: "ccstate-{{ net }}"
+    _pidfile: "/tmp/ccheck-{{ net }}.pid"
+    _logfile: "/tmp/ccheck-{{ net }}.log"
+    _config_path: "{{ tool_dir }}/output/config.json"
+
+  tasks:
+    # 1. validate binary + cert (fail loud and early if missing)
+    - name: Validate ConsistencyCheck binary exists
+      ansible.builtin.stat:
+        path: "{{ tool_dir }}/ConsistencyCheck"
+      register: bin_stat
+    - name: Assert binary present
+      ansible.builtin.assert:
+        that: [ bin_stat.stat.exists, bin_stat.stat.executable ]
+        fail_msg: >-
+          ConsistencyCheck binary missing or not executable at
+          {{ tool_dir }}/ConsistencyCheck.  Download the tool to that path
+          (see scenarios that use it for details) before re-running.
+
+    - name: Validate client cert exists
+      ansible.builtin.stat:
+        path: "{{ client_pfx_path }}"
+      register: cert_stat
+    - name: Assert cert present
+      ansible.builtin.assert:
+        that: [ cert_stat.stat.exists ]
+        fail_msg: "Client cert PFX missing at {{ client_pfx_path }}"
+
+    # 2. state store container -- unsecured single-node RavenDB on the iter's network
+    - name: Pull ccstate container if a previous run is still around
+      community.docker.docker_container:
+        name: "{{ _state_store_name }}"
+        state: absent
+      register: _state_drop
+      changed_when: false
+      failed_when: false
+
+    - name: Launch state-store RavenDB container
+      community.docker.docker_container:
+        name: "{{ _state_store_name }}"
+        image: "{{ state_store_image }}"
+        state: started
+        restart_policy: unless-stopped
+        # Unsecured single-node setup.  The tool creates its own ConsistencyCheck.State db.
+        env:
+          RAVEN_License_Eula_Accepted: "true"
+          RAVEN_Setup_Mode: "None"
+          RAVEN_Security_UnsecuredAccessAllowed: "PrivateNetwork"
+          RAVEN_ServerUrl: "http://0.0.0.0:8080"
+          RAVEN_ServerUrl_Tcp: "tcp://0.0.0.0:38888"
+        published_ports:
+          - "127.0.0.1:{{ state_store_host_port }}:8080"
+        networks:
+          - name: "{{ net }}"
+        networks_cli_compatible: true
+
+    - name: Wait for state-store endpoint to respond
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ state_store_host_port }}/build/version"
+        method: GET
+        status_code: [200]
+      register: ss_ready
+      retries: 30
+      delay: 2
+      until: ss_ready is succeeded
+
+    # 3. config.json -- render with leader URLs + cert path + state-store URL
+    - name: Ensure output dir exists
+      ansible.builtin.file:
+        path: "{{ tool_dir }}/output"
+        state: directory
+        mode: "0755"
+
+    - name: Render config.json
+      ansible.builtin.copy:
+        dest: "{{ _config_path }}"
+        mode: "0644"
+        content: |
+          {
+            "DatabaseName": "{{ db_name }}",
+            "Nodes": [
+          {% for n in node_leaders %}      { "Label": "{{ n.label }}", "Url": "https://{{ n.host }}.{{ ravendb_domain }}:443" }{% if not loop.last %},{% endif %}
+          {% endfor %}    ],
+            "SourceNodeIndex": 0,
+            "CertificatePath": "{{ client_pfx_path }}",
+            "CertificatePassword": null,
+            "Mode": "FirstMismatch",
+            "RunMode": "ApplyRepair",
+            "Throttle": {
+              "PageSize": 512,
+              "DelayBetweenBatchesMs": 50,
+              "MaxRetries": 3,
+              "RetryBaseDelayMs": 500,
+              "ClusterLookupBatchSize": 512
+            },
+            "StateStore": {
+              "ServerUrl": "http://127.0.0.1:{{ state_store_host_port }}",
+              "DatabaseName": "ConsistencyCheck.State",
+              "EnableDiagnostics": true
+            },
+            "AllowInvalidServerCertificates": false,
+            "StartEtag": 0
+          }
+
+    # 4. launch in background.  nohup + disown so it survives this ansible-playbook exit.
+    - name: Kill any leftover ConsistencyCheck from a previous iter (defensive)
+      ansible.builtin.shell: |
+        if [ -f {{ _pidfile }} ]; then
+          pid=$(cat {{ _pidfile }} 2>/dev/null || true)
+          [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && kill "$pid" 2>/dev/null || true
+          rm -f {{ _pidfile }}
+        fi
+      changed_when: false
+
+    - name: Launch ConsistencyCheck in background
+      ansible.builtin.shell: |
+        cd {{ tool_dir }}
+        nohup ./ConsistencyCheck \
+          --profile live-etag-all-nodes-recurring \
+          --interval-minutes {{ interval_minutes }} \
+          --health-bind http://127.0.0.1:{{ health_port }} \
+          --health-path /health-check \
+          > {{ _logfile }} 2>&1 &
+        echo $! > {{ _pidfile }}
+        disown
+      changed_when: true
+
+    # 5. confirm the tool started and the health endpoint is up
+    - name: Confirm PID file written + process alive
+      ansible.builtin.shell: |
+        pid=$(cat {{ _pidfile }} 2>/dev/null || true)
+        [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && echo "ALIVE pid=$pid" || { echo "DEAD"; exit 1; }
+      register: pid_check
+      changed_when: false
+
+    - name: Wait for /health-check to return 200
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ health_port }}/health-check"
+        method: GET
+        status_code: [200]
+      register: health_ready
+      retries: "{{ (start_timeout_secs | int) // 2 }}"
+      delay: 2
+      until: health_ready is succeeded
+
+    - name: Show start banner
+      ansible.builtin.debug:
+        msg: >-
+          ConsistencyCheck STARTED  net={{ net }}  pid={{ (pid_check.stdout | regex_replace('.*pid=', '')) }}
+          state-store=http://127.0.0.1:{{ state_store_host_port }}
+          health=http://127.0.0.1:{{ health_port }}/health-check
+          log={{ _logfile }}  config={{ _config_path }}

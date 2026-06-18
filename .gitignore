@@ -25,6 +25,9 @@ captures/
 # RavenDB .debs built by scripts/build_ravendb_pr.sh
 builds/
 
+# ConsistencyCheck binary tree (downloaded out-of-band per host, ~150 MB of DLLs)
+tools/
+
 # Python bytecode + test caches
 __pycache__/
 *.pyc
