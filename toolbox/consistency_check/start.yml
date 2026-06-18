@@ -154,6 +154,29 @@
       delay: 2
       until: (ss_topo.json.Status | default({})) != {} or (ss_topo.json.Topology.Members | default({}) | length) > 0
 
+    # Pre-create the ConsistencyCheck.State database.  The tool doesn't auto-create
+    # it -- expects to find it ready -- and fails with DatabaseDoesNotExistException
+    # on the first /docs query if it isn't there.  PUT /admin/databases is idempotent
+    # via status_code=[201, 409]: 201 = created, 409 = already exists (treated as ok).
+    - name: Create ConsistencyCheck.State database on the state-store
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ _state_store_host_port }}/admin/databases?name=ConsistencyCheck.State&replicationFactor=1"
+        method: PUT
+        body_format: json
+        body:
+          DatabaseName: "ConsistencyCheck.State"
+          Settings: {}
+          Disabled: false
+        status_code: [201, 409]
+      register: ss_db
+      retries: 5
+      delay: 2
+      until: ss_db is succeeded
+
+    - name: Show state-store readiness
+      ansible.builtin.debug:
+        msg: "state-store ready @ http://127.0.0.1:{{ _state_store_host_port }}  bootstrap=ok  db=ConsistencyCheck.State (status={{ ss_db.status }})"
+
     # 3. config.json -- render with leader URLs + cert path + state-store URL
     - name: Ensure output dir exists
       ansible.builtin.file:
