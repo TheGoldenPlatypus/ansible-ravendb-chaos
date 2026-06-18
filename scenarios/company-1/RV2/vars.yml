@@ -32,9 +32,6 @@ shard_nodes:
   "1": ["{{ src_cluster_id }}b"]
   "2": ["{{ src_cluster_id }}c"]
 
-# All 3 source nodes are orchestrators (passed to ravendb_sharding.create_sharded).
-orchestrator_members: ["A", "B", "C"]
-
 # Target: a single v_new node holding a fresh non-sharded DB.
 tgt_node:   "{{ tgt_cluster_id }}a"
 tgt_leader: "{{ tgt_cluster_id }}a"
