@@ -294,20 +294,6 @@
     db_name: db1
 
 
-# ----- ConsistencyCheck: start background mismatch repair, runs through the upgrade window ----
-# The pull-replication task is already wired (step 2).  Start the tool BEFORE seed + workloads
-# so any mismatch introduced from the seed onwards gets caught/repaired across the upgrade.
-# Killed in stop.yml right after step 10b (enable_features).
-- ansible.builtin.import_playbook: ../../../toolbox/consistency_check/start.yml
-  vars:
-    db_name: db1
-    net: "{{ docker_network_name }}"
-    node_leaders:
-      - { label: "Hub-A",   host: "{{ hub_id   | default(1) }}a" }
-      - { label: "Sink1-A", host: "{{ sink1_id | default(2) }}a" }
-      - { label: "Sink2-A", host: "{{ sink2_id | default(3) }}a" }
-
-
 # ----- step 3: seed the hub with seven prefix buckets and wait for the filter to drain --------
 
 - name: RPV-1 step 3 -- seed Hub with 7 prefix buckets, then wait for filtered drain
@@ -520,6 +506,22 @@
       register: r
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ----- ConsistencyCheck: start background mismatch repair, runs through the upgrade window ----
+# Started AFTER seed + filtered drain so the tool's first scan sees a stable populated
+# cluster.  Starting BEFORE seed caused the tool's apply-repair to race with seed PUTs
+# and write docs with @collection=@empty under users/sink1/* IDs that the seed then
+# couldn't update (collection-change-via-update is not supported in RavenDB).
+# Killed in stop.yml right after step 10b (enable_features).
+- ansible.builtin.import_playbook: ../../../toolbox/consistency_check/start.yml
+  vars:
+    db_name: db1
+    net: "{{ docker_network_name }}"
+    node_leaders:
+      - { label: "Hub-A",   host: "{{ hub_id   | default(1) }}a" }
+      - { label: "Sink1-A", host: "{{ sink1_id | default(2) }}a" }
+      - { label: "Sink2-A", host: "{{ sink2_id | default(3) }}a" }
 
 
 # ----- step 4: baseline checkpoint while the topology is still quiet on the old binary -------
