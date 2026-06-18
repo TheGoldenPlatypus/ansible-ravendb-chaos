@@ -8,6 +8,7 @@ def k_create_sharded(p):
     leader = p["cluster_leader"]
     db = p["db_name"]
     shards = p["shards"]
+    orchestrator_members = p.get("orchestrator_members")
 
     if not shards:
         raise ValueError("kind=create_sharded requires `shards` (dict: shard_id -> [node_tags])")
@@ -16,11 +17,20 @@ def k_create_sharded(p):
     for shard_id, members in shards.items():
         shard_topology[str(shard_id)] = {"Members": list(members)}
 
+    sharding_body = {"Shards": shard_topology}
+
+    # Optional explicit orchestrator topology override.  Default (param unset) defers
+    # to the server's auto-selection, same as before.  RV-2 needs explicit all-three-
+    # orchestrators on its 3-shard x 1-replica cluster -- the server's default picks
+    # one node, which is not what Karmel's spec calls for.
+    if orchestrator_members:
+        sharding_body["Orchestrator"] = {
+            "Topology": {"Members": list(orchestrator_members)},
+        }
+
     body = {
         "DatabaseName": db,
-        "Sharding": {
-            "Shards": shard_topology,
-        },
+        "Sharding": sharding_body,
     }
 
     path = "/admin/databases?name=%s&replicationFactor=1" % db
@@ -40,8 +50,9 @@ def k_create_sharded(p):
         picked = "members=%s rf=%s" % (
             orch_topo.get("Members"), orch_topo.get("ReplicationFactor"))
 
-    return "SHARDED DB created  %s on %s  shards=%s  orchestrator(auto)=%s" % (
-        db, leader, list(shards.keys()), picked)
+    label = "explicit" if orchestrator_members else "auto"
+    return "SHARDED DB created  %s on %s  shards=%s  orchestrator(%s)=%s" % (
+        db, leader, list(shards.keys()), label, picked)
 
 
 KINDS = {
@@ -59,6 +70,10 @@ def main():
         db_name=dict(required=True),
         # create_sharded
         shards=dict(type="dict", default=None),
+        # Optional explicit orchestrator topology override.  When unset, the server
+        # picks one node by default.  RV-2's 3-shard x 1-replica topology needs all
+        # 3 nodes to be orchestrators -- pass orchestrator_members=["A","B","C"] then.
+        orchestrator_members=dict(type="list", elements="str", default=None),
     ))
 
     handler = KINDS[module.params["kind"]]
