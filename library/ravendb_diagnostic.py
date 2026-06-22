@@ -1610,6 +1610,89 @@ def k_cv_boundary_by_dbid(p):
     return lines
 
 
+def k_db_cv_health(p):
+    """Assert two properties of the DB-level DatabaseChangeVector (from /stats):
+
+      intact  -- every dbid present in baseline is still in postbatch with
+                 etag >= baseline (no rewind, no entry loss).
+      no leak -- the dbid set on `hub_nodes` and the dbid set on `sink_nodes`
+                 are disjoint in postbatch (no hub identity bled into sink's
+                 DB CV, and vice versa).
+
+    Reads CVs from `<baseline_dir>/<node>.cv` and `<postbatch_dir>/<node>.cv`
+    (written earlier by capture_cv).  Empty baseline files are treated as
+    "DB had no writes pre-burst" and the intact check for that node is
+    skipped with a note (not a failure)."""
+    hub_nodes = p["hub_nodes"] or []
+    sink_nodes = p["sink_nodes"] or []
+    baseline_dir = p["baseline_dir"]
+    postbatch_dir = p["postbatch_dir"]
+    assert_mode = bool(p["assert_mode"])
+
+    if not hub_nodes or not sink_nodes:
+        raise ValueError("kind=db_cv_health requires non-empty `hub_nodes` and `sink_nodes`")
+    if not baseline_dir or not postbatch_dir:
+        raise ValueError("kind=db_cv_health requires `baseline_dir` and `postbatch_dir`")
+
+    def _load(path):
+        try:
+            txt = open(path).read().strip()
+        except FileNotFoundError:
+            return None
+        if not txt:
+            return {}
+        return {dbid: int(etag) for _tag, etag, dbid in
+                _CV_ENTRY_FULL_RE.findall(txt)}
+
+    lines = ["DB-CV health  hub=%s  sink=%s" % (hub_nodes, sink_nodes)]
+    fails = []
+
+    for side, nodes in (("hub", hub_nodes), ("sink", sink_nodes)):
+        for node in nodes:
+            b = _load(os.path.join(baseline_dir, "%s.cv" % node))
+            q = _load(os.path.join(postbatch_dir, "%s.cv" % node))
+            if b is None or q is None:
+                fails.append("  intact %s/%s: missing capture file" % (side, node))
+                continue
+            if not b:
+                lines.append("  intact %s/%s: baseline empty -- skipped" % (side, node))
+                continue
+            missing = sorted(d for d in b if d not in q)
+            rewound = sorted((d, b[d], q[d]) for d in b if d in q and q[d] < b[d])
+            if missing:
+                fails.append("  intact %s/%s: dbids missing in postbatch: %s"
+                             % (side, node, missing))
+            if rewound:
+                fails.append("  intact %s/%s: dbids rewound (dbid, baseline_etag, postbatch_etag): %s"
+                             % (side, node, rewound))
+            if not missing and not rewound:
+                lines.append("  intact %s/%s: %d dbid(s) present + advanced (or equal)"
+                             % (side, node, len(b)))
+
+    hub_set = set()
+    for n in hub_nodes:
+        d = _load(os.path.join(postbatch_dir, "%s.cv" % n))
+        if d:
+            hub_set |= set(d)
+    sink_set = set()
+    for n in sink_nodes:
+        d = _load(os.path.join(postbatch_dir, "%s.cv" % n))
+        if d:
+            sink_set |= set(d)
+    overlap = hub_set & sink_set
+    if overlap:
+        fails.append("  leak: hub and sink share dbid(s) in postbatch DB-CV: %s"
+                     % sorted(overlap))
+    else:
+        lines.append("  leak: hub dbids=%s  sink dbids=%s  -- disjoint, no leakage"
+                     % (sorted(hub_set), sorted(sink_set)))
+
+    if fails:
+        return violation(assert_mode, lines + ["FAIL  DB-CV health:"] + fails)
+    lines.append("PASS  DB-CV intact + no hub<->sink dbid leakage")
+    return lines
+
+
 def k_db_cv_order_side_only(p):
     """Check that every receiver's database change vector only references
     cluster tags from the receiver's own cluster -- no foreign cluster tags.
@@ -1884,6 +1967,7 @@ KINDS = {
     # --- CV-shape ---
     "cross_cluster_cv_equality":  k_cross_cluster_cv_equality,
     "cv_boundary_by_dbid":        k_cv_boundary_by_dbid,
+    "db_cv_health":               k_db_cv_health,
     "db_cv_order_side_only":      k_db_cv_order_side_only,
     "stored_item_cv_split":       k_stored_item_cv_split,
 }
@@ -1968,6 +2052,12 @@ def main():
         source_nodes=dict(type="list", elements="str", default=None),
         receiver_nodes=dict(type="list", elements="str", default=None),
         strict_v_new=dict(type="bool", default=False),
+
+        # db_cv_health
+        hub_nodes=dict(type="list", elements="str", default=None),
+        sink_nodes=dict(type="list", elements="str", default=None),
+        baseline_dir=dict(type="path", default=None),
+        postbatch_dir=dict(type="path", default=None),
 
         # db_cv_order_side_only
         receiver_group_nodes=dict(type="list", elements="str", default=None),
