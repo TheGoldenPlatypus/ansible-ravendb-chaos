@@ -800,6 +800,21 @@
     - name: Show baseline vs post-batch change-vector diff
       ansible.builtin.debug: { msg: "{{ cv_diff.stdout_lines }}" }
 
+    - name: "Assert DB-CV intact + no dbid leakage hub <-> sink"
+      ravendb_diagnostic:
+        kind: db_cv_health
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        hub_nodes:  ["{{ hub_id | default(1) }}a"]
+        sink_nodes: ["{{ sink_id | default(2) }}a"]
+        baseline_dir:  "{{ playbook_dir }}/capture/baseline"
+        postbatch_dir: "{{ playbook_dir }}/capture/postbatch"
+        assert_mode: "{{ not (relax_rp1_cv_checks | default(false) | bool) }}"
+      register: r
+    - name: Show DB-CV health result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
 
 # ----- step 7: post-burst checkpoint on the quiet cluster -------------------------------------
 # Cluster is settled.  Run the actual assertions:
