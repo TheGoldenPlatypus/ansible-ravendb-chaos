@@ -5,9 +5,20 @@
 # upgrade sub-batch, after enable_features, etc.) to catch an early ConsistencyCheck
 # death without a continuous-poll background task.
 #
-# Two checks:
-#   1. PID in /tmp/ccheck-<net>.pid is still running (kill -0).
-#   2. /health-check returns 200.
+# Liveness signal: **the PID being alive is what counts**.  The /health-check
+# endpoint is a soft status reporter -- it returns 503 when the tool has recent
+# backend failures (e.g. RavenDB on a node returned ServiceUnavailable because
+# the node was restarting mid-upgrade), even though the tool is alive and
+# retrying correctly.  Requiring 200 here false-fails the scenario whenever the
+# tool's retry loop overlaps an upgrade-induced node restart -- which is
+# exactly the chaos window the tool is meant to exercise.
+#
+# So:
+#   PID alive (kill -0)                   -> assert_alive PASSES
+#   PID dead                              -> assert_alive FAILS
+#   /health-check unreachable (no HTTP)   -> assert_alive FAILS  (embedded server died)
+#   /health-check returns ANY HTTP code   -> assert_alive PASSES, code logged
+#     (200 = healthy now; 503 = currently retrying; anything else = also still serving)
 #
 # On failure: dump the last 60 lines of the tool's log and fail loud.
 #
@@ -35,11 +46,17 @@
         pid=$(cat {{ _pidfile }} 2>/dev/null || true)
         if [ -z "$pid" ]; then echo "NO_PIDFILE"; exit 2; fi
         if ! kill -0 "$pid" 2>/dev/null; then echo "DEAD pid=$pid"; exit 3; fi
-        if ! curl -fsS --max-time 5 -o /dev/null \
-             http://127.0.0.1:{{ _health_port }}/health-check; then
-          echo "HEALTH_FAIL pid=$pid"; exit 4
+        # Probe the endpoint but accept ANY HTTP status (including 5xx).  A 503
+        # means "tool is alive, currently in retry-after-recent-failure mode" --
+        # not a death.  We only fail if the endpoint is fully unreachable
+        # (server not bound / connection refused / no response), since that
+        # implies the embedded HTTP host inside the tool has died.
+        http_code=$(curl -sk -o /dev/null --max-time 5 -w '%{http_code}' \
+             http://127.0.0.1:{{ _health_port }}/health-check 2>/dev/null || echo 000)
+        if [ "$http_code" = "000" ]; then
+          echo "HEALTH_UNREACHABLE pid=$pid (no HTTP response from embedded server)"; exit 4
         fi
-        echo "ALIVE pid=$pid"
+        echo "ALIVE pid=$pid http=$http_code"
       register: probe
       changed_when: false
       failed_when: false
