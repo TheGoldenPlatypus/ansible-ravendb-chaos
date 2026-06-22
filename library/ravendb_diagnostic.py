@@ -206,10 +206,13 @@ def classify_nodes(p, nodes):
 def get_stats(p, target, shard_id=None):
     """Return parsed /stats dict for `target` (or None on failure).
 
-    For sharded DBs, /stats requires per-node addressing via the orchestrator
-    (?nodeTag=<X>).  When no specific shard is requested, /stats/essential on
-    the orchestrator returns the aggregated counts.  For non-sharded DBs we
-    just hit /stats directly.
+    Uses /stats (NOT /stats/essential) so DatabaseChangeVector + DatabaseId
+    are included -- capture_cv / cv_boundary_by_dbid rely on those fields,
+    and /stats/essential omits them.
+
+    On a sharded DB /stats requires nodeTag; we detect the "nodeTag is
+    mandatory" 500 and re-route via the orchestrator with ?nodeTag=<target's
+    tag>, so callers don't need to know whether the DB is sharded.
 
     `shard_id` parameter is kept for backward-compat with callers that
     explicitly want per-shard stats -- they should pass a route_marker
@@ -225,28 +228,34 @@ def get_stats(p, target, shard_id=None):
             return None
         return json.loads(body) if status == 200 else None
 
-    # No shard_id given: figure out routing on the fly.
-    try:
-        orch = orchestrator_for(target, p["ravendb_domain"], db,
-                                p["client_cert"], p["ca_cert"])
-    except Exception:
-        return None
-    if orch == target:
-        # Non-sharded OR target IS the orchestrator.  Check via /stats/essential
-        # which works for both: on non-sharded it's just the essential counts;
-        # on sharded the orchestrator fans out and aggregates.
-        path = "/databases/%s/stats/essential" % db
-    else:
-        # Sharded.  Aggregated counts via the orchestrator's /stats/essential
-        # (server-side fan-out, no nodeTag needed).
-        path = "/databases/%s/stats/essential" % db
-        target = orch
+    # First try plain /stats on the target.  Works directly for non-sharded
+    # DBs (and includes the DatabaseChangeVector / DatabaseId that the
+    # /stats/essential variant omitted).
+    path = "/databases/%s/stats" % db
     try:
         status, body = request("GET", target, p["ravendb_domain"], path,
                                p["client_cert"], p["ca_cert"])
     except Exception:
         return None
-    return json.loads(body) if status == 200 else None
+    if status == 200:
+        return json.loads(body)
+    # Sharded fallback: /stats on a sharded DB rejects calls without a
+    # nodeTag.  Re-route via the orchestrator carrying the target's tag.
+    if status == 500 and b"nodeTag is mandatory" in body:
+        try:
+            orch = orchestrator_for(target, p["ravendb_domain"], db,
+                                    p["client_cert"], p["ca_cert"])
+        except Exception:
+            return None
+        tag = target[-1].upper()
+        path = "/databases/%s/stats?nodeTag=%s" % (db, tag)
+        try:
+            status, body = request("GET", orch, p["ravendb_domain"], path,
+                                   p["client_cert"], p["ca_cert"])
+        except Exception:
+            return None
+        return json.loads(body) if status == 200 else None
+    return None
 
 
 def per_node_field(p, nodes_or_map, field):
