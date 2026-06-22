@@ -724,7 +724,7 @@
         timeout: "{{ tombstone_settle_timeout_secs | default(300) | int }}"
         poll_interval: 3
       register: r
-      failed_when: "{{ not (relax_rp1_tombstone_wait | default(false) | bool) and (r.failed | default(false)) }}"
+      failed_when: "not (relax_rp1_tombstone_wait | default(false) | bool) and (r.failed | default(false))"
     - name: Show result
       ansible.builtin.debug:
         msg: "tombstone settle ({{ 'informational' if (relax_rp1_tombstone_wait | default(false) | bool) else 'strict' }}): {{ r.msg | default('ok') }}"

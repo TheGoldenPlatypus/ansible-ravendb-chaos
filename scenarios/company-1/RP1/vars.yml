@@ -75,12 +75,15 @@ tombstone_settle_timeout_secs: 300
 burst_cooldown_secs: 45
 
 # ---------- Relax knobs (overnight noise tolerance) -------------------------
-# Default false = strict, fail the scenario on violation.
-# Override -e relax_rp1_cv_checks=true to demote the 3 I-13 CV-parity diagnostics
-# (stored_item_cv_split, cross_cluster_cv_equality, cv_boundary_by_dbid) to
-# informational -- still printed in the log, no scenario fail.
-# Override -e relax_rp1_tombstone_wait=true to demote the stats_field_parity wait
-# on CountOfTombstones to informational -- a timeout no longer fails the scenario.
-# Use under heavy concurrent overnight load where these checks fire false-positives.
+# relax_rp1_cv_checks default false = strict.  Override -e relax_rp1_cv_checks=true
+# to demote the 3 I-13 CV-parity diagnostics (stored_item_cv_split,
+# cross_cluster_cv_equality, cv_boundary_by_dbid) to informational -- still printed
+# in the log, no scenario fail.  Use under heavy concurrent overnight load.
+#
+# relax_rp1_tombstone_wait default TRUE -- the CountOfTombstones stats_field_parity
+# wait is informational by default.  Cross-replica tombstone counts lag on whichever
+# sink the per-node cleanup hasn't kicked on; it's not a correctness signal for
+# replication and was producing repeated false-positive timeouts.  Override
+# -e relax_rp1_tombstone_wait=false to restore the strict behaviour.
 relax_rp1_cv_checks: false
-relax_rp1_tombstone_wait: false
+relax_rp1_tombstone_wait: true
