@@ -506,7 +506,7 @@
   connection: local
   gather_facts: false
   tasks:
-    - name: "Wait for etag parity across hub a/b/c (post-seed drain)"
+    - name: "Wait for etag stability across hub a/b/c (post-seed drain)"
       ravendb_wait:
         kind: etag_parity
         ravendb_domain: "{{ ravendb_domain }}"
@@ -518,7 +518,7 @@
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
-    - name: "Wait for etag parity across sink a/b/c (post-seed drain)"
+    - name: "Wait for etag stability across sink a/b/c (post-seed drain)"
       ravendb_wait:
         kind: etag_parity
         ravendb_domain: "{{ ravendb_domain }}"
@@ -688,7 +688,7 @@
         seconds: "{{ burst_cooldown_secs | default(45) | int }}"
       when: (burst_cooldown_secs | default(45) | int) > 0
 
-    - name: "Wait for etag parity across hub a/b/c (post-burst drain)"
+    - name: "Wait for etag stability across hub a/b/c (post-burst drain)"
       ravendb_wait:
         kind: etag_parity
         ravendb_domain: "{{ ravendb_domain }}"
@@ -700,7 +700,7 @@
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
-    - name: "Wait for etag parity across sink a/b/c (post-burst drain)"
+    - name: "Wait for etag stability across sink a/b/c (post-burst drain)"
       ravendb_wait:
         kind: etag_parity
         ravendb_domain: "{{ ravendb_domain }}"
@@ -779,12 +779,20 @@
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
+
     - name: Side-by-side diff of baseline vs post-batch DatabaseChangeVector
       ansible.builtin.shell: |
+        read_cv() {
+          local f="$1"
+          if [ ! -f "$f" ]; then printf '%s' '<MISSING>'; return; fi
+          local v; v=$(cat "$f")
+          if [ -z "$v" ]; then printf '%s' '<EMPTY -- /stats.DatabaseChangeVector not reported by this build>'; return; fi
+          printf '%s' "$v"
+        }
         for n in {{ hub_id | default(1) }}a {{ sink_id | default(2) }}a; do
           echo "=== $n ==="
-          echo "baseline : $(cat {{ playbook_dir }}/capture/baseline/$n.cv 2>/dev/null || echo MISSING)"
-          echo "postbatch: $(cat {{ playbook_dir }}/capture/postbatch/$n.cv 2>/dev/null || echo MISSING)"
+          echo "baseline : $(read_cv {{ playbook_dir }}/capture/baseline/$n.cv)"
+          echo "postbatch: $(read_cv {{ playbook_dir }}/capture/postbatch/$n.cv)"
           echo
         done
       register: cv_diff
@@ -989,7 +997,7 @@
       loop_control:
         label: "{{ item.id }} ({{ item.collection }})"
 
-    - name: "Wait for sink etag parity to settle after local SB updates"
+    - name: "Wait for sink etag stability after local SB updates"
       ravendb_wait:
         kind: etag_parity
         ravendb_domain: "{{ ravendb_domain }}"
