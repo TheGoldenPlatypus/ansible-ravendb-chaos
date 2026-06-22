@@ -23,10 +23,13 @@
 #         upgrade window.  Sharding spreads the writes across the three shards.
 #   3-5.  Phase (a): upgrade each shard's single replica one at a time -- Sx (1a), then Sy (1b),
 #         then Sz (1c).  Run a schema-version checkpoint after each shard finishes.
-#   6.    Phase (a): stop the writer, drain each shard, trigger tombstone cleanup, wait for
-#         tombstone counts to converge on every shard, then run the per-shard assertions
-#         (/stats parity, revision-count parity, no orphans) and confirm every source node is
-#         on the new build.
+#   6.    Phase (a): stop the writer, trigger tombstone cleanup on each shard's owner, then
+#         run the final asserts that still have signal under 3-shard x 1-replica: cluster-
+#         aggregate doc count via the orchestrator, schema-version convergence across all 3
+#         source nodes, and a SupportedFeatures readback.  The old cross-replica parity
+#         checks (etag/stats/tombstone-settle parity per shard) were removed -- with 1 replica
+#         per shard there is no peer to compare to, and the checks were failing with
+#         "no probed node has database 'db1'" because each owner only hosts db1$N internally.
 #   7.    Phase (b): export the sharded source to a .ravendbdump file on the controller.
 #   8.    Phase (b): import that dump into the non-sharded target.
 #   9.    Phase (b): the final cross-check -- the source's aggregated doc count must equal the
@@ -333,7 +336,7 @@
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
 
-# ----- step 6: phase (a) -- stop the writer, drain every shard, run the per-shard asserts -----
+# ----- step 6: phase (a) -- stop the writers, run final asserts (3 shards x 1 replica) --------
 
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/assert_workload_alive.yml
   vars: { pidfile: "/tmp/w1-{{ src_cluster_id | default(1) }}a-db1.pid" }
@@ -345,59 +348,16 @@
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
   vars: { pidfile: "/tmp/w1c-{{ src_cluster_id | default(1) }}a-db1.pid" }
 
-- name: RV-2 step 6 -- drain + tombstone settle + per-shard final asserts
+- name: RV-2 step 6 -- final asserts (3 shards x 1 replica)
   hosts: localhost
   connection: local
   gather_facts: false
   vars_files: [vars.yml]
   tasks:
-    # Drain each shard.  Once internal replication catches up, all 3 replicas of a shard
-    # should report the same etag.
-    - name: Drain shard Sx
-      ravendb_wait:
-        kind: etag_parity
-        ravendb_domain: "{{ ravendb_domain }}"
-        client_cert: "{{ cert_dir }}/client.pem"
-        ca_cert: "{{ cert_ca_crt }}"
-        db_name: db1
-        nodes: "{{ shard_nodes['0'] }}"
-        timeout: "{{ drain_budget_secs | default(180) | int }}"
-      register: r
-    - name: Show result
-      ansible.builtin.debug: { msg: "{{ r.msg }}" }
-
-    - name: Drain shard Sy
-      ravendb_wait:
-        kind: etag_parity
-        ravendb_domain: "{{ ravendb_domain }}"
-        client_cert: "{{ cert_dir }}/client.pem"
-        ca_cert: "{{ cert_ca_crt }}"
-        db_name: db1
-        nodes: "{{ shard_nodes['1'] }}"
-        timeout: "{{ drain_budget_secs | default(180) | int }}"
-      register: r
-    - name: Show result
-      ansible.builtin.debug: { msg: "{{ r.msg }}" }
-
-    - name: Drain shard Sz
-      ravendb_wait:
-        kind: etag_parity
-        ravendb_domain: "{{ ravendb_domain }}"
-        client_cert: "{{ cert_dir }}/client.pem"
-        ca_cert: "{{ cert_ca_crt }}"
-        db_name: db1
-        nodes: "{{ shard_nodes['2'] }}"
-        timeout: "{{ drain_budget_secs | default(180) | int }}"
-      register: r
-    - name: Show result
-      ansible.builtin.debug: { msg: "{{ r.msg }}" }
-
-    # Tombstone cleanup runs on a per-node timer; without fresh activity it won't converge
-    # on its own within 5 minutes, so trigger it explicitly.  The sharded cleanup endpoint
-    # needs BOTH a nodeTag and a shardNumber and only cleans that one replica's local store,
-    # so we loop over every (shard, replica) pair.  Skipping any pair would leave tombstones
-    # on the other replicas and the parity wait below would hang.
-    - name: Trigger tombstone cleanup per (shard, replica)
+    # Tombstone cleanup still gets triggered -- the endpoint takes (shardNumber, nodeTag) and
+    # cleans the single owner's local store for that shard.  No cross-replica settle wait
+    # afterwards (one replica = nothing to converge to).
+    - name: Trigger tombstone cleanup per (shard, owner)
       ansible.builtin.uri:
         url: >-
           https://{{ src_leader }}.{{ ravendb_domain }}:443/databases/db1/admin/tombstones/cleanup?nodeTag={{ item.1 }}&shardNumber={{ item.0.key }}
@@ -409,7 +369,7 @@
       loop: "{{ shard_topology | dict2items | subelements('value') }}"
       loop_control:
         label: "shard {{ item.0.key }} via nodeTag={{ item.1 }}"
-    - name: Show tombstones/cleanup result per (shard, replica)
+    - name: Show tombstones/cleanup result per (shard, owner)
       ansible.builtin.debug:
         msg: "tombstones/cleanup shard {{ cr.item.0.key }} nodeTag={{ cr.item.1 }} -> HTTP {{ cr.status }}  cleaned={{ (cr.json or {}).Value | default('?') }}"
       loop: "{{ cleanup_results.results }}"
@@ -417,129 +377,23 @@
         loop_var: cr
         label: "shard {{ cr.item.0.key }} nodeTag={{ cr.item.1 }}"
 
-    # Tombstone counts drift between replicas until each node's background cleanup actually
-    # runs.  Wait per-shard for those counts to converge before running full /stats parity --
-    # otherwise the parity check fails on a benign transient.
-    - name: Sx tombstone settle
-      ravendb_wait:
-        kind: stats_field_parity
-        ravendb_domain: "{{ ravendb_domain }}"
-        client_cert: "{{ cert_dir }}/client.pem"
-        ca_cert: "{{ cert_ca_crt }}"
-        db_name: db1
-        nodes: "{{ shard_nodes['0'] }}"
-        fields: ["CountOfTombstones"]
-        timeout: "{{ tombstone_settle_timeout | default(300) | int }}"
-        poll_interval: 3
-      register: r
-    - name: Show result
-      ansible.builtin.debug: { msg: "{{ r.msg }}" }
-
-    - name: Sy tombstone settle
-      ravendb_wait:
-        kind: stats_field_parity
-        ravendb_domain: "{{ ravendb_domain }}"
-        client_cert: "{{ cert_dir }}/client.pem"
-        ca_cert: "{{ cert_ca_crt }}"
-        db_name: db1
-        nodes: "{{ shard_nodes['1'] }}"
-        fields: ["CountOfTombstones"]
-        timeout: "{{ tombstone_settle_timeout | default(300) | int }}"
-        poll_interval: 3
-      register: r
-    - name: Show result
-      ansible.builtin.debug: { msg: "{{ r.msg }}" }
-
-    - name: Sz tombstone settle
-      ravendb_wait:
-        kind: stats_field_parity
-        ravendb_domain: "{{ ravendb_domain }}"
-        client_cert: "{{ cert_dir }}/client.pem"
-        ca_cert: "{{ cert_ca_crt }}"
-        db_name: db1
-        nodes: "{{ shard_nodes['2'] }}"
-        fields: ["CountOfTombstones"]
-        timeout: "{{ tombstone_settle_timeout | default(300) | int }}"
-        poll_interval: 3
-      register: r
-    - name: Show result
-      ansible.builtin.debug: { msg: "{{ r.msg }}" }
-
-    # /stats parity within each shard -- the three replicas of a shard should agree on
-    # everything once the shard is drained.
-    - name: Sx stats parity
+    # Cluster-aggregate doc count via the orchestrator.  Under 3-shard x 1-replica this is
+    # the only meaningful aggregate-side count check; the per-shard /stats parity that used
+    # to live here required a peer node hosting the same shard, which no longer exists.
+    # Stricter source-union vs target equality is verified in step 9.
+    - name: Source aggregate doc count (orchestrator-aggregated)
       ravendb_diagnostic:
-        kind: stats_parity
-        settle_secs: "{{ stats_parity_settle_secs | default(120) | int }}"
+        kind: doc_count
         ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
         ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ src_leader }}"
         db_name: db1
-        nodes: "{{ shard_nodes['0'] }}"
-        assert_mode: true
       register: r
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
-    - name: Sy stats parity
-      ravendb_diagnostic:
-        kind: stats_parity
-        settle_secs: "{{ stats_parity_settle_secs | default(120) | int }}"
-        ravendb_domain: "{{ ravendb_domain }}"
-        client_cert: "{{ cert_dir }}/client.pem"
-        ca_cert: "{{ cert_ca_crt }}"
-        db_name: db1
-        nodes: "{{ shard_nodes['1'] }}"
-        assert_mode: true
-      register: r
-    - name: Show result
-      ansible.builtin.debug: { msg: "{{ r.msg }}" }
-
-    - name: Sz stats parity
-      ravendb_diagnostic:
-        kind: stats_parity
-        settle_secs: "{{ stats_parity_settle_secs | default(120) | int }}"
-        ravendb_domain: "{{ ravendb_domain }}"
-        client_cert: "{{ cert_dir }}/client.pem"
-        ca_cert: "{{ cert_ca_crt }}"
-        db_name: db1
-        nodes: "{{ shard_nodes['2'] }}"
-        assert_mode: true
-      register: r
-    - name: Show result
-      ansible.builtin.debug: { msg: "{{ r.msg }}" }
-
-    # Per-doc revision-count parity + an orphan-revisions check, per shard.  The sample size
-    # is kept small on purpose -- a sparse probe is the only practical way at this scale.
-    - name: Sx revision count parity
-      ravendb_diagnostic:
-        kind: revision_count_parity
-        ravendb_domain: "{{ ravendb_domain }}"
-        client_cert: "{{ cert_dir }}/client.pem"
-        ca_cert: "{{ cert_ca_crt }}"
-        db_name: db1
-        nodes: "{{ shard_nodes['0'] }}"
-        id_prefix: "{{ seed_prefix }}"
-        count: "{{ parity_probe_count | default(50) | int }}"
-        assert_mode: true
-      register: r
-    - name: Show result
-      ansible.builtin.debug: { msg: "{{ r.msg }}" }
-
-    - name: Sx orphan revisions
-      ravendb_diagnostic:
-        kind: orphan_revisions
-        ravendb_domain: "{{ ravendb_domain }}"
-        client_cert: "{{ cert_dir }}/client.pem"
-        ca_cert: "{{ cert_ca_crt }}"
-        db_name: db1
-        nodes: "{{ shard_nodes['0'] }}"
-        assert_mode: true
-      register: r
-    - name: Show result
-      ansible.builtin.debug: { msg: "{{ r.msg }}" }
-
-    # Every source node should now report the same new-build schema version.
+    # Every source node should now report the same new-build schema version (I-10).
     - name: All 3 source nodes on v_new (schema parity)
       ravendb_diagnostic:
         kind: schema_version
