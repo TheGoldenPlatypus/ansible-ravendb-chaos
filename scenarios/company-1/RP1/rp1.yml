@@ -712,8 +712,6 @@
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
-    # Tombstone-cleanup convergence: the delete burst created tombstones; cleanup runs at
-    # different rates per node depending on each node's burst load.
     - name: "Wait for tombstone-count convergence across sink a/b/c"
       ravendb_wait:
         kind: stats_field_parity
@@ -726,8 +724,10 @@
         timeout: "{{ tombstone_settle_timeout_secs | default(300) | int }}"
         poll_interval: 3
       register: r
+      failed_when: "{{ not (relax_rp1_tombstone_wait | default(false) | bool) and (r.failed | default(false)) }}"
     - name: Show result
-      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+      ansible.builtin.debug:
+        msg: "tombstone settle ({{ 'informational' if (relax_rp1_tombstone_wait | default(false) | bool) else 'strict' }}): {{ r.msg | default('ok') }}"
 
     # Post-burst hub-sink doc-set completeness.  Same shape as the post-seed
     # check, but now run AFTER the burst (new writes + delete-restore loop) has
@@ -872,7 +872,7 @@
           - "users/sink1/family/ts/0"
           - "users/sink1/family/tsdel/0"
           - "users/sink1/family/conflict/0"
-        assert_mode: true
+        assert_mode: "{{ not (relax_rp1_cv_checks | default(false) | bool) }}"
       register: r
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
@@ -890,7 +890,7 @@
         db_name: db1
         nodes: ["{{ sink_id | default(2) }}a", "{{ sink_id | default(2) }}b", "{{ sink_id | default(2) }}c"]
         doc_ids: *family_doc_ids
-        assert_mode: true
+        assert_mode: "{{ not (relax_rp1_cv_checks | default(false) | bool) }}"
       register: r
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
@@ -906,7 +906,7 @@
         db_name: db1
         source_nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
         receiver_nodes: ["{{ sink_id | default(2) }}a", "{{ sink_id | default(2) }}b", "{{ sink_id | default(2) }}c"]
-        assert_mode: true
+        assert_mode: "{{ not (relax_rp1_cv_checks | default(false) | bool) }}"
       register: r
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }

@@ -73,3 +73,14 @@ tombstone_settle_timeout_secs: 300
 # curl connections; each lingers ~60s in TIME_WAIT on the controller, exhausting
 # ephemeral ports for the next /stats probe).
 burst_cooldown_secs: 45
+
+# ---------- Relax knobs (overnight noise tolerance) -------------------------
+# Default false = strict, fail the scenario on violation.
+# Override -e relax_rp1_cv_checks=true to demote the 3 I-13 CV-parity diagnostics
+# (stored_item_cv_split, cross_cluster_cv_equality, cv_boundary_by_dbid) to
+# informational -- still printed in the log, no scenario fail.
+# Override -e relax_rp1_tombstone_wait=true to demote the stats_field_parity wait
+# on CountOfTombstones to informational -- a timeout no longer fails the scenario.
+# Use under heavy concurrent overnight load where these checks fire false-positives.
+relax_rp1_cv_checks: false
+relax_rp1_tombstone_wait: false
