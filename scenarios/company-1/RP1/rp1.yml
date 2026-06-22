@@ -156,15 +156,15 @@
     db_name: db1
 
 
-# ----- pre-step 2: wipe capture dir so step 3 below starts on a clean slate -------------------
-- name: RP-1 capture-dir reset (pre-seed cleanup)
+# ----- pre-step 2: wipe this iter's capture subdir so step 3 below starts clean ---------------
+- name: RP-1 capture-dir reset (this iter only)
   hosts: localhost
   connection: local
   gather_facts: false
   tasks:
-    - name: Reset capture dir for this run
+    - name: Reset capture dir for this iter
       ansible.builtin.file:
-        path: "{{ playbook_dir }}/capture"
+        path: "{{ playbook_dir }}/capture/{{ hub_id | default(1) }}"
         state: absent
 
 
@@ -578,7 +578,7 @@
   tasks:
     - name: Create capture/baseline directory
       ansible.builtin.file:
-        path: "{{ playbook_dir }}/capture/baseline"
+        path: "{{ playbook_dir }}/capture/{{ hub_id | default(1) }}/baseline"
         state: directory
 
     - name: "Capture baseline change vectors on hub + sink leaders"
@@ -591,7 +591,7 @@
         nodes:
           - "{{ hub_id | default(1) }}a"
           - "{{ sink_id | default(2) }}a"
-        output_dir: "{{ playbook_dir }}/capture/baseline"
+        output_dir: "{{ playbook_dir }}/capture/{{ hub_id | default(1) }}/baseline"
       register: r
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
@@ -761,7 +761,7 @@
   tasks:
     - name: Create capture/postbatch directory
       ansible.builtin.file:
-        path: "{{ playbook_dir }}/capture/postbatch"
+        path: "{{ playbook_dir }}/capture/{{ hub_id | default(1) }}/postbatch"
         state: directory
 
     - name: "Capture post-batch change vectors on hub + sink leaders"
@@ -774,7 +774,7 @@
         nodes:
           - "{{ hub_id | default(1) }}a"
           - "{{ sink_id | default(2) }}a"
-        output_dir: "{{ playbook_dir }}/capture/postbatch"
+        output_dir: "{{ playbook_dir }}/capture/{{ hub_id | default(1) }}/postbatch"
       register: r
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
@@ -791,8 +791,8 @@
         }
         for n in {{ hub_id | default(1) }}a {{ sink_id | default(2) }}a; do
           echo "=== $n ==="
-          echo "baseline : $(read_cv {{ playbook_dir }}/capture/baseline/$n.cv)"
-          echo "postbatch: $(read_cv {{ playbook_dir }}/capture/postbatch/$n.cv)"
+          echo "baseline : $(read_cv {{ playbook_dir }}/capture/{{ hub_id | default(1) }}/baseline/$n.cv)"
+          echo "postbatch: $(read_cv {{ playbook_dir }}/capture/{{ hub_id | default(1) }}/postbatch/$n.cv)"
           echo
         done
       register: cv_diff
@@ -808,8 +808,8 @@
         ca_cert: "{{ cert_ca_crt }}"
         hub_nodes:  ["{{ hub_id | default(1) }}a"]
         sink_nodes: ["{{ sink_id | default(2) }}a"]
-        baseline_dir:  "{{ playbook_dir }}/capture/baseline"
-        postbatch_dir: "{{ playbook_dir }}/capture/postbatch"
+        baseline_dir:  "{{ playbook_dir }}/capture/{{ hub_id | default(1) }}/baseline"
+        postbatch_dir: "{{ playbook_dir }}/capture/{{ hub_id | default(1) }}/postbatch"
         assert_mode: "{{ not (relax_rp1_cv_checks | default(false) | bool) }}"
       register: r
     - name: Show DB-CV health result
