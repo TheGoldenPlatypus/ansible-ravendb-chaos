@@ -1505,7 +1505,13 @@ def k_stored_item_cv_split(p):
         has_delim = delimiter in cv
         ok = (has_delim and expect == "split") or (not has_delim and expect == "raw")
         verdict = "OK" if ok else "MISMATCH"
-        lines.append("  %s  %s  cv=%s" % (doc_id, verdict, cv))
+        lines.append("  %s  %s" % (doc_id, verdict))
+        if has_delim:
+            order, extra = cv.split(delimiter, 1)
+            lines.append("    order: %s" % order.strip())
+            lines.append("    extra: %s" % extra.strip())
+        else:
+            lines.append("    raw  : %s" % cv)
         if not ok:
             violations.append(doc_id)
 
@@ -1644,31 +1650,39 @@ def k_db_cv_health(p):
         return {dbid: int(etag) for _tag, etag, dbid in
                 _CV_ENTRY_FULL_RE.findall(txt)}
 
-    lines = ["DB-CV health  hub=%s  sink=%s" % (hub_nodes, sink_nodes)]
+    lines = ["DB-CV health  (hub=%s  sink=%s)" % (hub_nodes, sink_nodes), ""]
     fails = []
 
-    for side, nodes in (("hub", hub_nodes), ("sink", sink_nodes)):
+    # --- Intactness, per side, per node --------------------------------------
+    lines.append("  Intactness (every baseline dbid still present, etag not rewound):")
+    for side, nodes in (("hub ", hub_nodes), ("sink", sink_nodes)):
         for node in nodes:
             b = _load(os.path.join(baseline_dir, "%s.cv" % node))
             q = _load(os.path.join(postbatch_dir, "%s.cv" % node))
             if b is None or q is None:
-                fails.append("  intact %s/%s: missing capture file" % (side, node))
+                lines.append("    %s %-6s  FAIL -- MISSING capture file" % (side, node))
+                fails.append("intact %s/%s: missing capture file" % (side.strip(), node))
                 continue
             if not b:
-                lines.append("  intact %s/%s: baseline empty -- skipped" % (side, node))
+                lines.append("    %s %-6s  skipped (baseline empty -- no pre-burst writes)"
+                             % (side, node))
                 continue
             missing = sorted(d for d in b if d not in q)
             rewound = sorted((d, b[d], q[d]) for d in b if d in q and q[d] < b[d])
-            if missing:
-                fails.append("  intact %s/%s: dbids missing in postbatch: %s"
-                             % (side, node, missing))
-            if rewound:
-                fails.append("  intact %s/%s: dbids rewound (dbid, baseline_etag, postbatch_etag): %s"
-                             % (side, node, rewound))
-            if not missing and not rewound:
-                lines.append("  intact %s/%s: %d dbid(s) present + advanced (or equal)"
+            if missing or rewound:
+                lines.append("    %s %-6s  FAIL" % (side, node))
+                if missing:
+                    lines.append("      missing dbid(s) in postbatch: %s" % missing)
+                    fails.append("intact %s/%s: missing %s" % (side.strip(), node, missing))
+                if rewound:
+                    lines.append("      rewound dbid(s) (dbid, baseline_etag, postbatch_etag): %s"
+                                 % rewound)
+                    fails.append("intact %s/%s: rewound %s" % (side.strip(), node, rewound))
+            else:
+                lines.append("    %s %-6s  OK -- %d dbid(s) advanced or equal"
                              % (side, node, len(b)))
 
+    # --- Leakage check (hub dbid set vs sink dbid set must be disjoint) ------
     hub_set = set()
     for n in hub_nodes:
         d = _load(os.path.join(postbatch_dir, "%s.cv" % n))
@@ -1680,16 +1694,25 @@ def k_db_cv_health(p):
         if d:
             sink_set |= set(d)
     overlap = hub_set & sink_set
-    if overlap:
-        fails.append("  leak: hub and sink share dbid(s) in postbatch DB-CV: %s"
-                     % sorted(overlap))
-    else:
-        lines.append("  leak: hub dbids=%s  sink dbids=%s  -- disjoint, no leakage"
-                     % (sorted(hub_set), sorted(sink_set)))
 
+    lines.append("")
+    lines.append("  Leakage (hub DB-CV dbids vs sink DB-CV dbids must be disjoint):")
+    lines.append("    hub  dbids (%d):" % len(hub_set))
+    for d in sorted(hub_set):
+        lines.append("      - %s" % d)
+    lines.append("    sink dbids (%d):" % len(sink_set))
+    for d in sorted(sink_set):
+        lines.append("      - %s" % d)
+    if overlap:
+        lines.append("    overlap (%d): %s  ->  LEAK FOUND" % (len(overlap), sorted(overlap)))
+        fails.append("leak: hub<->sink share dbid(s) %s" % sorted(overlap))
+    else:
+        lines.append("    overlap: none  ->  NO LEAK")
+
+    lines.append("")
     if fails:
-        return violation(assert_mode, lines + ["FAIL  DB-CV health:"] + fails)
-    lines.append("PASS  DB-CV intact + no hub<->sink dbid leakage")
+        return violation(assert_mode, lines + ["RESULT: FAIL  --  %s" % "; ".join(fails)])
+    lines.append("RESULT: PASS  --  DB-CV intact + no hub<->sink dbid leakage")
     return lines
 
 
