@@ -16,6 +16,12 @@
 #   3.  Seed the hub with seven prefix buckets (~15k documents) and wait for the filter to
 #       drain -- a marker document under each allowed prefix has to reach its target sink
 #       before continuing.
+#       [pre-step-4]   START ConsistencyCheck, sleep one repair window, STOP it.  The
+#                      hub also receives sink-local docs via the bidi sink->hub pull task
+#                      that the forward-direction marker waits don't gate on; if seed-time
+#                      drift exists (timing or a real replication bug), the tool repairs
+#                      it before T0's strict CountOfDocuments parity assert runs.  The
+#                      Run Summary tells you whether any patches were actually applied.
 #   4.  Take a baseline checkpoint while everything is quiet on the old binary, including
 #       a filter compliance check that catches any leak introduced during seeding.
 #   5.  Start two background hub-side workloads (W-1, W-2) writing across all seven buckets
@@ -521,18 +527,52 @@
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
 
-# ----- ConsistencyCheck lifecycle ------------------------------------------------------------
-# The tool's apply-repair churns docs on the hub leader continuously.  Running it
-# during the step-4 T0 baseline /stats_parity check made the counts never settle
-# (poll budget exhausted because the tool kept writing) -- the baseline is meant
-# to verify a clean post-seed cluster, the tool has no business there.
+# ----- pre-T0: ConsistencyCheck repair pass to converge seed-time drift ----------------------
+# The hub receives docs from two directions during seed:
+#   * direct PUTs from step 3 to the hub leader, fanned out via internal replication
+#   * 2000 sink1-local docs and 2000 sink2-local docs flowing back via the bidi
+#     sink->hub pull task
+# The reverse flow (sink->hub) is asynchronous and the existing pre-T0 waits only
+# check forward (hub->sink markers).  T0's strict /stats_parity assert on hub
+# CountOfDocuments would otherwise time out chasing a still-arriving tail.
 #
-# Tool is therefore started AFTER each upgrade step (post step 6 / 8 / 10b), not
-# before T0.  It runs during the three steady-state windows (checkpoint A,
-# checkpoint B, endpoint checkpoint).  Each upgrade-step bracket (stop before
-# the upgrade, start after) prevents the auto-resume deadlock that hits when a
-# node restart loses an in-flight patch operation ID -- see the stop/start
-# imports interleaved with step 6 / 8 / 10 below.
+# Run ConsistencyCheck for one repair window so it reconciles whatever drift
+# remains.  Stop it BEFORE T0 (the tool's continuous apply-repair would race
+# T0's poll loop and counts would never settle).  The Run Summary box printed
+# on stop tells us how many patches were applied -- 0 means seed-time drift
+# was just timing; >0 means there was real divergence the tool fixed.
+- ansible.builtin.import_playbook: ../../../toolbox/consistency_check/start.yml
+  vars:
+    db_name: db1
+    net: "{{ docker_network_name }}"
+    node_leaders:
+      - { label: "Hub-A",   host: "{{ hub_id   | default(1) }}a" }
+      - { label: "Sink1-A", host: "{{ sink1_id | default(2) }}a" }
+      - { label: "Sink2-A", host: "{{ sink2_id | default(3) }}a" }
+
+- name: RPV-1 pre-T0 -- give ConsistencyCheck a window to repair seed-time drift
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: "Sleep {{ pre_t0_repair_secs | default(120) | int }}s while the tool patches drift"
+      ansible.builtin.pause:
+        seconds: "{{ pre_t0_repair_secs | default(120) | int }}"
+
+- ansible.builtin.import_playbook: ../../../toolbox/consistency_check/stop.yml
+  vars: { net: "{{ docker_network_name }}" }
+
+
+# ----- ConsistencyCheck lifecycle ------------------------------------------------------------
+# After the pre-T0 repair pass above, the tool is stopped through T0 and step 5
+# (workload launch) -- its continuous apply-repair would race T0's /stats_parity
+# poll loop and the counts would never settle.
+#
+# Tool is started again AFTER each upgrade step (post step 6 / 8 / 10b).  It runs
+# during the three steady-state windows (checkpoint A, checkpoint B, endpoint
+# checkpoint).  Each upgrade-step bracket (stop before, start after) prevents the
+# auto-resume deadlock that hits when a node restart loses an in-flight patch
+# operation ID -- see the stop/start imports interleaved with step 6 / 8 / 10 below.
 
 
 # ----- step 4: baseline checkpoint while the topology is still quiet on the old binary -------
