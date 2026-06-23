@@ -21,21 +21,20 @@ cd "$(dirname "$0")/../../.."
 
 HUB="$CID"; S1=$((CID + 1)); S2=$((CID + 2))
 
-# Per-iter controller-side host ports for ConsistencyCheck (state-store + the
-# tool's /health-check).  Default 8084 / 8081 collides on parallel iters; derive
-# both from CID so each iter binds a unique slot (gap of 10 between iters leaves
-# headroom and avoids state/health overlap):
-#   CID 1   (single)      -> state=8084  health=8081
-#   CID 30  (parallel #1) -> state=8084  health=8081
-#   CID 130 (parallel #2) -> state=8094  health=8091
-#   CID 230 (parallel #3) -> state=8104  health=8101
+# Per-iter controller-side host port for ConsistencyCheck's state-store container.
+# Default 8084 collides on parallel iters; derive from CID so each iter binds a
+# unique slot (gap of 10 leaves headroom):
+#   CID 1   (single)      -> state=8084
+#   CID 30  (parallel #1) -> state=8084
+#   CID 130 (parallel #2) -> state=8094
+#   CID 230 (parallel #3) -> state=8104
+# No --health-bind on the one-shot profile, so no health-port var needed.
 PORT_OFFSET=$(( (CID / 100) * 10 ))
 CC_STATE_PORT=$(( 8084 + PORT_OFFSET ))
-CC_HEALTH_PORT=$(( 8081 + PORT_OFFSET ))
 
 C=( -e cluster_id_start="$CID" -e hub_id="$HUB" -e sink1_id="$S1" -e sink2_id="$S2"
     -e docker_network_name="$NET" -e backups_volume_name="lab_backups_$NET"
-    -e cc_state_port="$CC_STATE_PORT" -e cc_health_port="$CC_HEALTH_PORT" )
+    -e cc_state_port="$CC_STATE_PORT" )
 # Overnight runner sets DOCKER_NETWORK_SUBNET to pin container IPs so post-mortem
 # `docker start` returns each container to its original IP.  Single-scenario runs
 # leave it unset and fall back to Docker auto-assign.
