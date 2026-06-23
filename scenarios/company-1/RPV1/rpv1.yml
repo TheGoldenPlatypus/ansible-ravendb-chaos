@@ -545,6 +545,8 @@
   vars:
     db_name: db1
     net: "{{ docker_network_name }}"
+    state_store_host_port: "{{ cc_state_port  | default(8084) | int }}"
+    health_port:           "{{ cc_health_port | default(8081) | int }}"
     node_leaders:
       - { label: "Hub-A",   host: "{{ hub_id   | default(1) }}a" }
       - { label: "Sink1-A", host: "{{ sink1_id | default(2) }}a" }
@@ -898,6 +900,8 @@
   vars:
     db_name: db1
     net: "{{ docker_network_name }}"
+    state_store_host_port: "{{ cc_state_port  | default(8084) | int }}"
+    health_port:           "{{ cc_health_port | default(8081) | int }}"
     node_leaders:
       - { label: "Hub-A",   host: "{{ hub_id   | default(1) }}a" }
       - { label: "Sink1-A", host: "{{ sink1_id | default(2) }}a" }
@@ -1039,7 +1043,9 @@
 
 # Catch an early ConsistencyCheck death between upgrade sub-batches.
 - ansible.builtin.import_playbook: ../../../toolbox/consistency_check/assert_alive.yml
-  vars: { net: "{{ docker_network_name }}" }
+  vars:
+    net: "{{ docker_network_name }}"
+    health_port: "{{ cc_health_port | default(8081) | int }}"
 
 
 # ----- step 8: upgrade the second batch of three nodes (default variant A: the hub) ----------
@@ -1084,6 +1090,8 @@
   vars:
     db_name: db1
     net: "{{ docker_network_name }}"
+    state_store_host_port: "{{ cc_state_port  | default(8084) | int }}"
+    health_port:           "{{ cc_health_port | default(8081) | int }}"
     node_leaders:
       - { label: "Hub-A",   host: "{{ hub_id   | default(1) }}a" }
       - { label: "Sink1-A", host: "{{ sink1_id | default(2) }}a" }
@@ -1219,7 +1227,9 @@
 
 # Liveness check between the 2nd and 3rd upgrade sub-batches.
 - ansible.builtin.import_playbook: ../../../toolbox/consistency_check/assert_alive.yml
-  vars: { net: "{{ docker_network_name }}" }
+  vars:
+    net: "{{ docker_network_name }}"
+    health_port: "{{ cc_health_port | default(8081) | int }}"
 
 
 # ----- step 10: upgrade the final batch of three nodes (default variant A: sink-2) -----------
@@ -1295,6 +1305,8 @@
   vars:
     db_name: db1
     net: "{{ docker_network_name }}"
+    state_store_host_port: "{{ cc_state_port  | default(8084) | int }}"
+    health_port:           "{{ cc_health_port | default(8081) | int }}"
     node_leaders:
       - { label: "Hub-A",   host: "{{ hub_id   | default(1) }}a" }
       - { label: "Sink1-A", host: "{{ sink1_id | default(2) }}a" }
@@ -1303,7 +1315,9 @@
 # ----- ConsistencyCheck: stop now that every node is on v_new + feature flags are flipped ----
 # Final liveness check first so a silent death inside the toggle window still surfaces.
 - ansible.builtin.import_playbook: ../../../toolbox/consistency_check/assert_alive.yml
-  vars: { net: "{{ docker_network_name }}" }
+  vars:
+    net: "{{ docker_network_name }}"
+    health_port: "{{ cc_health_port | default(8081) | int }}"
 
 - ansible.builtin.import_playbook: ../../../toolbox/consistency_check/stop.yml
   vars: { net: "{{ docker_network_name }}" }
