@@ -14,15 +14,18 @@
 # No SIGTERM/SIGKILL drama, no missing Summary.
 #
 # What this playbook does (in order):
-#   1. Validate the binary + client cert exist.
-#   2. Spin up the unsecured ccstate-<net> RavenDB container on the iter's docker
+#   1. Validate the source binary + client cert exist.
+#   2. Lay down a fresh per-iter copy of the tool dir under /tmp/cc-<net>/linux-x64
+#      so parallel iters don't race on a shared config.json / output/ / runs/.
+#   3. Spin up the unsecured ccstate-<net> RavenDB container on the iter's docker
 #      network, bootstrap it out of passive, pre-create the ConsistencyCheck.State db.
-#   3. Wipe stale local run artifacts so the tool doesn't try to resume a previous run.
-#   4. Render config.json with the topology + cert + state-store URL.
+#   4. Render config.json into the per-iter tool dir (topology + cert + state-store URL).
 #   5. Run ./ConsistencyCheck --profile live-etag-all-nodes-once SYNCHRONOUSLY.  Captures
 #      stdout+stderr to /tmp/ccheck-<net>.log.  Returns when the tool exits.
 #   6. Extract the Run Summary box from the log and print it.
 #   7. Stop the state-store container (it's per-iter; will be re-created on next call).
+#   8. Remove the per-iter tool dir copy from /tmp.  Override
+#      -e cc_keep_iter_tool_dir=true to preserve it for post-mortem.
 #
 # REQUIRED inputs:
 #   db_name                    Database being inspected.
@@ -46,7 +49,12 @@
   connection: local
   gather_facts: true   # need ansible_env.HOME
   vars:
-    _tool_dir: "{{ tool_dir | default(ansible_env.HOME ~ '/company-1/tools/ConsistencyCheck-linux-x64-2/linux-x64') }}"
+    # SOURCE tool dir on the host -- shared installation, never written to at runtime.
+    _src_tool_dir: "{{ tool_dir | default(ansible_env.HOME ~ '/company-1/tools/ConsistencyCheck-linux-x64-2/linux-x64') }}"
+    # PER-ITER tool dir under /tmp -- a fresh copy is laid down for each invocation
+    # so config.json, output/, and runs/ are isolated.  Parallel iters all share the
+    # same source dir but each writes its own /tmp/cc-<net>/linux-x64 copy.
+    _tool_dir: "/tmp/cc-{{ net }}/linux-x64"
     _client_pfx_path: "{{ client_pfx_path | default(ansible_env.HOME ~ '/company-1/selfsignedmaterials/client.pfx') }}"
     _state_store_image: "{{ state_store_image | default('ravendb/ravendb:latest') }}"
     _state_store_host_port: "{{ state_store_host_port | default(8084) | int }}"
@@ -56,17 +64,32 @@
     _config_path: "{{ _tool_dir }}/output/config.json"
 
   tasks:
-    # 1. validate binary + cert
-    - name: Validate ConsistencyCheck binary exists
+    # 1. validate the SOURCE binary + cert exist on the host
+    - name: Validate ConsistencyCheck binary exists (source)
       ansible.builtin.stat:
-        path: "{{ _tool_dir }}/ConsistencyCheck"
+        path: "{{ _src_tool_dir }}/ConsistencyCheck"
       register: bin_stat
     - name: Assert binary present
       ansible.builtin.assert:
         that: [ bin_stat.stat.exists, bin_stat.stat.executable ]
         fail_msg: >-
           ConsistencyCheck binary missing or not executable at
-          {{ _tool_dir }}/ConsistencyCheck.
+          {{ _src_tool_dir }}/ConsistencyCheck.
+
+    # 1b. lay down a fresh per-iter copy of the tool dir under /tmp -- this gives
+    # each parallel iter its own config.json, output/, and runs/ scratch.  We wipe
+    # any prior copy first so we always start clean.
+    - name: "Sync ConsistencyCheck tool dir to per-iter location ({{ _tool_dir }})"
+      ansible.builtin.shell: |
+        rm -rf {{ _tool_dir }}
+        mkdir -p {{ _tool_dir }}
+        cp -r {{ _src_tool_dir }}/. {{ _tool_dir }}/
+        # Source may carry stale output/runs from a previous host-side run;
+        # nuke and recreate empty so this iter has a clean writable scratch area.
+        rm -rf {{ _tool_dir }}/output
+        mkdir -p {{ _tool_dir }}/output
+        echo "synced {{ _src_tool_dir }} -> {{ _tool_dir }}"
+      changed_when: true
 
     - name: Validate client cert exists
       ansible.builtin.stat:
@@ -160,12 +183,8 @@
         state: directory
         mode: "0755"
 
-    - name: Wipe stale local run artifacts (per-call clean slate)
-      ansible.builtin.shell: |
-        cd {{ _tool_dir }}/output
-        rm -rf runs *.raven-cluster-topology *.raven-database-topology
-        echo "wiped"
-      changed_when: true
+    # Per-iter output/ is already empty (wiped by the per-iter sync above);
+    # no need to scrub runs/ or topology caches again here.
 
     - name: Render config.json
       ansible.builtin.copy:
@@ -245,5 +264,15 @@
       community.docker.docker_container:
         name: "{{ _state_store_name }}"
         state: stopped
+      failed_when: false
+      changed_when: false
+
+    # 8. clean up the per-iter tool dir copy so /tmp doesn't accumulate across iters.
+    #    Override -e cc_keep_iter_tool_dir=true to preserve it for post-mortem.
+    - name: Remove per-iter tool dir copy
+      ansible.builtin.file:
+        path: "/tmp/cc-{{ net }}"
+        state: absent
+      when: not (cc_keep_iter_tool_dir | default(false) | bool)
       failed_when: false
       changed_when: false
