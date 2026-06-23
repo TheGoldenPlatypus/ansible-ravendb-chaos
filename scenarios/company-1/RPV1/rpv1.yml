@@ -849,9 +849,9 @@
     net: "{{ docker_network_name }}"
     state_store_host_port: "{{ cc_state_port | default(8084) | int }}"
     node_leaders:
-      - { label: "Hub-A", host: "{{ hub_id | default(1) }}a" }
-      - { label: "Hub-B", host: "{{ hub_id | default(1) }}b" }
-      - { label: "Hub-C", host: "{{ hub_id | default(1) }}c" }
+      - { label: "{{ hub_id | default(1) }}a", host: "{{ hub_id | default(1) }}a" }
+      - { label: "{{ hub_id | default(1) }}b", host: "{{ hub_id | default(1) }}b" }
+      - { label: "{{ hub_id | default(1) }}c", host: "{{ hub_id | default(1) }}c" }
 
 - ansible.builtin.import_playbook: ../../../toolbox/consistency_check/run_once.yml
   vars:
@@ -859,9 +859,9 @@
     net: "{{ docker_network_name }}"
     state_store_host_port: "{{ cc_state_port | default(8084) | int }}"
     node_leaders:
-      - { label: "Sink1-A", host: "{{ sink1_id | default(2) }}a" }
-      - { label: "Sink1-B", host: "{{ sink1_id | default(2) }}b" }
-      - { label: "Sink1-C", host: "{{ sink1_id | default(2) }}c" }
+      - { label: "{{ sink1_id | default(2) }}a", host: "{{ sink1_id | default(2) }}a" }
+      - { label: "{{ sink1_id | default(2) }}b", host: "{{ sink1_id | default(2) }}b" }
+      - { label: "{{ sink1_id | default(2) }}c", host: "{{ sink1_id | default(2) }}c" }
 
 - ansible.builtin.import_playbook: ../../../toolbox/consistency_check/run_once.yml
   vars:
@@ -869,9 +869,9 @@
     net: "{{ docker_network_name }}"
     state_store_host_port: "{{ cc_state_port | default(8084) | int }}"
     node_leaders:
-      - { label: "Sink2-A", host: "{{ sink2_id | default(3) }}a" }
-      - { label: "Sink2-B", host: "{{ sink2_id | default(3) }}b" }
-      - { label: "Sink2-C", host: "{{ sink2_id | default(3) }}c" }
+      - { label: "{{ sink2_id | default(3) }}a", host: "{{ sink2_id | default(3) }}a" }
+      - { label: "{{ sink2_id | default(3) }}b", host: "{{ sink2_id | default(3) }}b" }
+      - { label: "{{ sink2_id | default(3) }}c", host: "{{ sink2_id | default(3) }}c" }
 
 - name: RPV-1 step 7 -- Checkpoint A (drain + light checks)
   hosts: localhost
@@ -1052,9 +1052,9 @@
     net: "{{ docker_network_name }}"
     state_store_host_port: "{{ cc_state_port | default(8084) | int }}"
     node_leaders:
-      - { label: "Hub-A", host: "{{ hub_id | default(1) }}a" }
-      - { label: "Hub-B", host: "{{ hub_id | default(1) }}b" }
-      - { label: "Hub-C", host: "{{ hub_id | default(1) }}c" }
+      - { label: "{{ hub_id | default(1) }}a", host: "{{ hub_id | default(1) }}a" }
+      - { label: "{{ hub_id | default(1) }}b", host: "{{ hub_id | default(1) }}b" }
+      - { label: "{{ hub_id | default(1) }}c", host: "{{ hub_id | default(1) }}c" }
 
 - ansible.builtin.import_playbook: ../../../toolbox/consistency_check/run_once.yml
   vars:
@@ -1062,9 +1062,9 @@
     net: "{{ docker_network_name }}"
     state_store_host_port: "{{ cc_state_port | default(8084) | int }}"
     node_leaders:
-      - { label: "Sink1-A", host: "{{ sink1_id | default(2) }}a" }
-      - { label: "Sink1-B", host: "{{ sink1_id | default(2) }}b" }
-      - { label: "Sink1-C", host: "{{ sink1_id | default(2) }}c" }
+      - { label: "{{ sink1_id | default(2) }}a", host: "{{ sink1_id | default(2) }}a" }
+      - { label: "{{ sink1_id | default(2) }}b", host: "{{ sink1_id | default(2) }}b" }
+      - { label: "{{ sink1_id | default(2) }}c", host: "{{ sink1_id | default(2) }}c" }
 
 - ansible.builtin.import_playbook: ../../../toolbox/consistency_check/run_once.yml
   vars:
@@ -1072,9 +1072,9 @@
     net: "{{ docker_network_name }}"
     state_store_host_port: "{{ cc_state_port | default(8084) | int }}"
     node_leaders:
-      - { label: "Sink2-A", host: "{{ sink2_id | default(3) }}a" }
-      - { label: "Sink2-B", host: "{{ sink2_id | default(3) }}b" }
-      - { label: "Sink2-C", host: "{{ sink2_id | default(3) }}c" }
+      - { label: "{{ sink2_id | default(3) }}a", host: "{{ sink2_id | default(3) }}a" }
+      - { label: "{{ sink2_id | default(3) }}b", host: "{{ sink2_id | default(3) }}b" }
+      - { label: "{{ sink2_id | default(3) }}c", host: "{{ sink2_id | default(3) }}c" }
 
 - name: RPV-1 step 9 -- Checkpoint B (drain + light checks)
   hosts: localhost
@@ -1280,9 +1280,9 @@
     net: "{{ docker_network_name }}"
     state_store_host_port: "{{ cc_state_port | default(8084) | int }}"
     node_leaders:
-      - { label: "Hub-A", host: "{{ hub_id | default(1) }}a" }
-      - { label: "Hub-B", host: "{{ hub_id | default(1) }}b" }
-      - { label: "Hub-C", host: "{{ hub_id | default(1) }}c" }
+      - { label: "{{ hub_id | default(1) }}a", host: "{{ hub_id | default(1) }}a" }
+      - { label: "{{ hub_id | default(1) }}b", host: "{{ hub_id | default(1) }}b" }
+      - { label: "{{ hub_id | default(1) }}c", host: "{{ hub_id | default(1) }}c" }
 
 - ansible.builtin.import_playbook: ../../../toolbox/consistency_check/run_once.yml
   vars:
@@ -1290,9 +1290,9 @@
     net: "{{ docker_network_name }}"
     state_store_host_port: "{{ cc_state_port | default(8084) | int }}"
     node_leaders:
-      - { label: "Sink1-A", host: "{{ sink1_id | default(2) }}a" }
-      - { label: "Sink1-B", host: "{{ sink1_id | default(2) }}b" }
-      - { label: "Sink1-C", host: "{{ sink1_id | default(2) }}c" }
+      - { label: "{{ sink1_id | default(2) }}a", host: "{{ sink1_id | default(2) }}a" }
+      - { label: "{{ sink1_id | default(2) }}b", host: "{{ sink1_id | default(2) }}b" }
+      - { label: "{{ sink1_id | default(2) }}c", host: "{{ sink1_id | default(2) }}c" }
 
 - ansible.builtin.import_playbook: ../../../toolbox/consistency_check/run_once.yml
   vars:
@@ -1300,9 +1300,9 @@
     net: "{{ docker_network_name }}"
     state_store_host_port: "{{ cc_state_port | default(8084) | int }}"
     node_leaders:
-      - { label: "Sink2-A", host: "{{ sink2_id | default(3) }}a" }
-      - { label: "Sink2-B", host: "{{ sink2_id | default(3) }}b" }
-      - { label: "Sink2-C", host: "{{ sink2_id | default(3) }}c" }
+      - { label: "{{ sink2_id | default(3) }}a", host: "{{ sink2_id | default(3) }}a" }
+      - { label: "{{ sink2_id | default(3) }}b", host: "{{ sink2_id | default(3) }}b" }
+      - { label: "{{ sink2_id | default(3) }}c", host: "{{ sink2_id | default(3) }}c" }
 
 # ----- step 11: endpoint checkpoint -- every node on the new binary, writers still flowing ---
 
