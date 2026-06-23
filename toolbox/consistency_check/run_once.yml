@@ -237,18 +237,17 @@
           ConsistencyCheck single-pass run finished
           (rc={{ run_result.rc }}, log={{ _logfile }})
 
-    # 6. extract Run Summary box (the tool prints it on clean exit; should always be
-    # there since we ran the once-profile to completion).
+    # 6. extract Run Summary box (the tool prints it on clean exit;
     - name: Extract Run Summary from ConsistencyCheck log
       ansible.builtin.shell: |
         if [ ! -f {{ _logfile }} ]; then echo "(log file missing: {{ _logfile }})"; exit 0; fi
         awk '
-          /^╭─Run Summary/ { buf=$0 "\n"; in_box=1; next }
-          in_box {
-            buf=buf $0 "\n"
-            if (/^╰/) { last_box=buf; buf=""; in_box=0 }
+          /Run Summary/ { buf = ""; flag = 1 }
+          flag          { buf = buf $0 "\n" }
+          END {
+            if (flag) printf "%s", buf
+            else      print "(no Run Summary box found in log)"
           }
-          END { if (last_box != "") printf "%s", last_box; else print "(no Run Summary box found in log)" }
         ' {{ _logfile }}
       register: summary
       changed_when: false
