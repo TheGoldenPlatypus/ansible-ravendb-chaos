@@ -1312,6 +1312,26 @@
   gather_facts: false
   vars_files: [vars.yml]
   tasks:
+    - name: "Endpoint: dump schema version on all 9 nodes (expect all v_new)"
+      ravendb_diagnostic:
+        kind: schema_version
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        nodes:
+          - "{{ hub_id   | default(1) }}a"
+          - "{{ hub_id   | default(1) }}b"
+          - "{{ hub_id   | default(1) }}c"
+          - "{{ sink1_id | default(2) }}a"
+          - "{{ sink1_id | default(2) }}b"
+          - "{{ sink1_id | default(2) }}c"
+          - "{{ sink2_id | default(3) }}a"
+          - "{{ sink2_id | default(3) }}b"
+          - "{{ sink2_id | default(3) }}c"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
     # Drain before the endpoint checkpoint -- marker propagation, since a full docs-drain
     # wait can't converge while the workloads are still going.
     - name: "Endpoint: wait for users/sink1/marker-* propagation hub -> sink-1 a/b/c"
