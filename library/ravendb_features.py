@@ -48,10 +48,10 @@ def _fetch_database_record(p, target):
 
 def _enabled_features_from_record(record):
     """RavenDB has stored feature flags under a few different field names in
-    different releases (DatabaseFeatures, EnabledFeatures, Features).  Pick
-    up whichever shape is present; treat a list of strings as the canonical
-    representation, normalize to a set."""
-    for key in ("DatabaseFeatures", "EnabledFeatures", "Features"):
+    different releases.  SupportedFeatures is the v_new (7.x) field; the
+    other names cover older shapes.  Pick up whichever is present; treat a
+    list of strings as the canonical representation, normalize to a set."""
+    for key in ("SupportedFeatures", "DatabaseFeatures", "EnabledFeatures", "Features"):
         v = record.get(key)
         if isinstance(v, list):
             return {str(x) for x in v}
