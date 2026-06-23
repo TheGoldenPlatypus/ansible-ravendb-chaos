@@ -25,21 +25,21 @@
 #   5.  Start two background hub-side workloads (W-1, W-2) writing across all seven buckets
 #       so the upgrade happens under live churn instead of a frozen dataset.
 #   6.  Upgrade the first batch of three nodes from the old binary to the new one.
-#       [post-step-6]  RUN ONCE: ConsistencyCheck does one full scan + apply pass across
-#                      the topology, prints a Run Summary, exits.  Not run earlier than
-#                      this -- its apply phase would race step-4's /stats_parity poll
-#                      and counts would never converge.
+#       [post-step-6]  RUN ONCE x3: ConsistencyCheck runs once per cluster (hub a/b/c,
+#                      then sink-1 a/b/c, then sink-2 a/b/c) -- the tool is intra-cluster
+#                      and expects all listed nodes to mirror each other.  Each call
+#                      does one full scan + apply pass, prints a Run Summary, exits.
 #   7.  Run a light mid-roll checkpoint while writers keep flowing: marker propagation,
 #       schema-version dump (mixed state expected), filter compliance still holds, no
 #       cross-sink leak, upgraded nodes are quiet on the legacy lane.
 #   8.  Upgrade the second batch of three nodes.
-#       [post-step-8]  RUN ONCE: another single repair pass + Run Summary.
+#       [post-step-8]  RUN ONCE x3: same per-cluster repair sweep.
 #   9.  Repeat the same shape of mid-roll checkpoint.
 #   10. Upgrade the final batch of three nodes -- the whole topology is now on the new binary.
 #   10b. Enable post-upgrade feature flags (PullReplicationCompositeChangeVectors and any other
 #        v_new gated behavior listed in vars.yml's post_upgrade_feature_flags).  The module
 #        verifies each flag is reflected in the DatabaseRecord before returning.
-#       [post-step-10b] RUN ONCE: final repair pass with feature flags on + Run Summary.
+#       [post-step-10b] RUN ONCE x3: final per-cluster repair sweep with flags on.
 #   11. Run an endpoint checkpoint while writers are still going: schema parity across all
 #       nine nodes, filter compliance and cross-sink isolation hold, and an extra change-vector
 #       boundary check on both sink directions.
@@ -471,20 +471,6 @@
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
-    # Wait for Hub itself to settle
-    - name: "Wait for hub a/b/c quiescence after seed"
-      ravendb_wait:
-        kind: quiescence
-        ravendb_domain: "{{ ravendb_domain }}"
-        client_cert: "{{ cert_dir }}/client.pem"
-        ca_cert: "{{ cert_ca_crt }}"
-        db_name: db1
-        nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
-        timeout: "{{ quiesce_budget_secs | default(1200) | int }}"
-      register: r
-    - name: Show result
-      ansible.builtin.debug: { msg: "{{ r.msg }}" }
-
     # Confirm the filtered pull is actually flowing: a marker document under each sink's
     # allowed prefix should make it from the hub to that sink's cluster.
     - name: "Wait for users/sink1/marker-* propagation hub -> sink-1 a/b/c"
@@ -520,15 +506,21 @@
 
 # ----- ConsistencyCheck lifecycle ------------------------------------------------------------
 # T0 (step 4) deliberately does NOT assert strict /stats_parity on counts:
-# v_old (6.2) has a known sink<->hub replication bug that leaves a small number
-# of docs un-replicated after seed.  T0's purpose is to snapshot the v_old
-# state we're upgrading FROM, not to prove v_old has perfect replication --
-# that's exactly the bug we expect the rolling upgrade + ConsistencyCheck
-# to converge over the run.
+# v_old (6.2) has a known intra-cluster replication bug that leaves a small
+# tail of docs un-replicated between nodes inside a cluster after seed.  T0's
+# purpose is to snapshot the v_old state we're upgrading FROM, not to prove
+# v_old has perfect replication -- that's exactly the bug we expect the rolling
+# upgrade + ConsistencyCheck to converge over the run.
+#
+# ConsistencyCheck is INTRA-CLUSTER: it compares nodes that SHOULD mirror each
+# other.  After each upgrade step we therefore call run_once.yml THREE times,
+# once per cluster -- (hub a/b/c), (sink-1 a/b/c), (sink-2 a/b/c).  Total:
+# 3 invocations per bracket x 3 brackets = 9 one-shot runs per scenario.
+# Each prints its own Run Summary box on exit (no SIGTERM/SIGKILL drama).
 #
 # Strict /stats_parity on counts is asserted ONLY at step 12 (post-upgrade,
 # quiet cluster), where it actually matters: by that point the upgrade has
-# completed and ConsistencyCheck has had three one-shot passes to converge.
+# completed and ConsistencyCheck has had nine one-shot passes to converge.
 
 
 # ----- step 4: baseline checkpoint while the topology is still quiet on the old binary -------
@@ -846,15 +838,40 @@
 # ----- step 7: after the first batch, run a light checkpoint while writers keep flowing ------
 
 # Upgrade window closed -- restart the tool for the steady-state checkpoint A.
+# ConsistencyCheck is an INTRA-CLUSTER consistency tool -- it expects all listed
+# nodes to mirror each other's data.  Feeding it (Hub-A, Sink1-A, Sink2-A) makes
+# it mass-flag filtered-away docs as drift and "repair" them by violating the
+# filter.  Per the tool's author: run it once per cluster (hub a/b/c, sink-1
+# a/b/c, sink-2 a/b/c) so it only compares nodes that SHOULD be identical.
 - ansible.builtin.import_playbook: ../../../toolbox/consistency_check/run_once.yml
   vars:
     db_name: db1
     net: "{{ docker_network_name }}"
     state_store_host_port: "{{ cc_state_port | default(8084) | int }}"
     node_leaders:
-      - { label: "Hub-A",   host: "{{ hub_id   | default(1) }}a" }
+      - { label: "Hub-A", host: "{{ hub_id | default(1) }}a" }
+      - { label: "Hub-B", host: "{{ hub_id | default(1) }}b" }
+      - { label: "Hub-C", host: "{{ hub_id | default(1) }}c" }
+
+- ansible.builtin.import_playbook: ../../../toolbox/consistency_check/run_once.yml
+  vars:
+    db_name: db1
+    net: "{{ docker_network_name }}"
+    state_store_host_port: "{{ cc_state_port | default(8084) | int }}"
+    node_leaders:
       - { label: "Sink1-A", host: "{{ sink1_id | default(2) }}a" }
+      - { label: "Sink1-B", host: "{{ sink1_id | default(2) }}b" }
+      - { label: "Sink1-C", host: "{{ sink1_id | default(2) }}c" }
+
+- ansible.builtin.import_playbook: ../../../toolbox/consistency_check/run_once.yml
+  vars:
+    db_name: db1
+    net: "{{ docker_network_name }}"
+    state_store_host_port: "{{ cc_state_port | default(8084) | int }}"
+    node_leaders:
       - { label: "Sink2-A", host: "{{ sink2_id | default(3) }}a" }
+      - { label: "Sink2-B", host: "{{ sink2_id | default(3) }}b" }
+      - { label: "Sink2-C", host: "{{ sink2_id | default(3) }}c" }
 
 - name: RPV-1 step 7 -- Checkpoint A (drain + light checks)
   hosts: localhost
@@ -1024,15 +1041,40 @@
 # ----- step 9: after the second batch, run the same light checkpoint while writers flow ------
 
 # Upgrade window closed -- restart the tool for the steady-state checkpoint B.
+# ConsistencyCheck is an INTRA-CLUSTER consistency tool -- it expects all listed
+# nodes to mirror each other's data.  Feeding it (Hub-A, Sink1-A, Sink2-A) makes
+# it mass-flag filtered-away docs as drift and "repair" them by violating the
+# filter.  Per the tool's author: run it once per cluster (hub a/b/c, sink-1
+# a/b/c, sink-2 a/b/c) so it only compares nodes that SHOULD be identical.
 - ansible.builtin.import_playbook: ../../../toolbox/consistency_check/run_once.yml
   vars:
     db_name: db1
     net: "{{ docker_network_name }}"
     state_store_host_port: "{{ cc_state_port | default(8084) | int }}"
     node_leaders:
-      - { label: "Hub-A",   host: "{{ hub_id   | default(1) }}a" }
+      - { label: "Hub-A", host: "{{ hub_id | default(1) }}a" }
+      - { label: "Hub-B", host: "{{ hub_id | default(1) }}b" }
+      - { label: "Hub-C", host: "{{ hub_id | default(1) }}c" }
+
+- ansible.builtin.import_playbook: ../../../toolbox/consistency_check/run_once.yml
+  vars:
+    db_name: db1
+    net: "{{ docker_network_name }}"
+    state_store_host_port: "{{ cc_state_port | default(8084) | int }}"
+    node_leaders:
       - { label: "Sink1-A", host: "{{ sink1_id | default(2) }}a" }
+      - { label: "Sink1-B", host: "{{ sink1_id | default(2) }}b" }
+      - { label: "Sink1-C", host: "{{ sink1_id | default(2) }}c" }
+
+- ansible.builtin.import_playbook: ../../../toolbox/consistency_check/run_once.yml
+  vars:
+    db_name: db1
+    net: "{{ docker_network_name }}"
+    state_store_host_port: "{{ cc_state_port | default(8084) | int }}"
+    node_leaders:
       - { label: "Sink2-A", host: "{{ sink2_id | default(3) }}a" }
+      - { label: "Sink2-B", host: "{{ sink2_id | default(3) }}b" }
+      - { label: "Sink2-C", host: "{{ sink2_id | default(3) }}c" }
 
 - name: RPV-1 step 9 -- Checkpoint B (drain + light checks)
   hosts: localhost
@@ -1227,15 +1269,40 @@
 # Upgrade window closed -- restart the tool one last time so it scans the
 # fully-upgraded cluster with the new feature flags on.  Final stop below
 # extracts the Run Summary from this last window.
+# ConsistencyCheck is an INTRA-CLUSTER consistency tool -- it expects all listed
+# nodes to mirror each other's data.  Feeding it (Hub-A, Sink1-A, Sink2-A) makes
+# it mass-flag filtered-away docs as drift and "repair" them by violating the
+# filter.  Per the tool's author: run it once per cluster (hub a/b/c, sink-1
+# a/b/c, sink-2 a/b/c) so it only compares nodes that SHOULD be identical.
 - ansible.builtin.import_playbook: ../../../toolbox/consistency_check/run_once.yml
   vars:
     db_name: db1
     net: "{{ docker_network_name }}"
     state_store_host_port: "{{ cc_state_port | default(8084) | int }}"
     node_leaders:
-      - { label: "Hub-A",   host: "{{ hub_id   | default(1) }}a" }
+      - { label: "Hub-A", host: "{{ hub_id | default(1) }}a" }
+      - { label: "Hub-B", host: "{{ hub_id | default(1) }}b" }
+      - { label: "Hub-C", host: "{{ hub_id | default(1) }}c" }
+
+- ansible.builtin.import_playbook: ../../../toolbox/consistency_check/run_once.yml
+  vars:
+    db_name: db1
+    net: "{{ docker_network_name }}"
+    state_store_host_port: "{{ cc_state_port | default(8084) | int }}"
+    node_leaders:
       - { label: "Sink1-A", host: "{{ sink1_id | default(2) }}a" }
+      - { label: "Sink1-B", host: "{{ sink1_id | default(2) }}b" }
+      - { label: "Sink1-C", host: "{{ sink1_id | default(2) }}c" }
+
+- ansible.builtin.import_playbook: ../../../toolbox/consistency_check/run_once.yml
+  vars:
+    db_name: db1
+    net: "{{ docker_network_name }}"
+    state_store_host_port: "{{ cc_state_port | default(8084) | int }}"
+    node_leaders:
       - { label: "Sink2-A", host: "{{ sink2_id | default(3) }}a" }
+      - { label: "Sink2-B", host: "{{ sink2_id | default(3) }}b" }
+      - { label: "Sink2-C", host: "{{ sink2_id | default(3) }}c" }
 
 # ----- step 11: endpoint checkpoint -- every node on the new binary, writers still flowing ---
 
