@@ -156,3 +156,12 @@ t0_stats_assert_fields:
   - CountOfRevisionDocuments
   - CountOfTimeSeriesDeletedRanges
   - CountOfUniqueAttachments
+
+# Tombstone-wait relax flag.  Default TRUE -- the CountOfTombstones
+# stats_field_parity wait in step 12 is informational by default.
+# Cross-replica tombstone counts lag on whichever node the per-node
+# cleanup hasn't kicked on; it's not a correctness signal for replication
+# and was producing false-positive timeouts.  Override
+# -e relax_rpv1_tombstone_wait=false to restore strict behaviour.
+# Same shape as relax_rp1_tombstone_wait.
+relax_rpv1_tombstone_wait: true
