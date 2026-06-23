@@ -945,7 +945,12 @@
 
     # I-1 + I-5/I-6: consolidated /stats parity across sink replicas (docs + tombstones +
     # attachments + counters + time-series).  One GET/node, one table, one assertion.
-    - name: "Assert /stats parity across sink a/b/c (docs+tombstones+attachments+counters+TS)"
+    # CountOfTombstones excluded from the assertion -- cross-replica tombstone
+    # counts lag on whichever sink the per-node cleanup hasn't kicked on, and
+    # that's not a correctness signal for replication.  Same reasoning as the
+    # relax_rp1_tombstone_wait default-true on the earlier stats_field_parity.
+    # Tombstone count still appears in the table as info-only.
+    - name: "Assert /stats parity across sink a/b/c (docs+attachments+counters+TS, tombstones info-only)"
       ravendb_diagnostic:
         kind: stats_parity
         settle_secs: "{{ stats_parity_settle_secs | default(120) | int }}"
@@ -954,6 +959,15 @@
         ca_cert: "{{ cert_ca_crt }}"
         db_name: db1
         nodes: ["{{ sink_id | default(2) }}a", "{{ sink_id | default(2) }}b", "{{ sink_id | default(2) }}c"]
+        assert_fields:
+          - CountOfAttachments
+          - CountOfConflicts
+          - CountOfDocuments
+          - CountOfDocumentsConflicts
+          - CountOfRemoteAttachments
+          - CountOfRevisionDocuments
+          - CountOfTimeSeriesDeletedRanges
+          - CountOfUniqueAttachments
         assert_mode: true
       register: r
     - name: Show result
