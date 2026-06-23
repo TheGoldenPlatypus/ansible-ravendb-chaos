@@ -198,14 +198,6 @@
             "StartEtag": 0
           }
 
-    # 4. defensive kill of any leftover daemon process from start.yml-style runs
-    - name: Defensive kill of any leftover ConsistencyCheck process
-      ansible.builtin.shell: |
-        pkill -f '[C]onsistencyCheck' 2>/dev/null || true
-        sleep 1
-        pkill -KILL -f '[C]onsistencyCheck' 2>/dev/null || true
-        echo "defensive-kill done"
-      changed_when: false
 
     # 5. run synchronously -- tool exits when one full pass is done
     - name: "Run ConsistencyCheck (single pass, max {{ _max_run_secs }}s)"
