@@ -1507,10 +1507,10 @@
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/assert_workload_alive.yml
   vars: { pidfile: "/tmp/w2-{{ hub_id | default(1) }}a-db1.pid" }
 
-# W-1C assert_alive (hub-side sidecar; sink-side sidecars left to die at scenario end,
-# mirroring how the existing W-1 sink launches are handled today).
+# W-1C assert_alive (hub-side sidecar).
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/assert_workload_alive.yml
   vars: { pidfile: "/tmp/w1c-{{ hub_id | default(1) }}a-db1.pid" }
+
 
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
   vars:
@@ -1523,6 +1523,22 @@
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
   vars:
     pidfile: "/tmp/w1c-{{ hub_id | default(1) }}a-db1.pid"
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars:
+    pidfile: "/tmp/w1-{{ sink1_id | default(2) }}a-db1.pid"
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars:
+    pidfile: "/tmp/w1c-{{ sink1_id | default(2) }}a-db1.pid"
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars:
+    pidfile: "/tmp/w1-{{ sink2_id | default(3) }}a-db1.pid"
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars:
+    pidfile: "/tmp/w1c-{{ sink2_id | default(3) }}a-db1.pid"
 
 - name: RPV-1 step 12 -- final convergence + deep parity (quiet cluster)
   hosts: localhost
