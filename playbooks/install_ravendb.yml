@@ -32,6 +32,9 @@
 #                        When set, the file is pre-staged at /tmp/ravendb.deb
 #                        on every container and the role's download step is
 #                        bypassed (you must pass --skip-tags download yourself).
+#   ravendb_log_mode     Logs.Mode value rendered into each node's settings.json.
+#                        Default: Information (verbose; useful for chaos forensics).
+#                        Override to Operations / Reduced / None to dial back.
 #
 # RUN EXAMPLES:
 #   # use all defaults -- installs current rdb_version on every existing container
@@ -170,6 +173,8 @@
         ravendb_node_tag: "{{ inventory_hostname[-1] | upper }}"
         ravendb_self_signed_public_server_url: "https://{{ inventory_hostname }}.{{ ravendb_domain }}:443"
         ravendb_self_signed_public_server_url_tcp: "tcp://{{ inventory_hostname }}.{{ ravendb_domain }}:38888"
+        ravendb_settings_override:
+          Logs.Mode: "{{ ravendb_log_mode | default('Information') }}"
 
     - name: Ensure /backups exists and is writable by the ravendb user
       ansible.builtin.file:
