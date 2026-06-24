@@ -67,8 +67,9 @@ phase_a_writers: 1
 
 # ---------- Phase (b) -- smuggler dump path ------------------------------------------------
 # Controller-side path for the .ravendbdump produced by smuggler_export and consumed by
-# smuggler_import.  Captures dir is gitignored.
-smuggler_dump_path: "{{ playbook_dir }}/../../../captures/rv2-smuggler.ravendbdump"
+# smuggler_import.  Per-CID so parallel iters (different src_cluster_id values) don't
+# stomp on each other's dump file.  Captures dir is gitignored.
+smuggler_dump_path: "{{ playbook_dir }}/../../../captures/rv2/{{ src_cluster_id | default(1) }}/smuggler.ravendbdump"
 
 # ---------- Probe sizes for diagnostic checks ----------------------------------------------
 parity_probe_count: 50

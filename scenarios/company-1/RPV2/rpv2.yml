@@ -764,9 +764,9 @@
   gather_facts: false
   vars_files: [vars.yml]
   tasks:
-    - name: Ensure dumps dir exists on controller
+    - name: Ensure per-iter dumps dir exists on controller
       ansible.builtin.file:
-        path: "{{ lookup('env', 'PWD') }}/scenarios/company-1/RPV2/dumps"
+        path: "{{ r1_smug_dump_path | dirname }}"
         state: directory
         mode: '0755'
 
@@ -1269,7 +1269,7 @@
         db_name: db1
         nodes: ["{{ hub_cluster_leader }}"]
         ids: "{{ ['users/sink1'] | product(range(0, parity_probe_count | int) | list) | map('join', '/') | list }}"
-        output_dir: "{{ lookup('env', 'PWD') }}/scenarios/company-1/RPV2/captures/r1"
+        output_dir: "{{ lookup('env', 'PWD') }}/scenarios/company-1/RPV2/captures/{{ hub_id | default(1) }}/r1"
       register: r
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
@@ -1278,7 +1278,7 @@
       ansible.builtin.debug:
         msg: >-
           ROUND 1 PASS  hub + sink-1 + r1-snap + r1-smug + r1-resink converged
-          across the clean lifecycle.  CV capture -> .../captures/r1/ for round-2 compare.
+          across the clean lifecycle.  CV capture -> .../captures/<hub_id>/r1/ for round-2 compare.
 
 
 ############################################################################################
@@ -1779,6 +1779,12 @@
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
 
+    - name: Ensure per-iter dumps dir exists on controller (r2)
+      ansible.builtin.file:
+        path: "{{ r2_smug_dump_path | dirname }}"
+        state: directory
+        mode: '0755'
+
     - name: Smuggler-export hub/db1 -> {{ r2_smug_dump_path }}
       ravendb_smuggler:
         kind: export
@@ -2195,7 +2201,7 @@
         db_name: db1
         nodes: ["{{ hub_cluster_leader }}"]
         ids: "{{ ['users/sink1'] | product(range(0, parity_probe_count | int) | list) | map('join', '/') | list }}"
-        output_dir: "{{ lookup('env', 'PWD') }}/scenarios/company-1/RPV2/captures/r2"
+        output_dir: "{{ lookup('env', 'PWD') }}/scenarios/company-1/RPV2/captures/{{ hub_id | default(1) }}/r2"
       register: r
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
@@ -2218,13 +2224,13 @@
   tasks:
     - name: Enumerate round-1 captured CVs
       ansible.builtin.find:
-        paths: "{{ lookup('env', 'PWD') }}/scenarios/company-1/RPV2/captures/r1"
+        paths: "{{ lookup('env', 'PWD') }}/scenarios/company-1/RPV2/captures/{{ hub_id | default(1) }}/r1"
         patterns: "*.cv"
       register: r1_caps
 
     - name: Enumerate round-2 captured CVs
       ansible.builtin.find:
-        paths: "{{ lookup('env', 'PWD') }}/scenarios/company-1/RPV2/captures/r2"
+        paths: "{{ lookup('env', 'PWD') }}/scenarios/company-1/RPV2/captures/{{ hub_id | default(1) }}/r2"
         patterns: "*.cv"
       register: r2_caps
 

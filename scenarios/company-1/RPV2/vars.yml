@@ -65,8 +65,10 @@ legacy_revs_fixture_path: "{{ lookup('env', 'PWD') }}/scenarios/company-1/RPV2/f
 # across re-runs / partial replays.  ansible_date_time isn't reliable across
 # plays so we use a stable file name -- if a previous run's dump exists, the
 # ravendb_smuggler kind=export will simply overwrite it.
-r1_smug_dump_path: "{{ lookup('env', 'PWD') }}/scenarios/company-1/RPV2/dumps/r1.ravendbdump"
-r2_smug_dump_path: "{{ lookup('env', 'PWD') }}/scenarios/company-1/RPV2/dumps/r2.ravendbdump"
+# Per-CID so parallel iters (different hub_id values) don't collide on the same
+# .ravendbdump file -- one iter's export overwriting another's mid-import.
+r1_smug_dump_path: "{{ lookup('env', 'PWD') }}/scenarios/company-1/RPV2/dumps/{{ hub_id | default(1) }}/r1.ravendbdump"
+r2_smug_dump_path: "{{ lookup('env', 'PWD') }}/scenarios/company-1/RPV2/dumps/{{ hub_id | default(1) }}/r2.ravendbdump"
 
 # ---------- Workloads -- W-1 doc CRUD + W-2 extension ops + W-3 delete-storm ----
 # Round 1: W-1 + W-2 run for ~5 min during phase (a), with W-3 bursts during

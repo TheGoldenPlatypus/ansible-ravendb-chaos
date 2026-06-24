@@ -430,6 +430,12 @@
   gather_facts: false
   vars_files: [vars.yml]
   tasks:
+    - name: Ensure per-iter dump directory exists
+      ansible.builtin.file:
+        path: "{{ smuggler_dump_path | dirname }}"
+        state: directory
+        mode: "0755"
+
     - name: "Phase (b) smuggler-export source sharded db1 to .ravendbdump"
       ravendb_smuggler:
         kind: export

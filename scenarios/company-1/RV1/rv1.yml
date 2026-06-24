@@ -622,7 +622,7 @@
         ca_cert: "{{ cert_ca_crt }}"
         db_name: db1
         nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
-        baseline_file: "{{ playbook_dir }}/../../../captures/size-baseline-rv1.json"
+        baseline_file: "{{ playbook_dir }}/../../../captures/rv1/{{ cluster_id_start | default(1) }}/size-baseline.json"
         max_growth_pct: 300
       register: r
     - name: Show result
@@ -949,7 +949,7 @@
         ca_cert: "{{ cert_ca_crt }}"
         db_name: db1
         nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
-        baseline_file: "{{ playbook_dir }}/../../../captures/size-baseline-rv1.json"
+        baseline_file: "{{ playbook_dir }}/../../../captures/rv1/{{ cluster_id_start | default(1) }}/size-baseline.json"
       register: r
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
@@ -1040,7 +1040,7 @@
         ca_cert: "{{ cert_ca_crt }}"
         db_name: db1
         nodes: ["{{ cluster_id | default(1) }}a", "{{ cluster_id | default(1) }}b", "{{ cluster_id | default(1) }}c"]
-        baseline_file: "{{ playbook_dir }}/../../../captures/size-baseline-rv1.json"
+        baseline_file: "{{ playbook_dir }}/../../../captures/rv1/{{ cluster_id_start | default(1) }}/size-baseline.json"
       register: r
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
