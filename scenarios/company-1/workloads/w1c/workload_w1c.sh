@@ -120,7 +120,7 @@ pick_bucket() {
 bulk_docs_post() {
   curl --connect-timeout 5 --max-time 20 -sk -o /dev/null -w '%{http_code}' \
     --cert "$CERT_PEM" --cacert "$CA_CRT" \
-    -X POST "$url/bulk_docs" -H 'Content-Type: application/json' -d "$1" || echo 000
+    -X POST "$url/bulk_docs" -H 'Content-Type: application/json' -H 'Raven-Client-Version: 7.2.0.0' -d "$1" || echo 000
 }
 
 # Builds a single-PUT cluster-wide tx body.
