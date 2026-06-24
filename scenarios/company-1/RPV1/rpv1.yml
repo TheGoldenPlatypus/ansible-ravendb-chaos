@@ -891,7 +891,7 @@
         source: "{{ hub_id | default(1) }}a"
         targets: ["{{ sink1_id | default(2) }}a", "{{ sink1_id | default(2) }}b", "{{ sink1_id | default(2) }}c"]
         marker_id_prefix: "users/sink1/marker-"
-        timeout: 120
+        timeout: "{{ marker_propagation_timeout_secs | default(300) | int }}"
       register: r
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
@@ -906,7 +906,7 @@
         source: "{{ hub_id | default(1) }}a"
         targets: ["{{ sink2_id | default(3) }}a", "{{ sink2_id | default(3) }}b", "{{ sink2_id | default(3) }}c"]
         marker_id_prefix: "users/sink2/marker-"
-        timeout: 120
+        timeout: "{{ marker_propagation_timeout_secs | default(300) | int }}"
       register: r
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
@@ -1092,7 +1092,7 @@
         source: "{{ hub_id | default(1) }}a"
         targets: ["{{ sink1_id | default(2) }}a", "{{ sink1_id | default(2) }}b", "{{ sink1_id | default(2) }}c"]
         marker_id_prefix: "users/sink1/marker-"
-        timeout: 120
+        timeout: "{{ marker_propagation_timeout_secs | default(300) | int }}"
       register: r
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
@@ -1107,7 +1107,7 @@
         source: "{{ hub_id | default(1) }}a"
         targets: ["{{ sink2_id | default(3) }}a", "{{ sink2_id | default(3) }}b", "{{ sink2_id | default(3) }}c"]
         marker_id_prefix: "users/sink2/marker-"
-        timeout: 120
+        timeout: "{{ marker_propagation_timeout_secs | default(300) | int }}"
       register: r
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
@@ -1344,7 +1344,7 @@
         source: "{{ hub_id | default(1) }}a"
         targets: ["{{ sink1_id | default(2) }}a", "{{ sink1_id | default(2) }}b", "{{ sink1_id | default(2) }}c"]
         marker_id_prefix: "users/sink1/marker-"
-        timeout: 120
+        timeout: "{{ marker_propagation_timeout_secs | default(300) | int }}"
       register: r
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }
@@ -1359,7 +1359,7 @@
         source: "{{ hub_id | default(1) }}a"
         targets: ["{{ sink2_id | default(3) }}a", "{{ sink2_id | default(3) }}b", "{{ sink2_id | default(3) }}c"]
         marker_id_prefix: "users/sink2/marker-"
-        timeout: 120
+        timeout: "{{ marker_propagation_timeout_secs | default(300) | int }}"
       register: r
     - name: Show result
       ansible.builtin.debug: { msg: "{{ r.msg }}" }

@@ -165,3 +165,10 @@ t0_stats_assert_fields:
 # -e relax_rpv1_tombstone_wait=false to restore strict behaviour.
 # Same shape as relax_rp1_tombstone_wait.
 relax_rpv1_tombstone_wait: true
+
+# Per-marker propagation wait budget used by Checkpoint A / B and the endpoint
+# checkpoint (6 call sites in rpv1.yml).  Was hardcoded to 120s; under parallel
+# iters that was tight and made the endpoint marker wait time out before
+# hub->sink-1 replication caught up.  Override -e marker_propagation_timeout_secs=N
+# to widen or narrow per run.
+marker_propagation_timeout_secs: 300
