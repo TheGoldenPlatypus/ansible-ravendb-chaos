@@ -1,0 +1,116 @@
+# scenarios/company-1/RPV1B-SLIM/vars.yml -- shared config for RPV-1B-SLIM.
+# Steady-state variant of RPV-1: T2 topology (1 hub + 1 sink, all v_new, no upgrade).
+# W-1C cluster-wide-tx workloads ON by default; PullReplicationCompositeChangeVectors
+# feature flag enabled upfront on both clusters before seed.
+
+# ---------- Topology -- T2: 1 hub + 1 sink, 6 nodes total -------------------
+db_name: db1
+
+# Default cluster ids -- hub at 1, sink at 2.  For parallel runs on the same docker
+# host, override -e hub_id=4 -e sink_id=5 (and matching -e cluster_id_start=4 on
+# provision_nodes + -e docker_network_name=<unique-net>).  Hub and sink ids must be
+# DISJOINT and not collide with any other concurrent run's range.
+hub_id: 1
+sink_id: 2
+
+# Derived (these defaults are also inlined at every import_playbook call site in
+# rpv1b_slim.yml because vars.yml is not reachable from that scope).
+hub_cluster_leader: "{{ hub_id | default(1) }}a"
+hub_cluster_nodes:
+  - "{{ hub_id | default(1) }}a"
+  - "{{ hub_id | default(1) }}b"
+  - "{{ hub_id | default(1) }}c"
+sink_cluster_leader: "{{ sink_id | default(2) }}a"
+sink_cluster_nodes:
+  - "{{ sink_id | default(2) }}a"
+  - "{{ sink_id | default(2) }}b"
+  - "{{ sink_id | default(2) }}c"
+
+# ---------- Seed -- 5 prefix buckets on Hub, 11k docs total -----------------
+# Override per bucket with -e bucket_X=N for a fast dev shakedown.
+bucket_users_sink:  2000
+bucket_users_hub:   2000
+bucket_orders_sink: 2000
+bucket_orders_hub:  2000
+bucket_internal:    3000
+
+# ---------- Sink-local seed (symmetric writes on the sink) ------------------
+# Per Karmel: every replication scenario needs writes on the sink whenever there
+# are writes on the hub.  We seed `sink-local/users/*` on the sink leader at step 3
+# and run a parallel single-bucket workload on the sink through the run (step 5).
+# The `sink-local/` prefix is intentionally outside the hub->sink filter so the
+# docs are sink-local-only.  Whitelisted in every filter_compliance call via the
+# third entry in `allowed_prefixes`.
+sink_local_seed_count: 2000
+
+# ---------- Filter spec -- hub-only collections stay on hub -----------------
+sink_allowed_prefixes: ["users/sink/*", "orders/sink/*"]
+
+# ---------- Per-bucket parity loop ------------------------------------------
+# Each entry: prefix, count (pool_size), nodes (where the bucket is expected to land).
+all_buckets:
+  - { prefix: "users/sink",   count: "{{ bucket_users_sink   | default(2000) | int }}", nodes: "{{ sink_cluster_nodes }}" }
+  - { prefix: "orders/sink",  count: "{{ bucket_orders_sink  | default(2000) | int }}", nodes: "{{ sink_cluster_nodes }}" }
+  - { prefix: "users/hub",    count: "{{ bucket_users_hub    | default(2000) | int }}", nodes: "{{ hub_cluster_nodes }}" }
+  - { prefix: "orders/hub",   count: "{{ bucket_orders_hub   | default(2000) | int }}", nodes: "{{ hub_cluster_nodes }}" }
+  - { prefix: "Internal",     count: "{{ bucket_internal     | default(3000) | int }}", nodes: "{{ hub_cluster_nodes }}" }
+
+# ---------- Default-segment fallback for the per-collection revisions config -----------
+default_keep: 25
+default_max_age_secs: 21600
+
+# ---------- Workload -- W-1 + W-2 + W-1C on Hub, W-1 + W-1C on Sink ---------
+# Workloads run continuously from launch through endpoint, stopped explicitly by
+# step 12.  5-bucket split keeping the original 40/40/20 collection weights:
+#   users    = sink(20) + hub(20) = 40
+#   orders   = sink(20) + hub(20) = 40
+#   Internal = 20
+workload_buckets_spec: "users/sink:{{ bucket_users_sink | default(2000) | int }}:20|orders/sink:{{ bucket_orders_sink | default(2000) | int }}:20|users/hub:{{ bucket_users_hub | default(2000) | int }}:20|orders/hub:{{ bucket_orders_hub | default(2000) | int }}:20|Internal:{{ bucket_internal | default(3000) | int }}:20"
+
+# ---------- Probe sets for parity asserts -----------------------------------
+parity_probe_count: 50
+
+# ---------- Budgets (in seconds) --------------------------------------------
+member_budget_secs: 300
+drain_budget_secs: 180
+quiesce_budget_secs: 1200
+filter_drain_budget_secs: 600
+
+# Budget for post-workload-stop tombstone-count convergence (Section 12).  Same
+# rationale as RPV-1: cleanup runs on its own timer and counts only equalize once
+# cleanup has caught up.
+tombstone_settle_timeout_secs: 300
+
+# ---------- Pre-seed feature flags ------------------------------------------
+# Flags to enable on hub + sink at step 3b, BEFORE seed/workloads.  Since this
+# scenario runs all-v_new from T0 there's no mixed-binary window to gate behind
+# a runtime flip -- we just turn them on once at the start so workloads exercise
+# the v_new composite-CV path from the first PUT.
+post_upgrade_feature_flags:
+  - PullReplicationCompositeChangeVectors
+
+pre_cv_toggle_phase:  pre_cv_toggle
+post_cv_toggle_phase: post_cv_toggle
+
+t0_stats_assert_fields:
+  - CountOfAttachments
+  - CountOfConflicts
+  - CountOfDocuments
+  - CountOfDocumentsConflicts
+  - CountOfRemoteAttachments
+  - CountOfRevisionDocuments
+  - CountOfTimeSeriesDeletedRanges
+  - CountOfUniqueAttachments
+
+# Tombstone-wait relax flag.  Default TRUE -- the CountOfTombstones
+# stats_field_parity wait in step 12 is informational by default.  Override
+# -e relax_rpv1_tombstone_wait=false to restore strict behaviour.
+relax_rpv1_tombstone_wait: true
+
+# Per-marker propagation wait budget used by step 3 + endpoint marker waits.
+marker_propagation_timeout_secs: 300
+
+# W-1C cluster-wide-tx sidecar workloads.  Default ON for this scenario --
+# RPV-1B-SLIM exists specifically to stress the CWT path.  Override
+# -e rpv1b_slim_enable_w1c=false to disable.
+rpv1b_slim_enable_w1c: true
