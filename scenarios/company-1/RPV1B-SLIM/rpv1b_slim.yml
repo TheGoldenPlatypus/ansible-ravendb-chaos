@@ -40,8 +40,9 @@
 #
 # RUN
 #
-#   ansible-playbook scenarios/company-1/RPV1B-SLIM/rpv1b_slim.yml -K \
-#       -e v_new_build=$PWD/builds/raven-prNNN.deb
+#   ansible-playbook scenarios/company-1/RPV1B-SLIM/rpv1b_slim.yml -K
+#
+#   (or wrapped by RPV1B-SLIM/run.sh which handles teardown + install + form)
 ##################################################################################################
 
 
@@ -68,22 +69,21 @@
     pidfile: "/tmp/w1c-{{ sink_id | default(2) }}a-db1.pid"
   when: rpv1b_slim_enable_w1c | default(true) | bool
 
-- name: RPV-1B-SLIM pre -- validate inputs + show plan
+- name: RPV-1B-SLIM pre -- show plan
   hosts: localhost
   connection: local
   gather_facts: false
   vars_files: [vars.yml]
   tasks:
-    - name: Validate inputs
-      ansible.builtin.assert:
-        that:
-          - v_new_build is defined
-        fail_msg: "Required: -e v_new_build=<path to v_new .deb>"
-
+    # No v_new_build assertion -- RPV-1B-SLIM has no upgrade phase, so the
+    # v_new .deb is consumed by run.sh's install_ravendb step (NOT by this
+    # playbook).  Topology vars come from vars.yml / -e overrides.
     - name: Show plan
       ansible.builtin.debug:
         msg: >-
-          RPV-1B-SLIM  v_new_build={{ v_new_build }}
+          RPV-1B-SLIM  hub={{ hub_id | default(1) }}a/b/c  sink={{ sink_id | default(2) }}a/b/c
+          db={{ db_name }}  w1c_enabled={{ rpv1b_slim_enable_w1c | default(true) | bool }}
+          flags={{ post_upgrade_feature_flags | default([]) }}
 
 
 # ----- step 1: create the database on both clusters and set the revisions policy -------------
