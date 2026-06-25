@@ -166,6 +166,16 @@ t0_stats_assert_fields:
 # Same shape as relax_rp1_tombstone_wait.
 relax_rpv1_tombstone_wait: true
 
+# W-1C cluster-wide-tx sidecar workloads.  Default OFF -- W-1C mixes
+# regular PUTs (via W-1) and cluster-wide-tx writes against the SAME id pool
+# (workload_buckets_spec / sink<N>-local).  That pattern has historically
+# masked replication issues that are out of scope for the baseline RPV-1
+# rolling-upgrade signal.  Flip to true with -e rpv1_enable_w1c=true to
+# exercise the CWT path explicitly.  Affects 3 launches (hub + 2 sinks),
+# their wait_for_started imports, the orphan-kill cleanup at file top,
+# and the step-12 assert_alive + stop_workload imports.
+rpv1_enable_w1c: false
+
 # Per-marker propagation wait budget used by Checkpoint A / B and the endpoint
 # checkpoint (6 call sites in rpv1.yml).  Was hardcoded to 120s; under parallel
 # iters that was tight and made the endpoint marker wait time out before

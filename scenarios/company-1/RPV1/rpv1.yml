@@ -112,16 +112,22 @@
   vars:
     pidfile: "/tmp/w2-{{ hub_id | default(1) }}a-db1.pid"
 
-# W-1C orphan-kill (sidecar pidfiles -- mirrors W-1 across hub + 2 sinks)
+# W-1C orphan-kill (sidecar pidfiles -- mirrors W-1 across hub + 2 sinks).
+# Gated on rpv1_enable_w1c (default false) -- when W-1C is disabled the
+# pidfiles never exist so the stop is a no-op anyway, but skip the imports
+# entirely to keep the orphan-kill output focused on the workloads that ran.
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
   vars:
     pidfile: "/tmp/w1c-{{ hub_id | default(1) }}a-db1.pid"
+  when: rpv1_enable_w1c | default(false) | bool
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
   vars:
     pidfile: "/tmp/w1c-{{ sink1_id | default(2) }}a-db1.pid"
+  when: rpv1_enable_w1c | default(false) | bool
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
   vars:
     pidfile: "/tmp/w1c-{{ sink2_id | default(3) }}a-db1.pid"
+  when: rpv1_enable_w1c | default(false) | bool
 
 - name: RPV-1 pre -- validate inputs + show plan
   hosts: localhost
@@ -682,6 +688,7 @@
       poll: 0
 
     # W-1C sidecar on hub -- cluster-wide-tx variant, same buckets_spec.
+    # Gated on rpv1_enable_w1c (default false; see vars.yml).
     - name: Launch W-1C on hub (cluster-wide tx sidecar, background async)
       ansible.builtin.command:
         cmd: "bash {{ playbook_dir }}/../workloads/w1c/workload_w1c.sh"
@@ -694,6 +701,7 @@
         CA_CRT:        "{{ cert_ca_crt }}"
       async: 14400
       poll: 0
+      when: rpv1_enable_w1c | bool
 
     - name: Launch W-2 (doc-extension churn, same 7-bucket 40/40/20 split, background async)
       ansible.builtin.command:
@@ -725,6 +733,7 @@
       poll: 0
 
     # W-1C sidecar on sink-1 (mirrors W-1-Sink-1 with same pool).
+    # Gated on rpv1_enable_w1c (default false; see vars.yml).
     - name: Launch W-1C-Sink-1 (cluster-wide tx sidecar on sink-1 leader, background async)
       ansible.builtin.command:
         cmd: "bash {{ playbook_dir }}/../workloads/w1c/workload_w1c.sh"
@@ -737,6 +746,7 @@
         CA_CRT:        "{{ cert_ca_crt }}"
       async: 14400
       poll: 0
+      when: rpv1_enable_w1c | bool
 
     - name: Launch W-1-Sink-2 (sink-local CRUD churn on sink-2 leader, background async)
       ansible.builtin.command:
@@ -752,6 +762,7 @@
       poll: 0
 
     # W-1C sidecar on sink-2 (mirrors W-1-Sink-2 with same pool).
+    # Gated on rpv1_enable_w1c (default false; see vars.yml).
     - name: Launch W-1C-Sink-2 (cluster-wide tx sidecar on sink-2 leader, background async)
       ansible.builtin.command:
         cmd: "bash {{ playbook_dir }}/../workloads/w1c/workload_w1c.sh"
@@ -764,6 +775,7 @@
         CA_CRT:        "{{ cert_ca_crt }}"
       async: 14400
       poll: 0
+      when: rpv1_enable_w1c | bool
 
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
   vars:
@@ -785,21 +797,25 @@
     pidfile: "/tmp/w1-{{ sink2_id | default(3) }}a-db1.pid"
     timeout_secs: 30
 
-# W-1C wait_for_started (sidecar pidfiles -- one per W-1 launch above)
+# W-1C wait_for_started (sidecar pidfiles -- one per W-1C launch above).
+# Skipped when rpv1_enable_w1c is false (no W-1C process -> no pidfile to wait for).
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
   vars:
     pidfile: "/tmp/w1c-{{ hub_id | default(1) }}a-db1.pid"
     timeout_secs: 30
+  when: rpv1_enable_w1c | default(false) | bool
 
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
   vars:
     pidfile: "/tmp/w1c-{{ sink1_id | default(2) }}a-db1.pid"
     timeout_secs: 30
+  when: rpv1_enable_w1c | default(false) | bool
 
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
   vars:
     pidfile: "/tmp/w1c-{{ sink2_id | default(3) }}a-db1.pid"
     timeout_secs: 30
+  when: rpv1_enable_w1c | default(false) | bool
 
 
 # ----- step 6: upgrade the first batch of three nodes (default variant A: sink-1) ------------
@@ -833,6 +849,44 @@
       loop: "{{ upgrade_step_1 }}"
       async: 2400
       poll: 30
+
+
+# ----- step 6b: enable post-upgrade feature flag on the cluster just upgraded ----------------
+# After upgrade_step_1 finishes, the 3 nodes that rolled belong to ONE cluster (variants A and
+# B).  Enable post_upgrade_feature_flags on that cluster's leader; the ravendb_features
+# module verifies the flag is reflected in the DatabaseRecord before returning.  Variant C
+# interleaves clusters per step and is unsupported here -- the assert below fails loudly with
+# a rerun hint.
+- name: RPV-1 step 6b -- enable feature flags on the cluster just upgraded (step 1)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Guard: upgrade_step_1 must be a single-cluster batch (variants A/B only)"
+      ansible.builtin.assert:
+        that:
+          - (upgrade_step_1[0][:-1]) == (upgrade_step_1[1][:-1])
+          - (upgrade_step_1[1][:-1]) == (upgrade_step_1[2][:-1])
+        fail_msg: >-
+          upgrade_step_1 = {{ upgrade_step_1 }} mixes nodes from multiple clusters.
+          This looks like variant C (interleaved rolling upgrade), which is NOT supported
+          by RPV-1's per-step feature-flag enable flow.  Rerun with a single-cluster-per-step
+          variant (A: sink-1 -> hub -> sink-2, or B: hub -> sink-1 -> sink-2).
+          See scenarios/company-1/RPV1/vars.yml lines 97-103 for variant definitions.
+    - name: "Enable post-upgrade features on {{ upgrade_step_1[0][:-1] }}a/db1"
+      ravendb_features:
+        kind: enable
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ upgrade_step_1[0][:-1] }}a"
+        db_name: db1
+        add: "{{ post_upgrade_feature_flags }}"
+      register: r_step_6b
+      when: (post_upgrade_feature_flags | default([])) | length > 0
+    - name: "Show enable result (step 6b)"
+      ansible.builtin.debug: { msg: "{{ r_step_6b.msg | default('feature-flag list empty -- no-op') }}" }
 
 
 # ----- step 7: after the first batch, run a light checkpoint while writers keep flowing ------
@@ -1038,6 +1092,40 @@
       poll: 30
 
 
+# ----- step 8b: enable post-upgrade feature flag on the cluster just upgraded ----------------
+# Mirror of step 6b for upgrade_step_2.  Same single-cluster-batch guard; same module call.
+- name: RPV-1 step 8b -- enable feature flags on the cluster just upgraded (step 2)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Guard: upgrade_step_2 must be a single-cluster batch (variants A/B only)"
+      ansible.builtin.assert:
+        that:
+          - (upgrade_step_2[0][:-1]) == (upgrade_step_2[1][:-1])
+          - (upgrade_step_2[1][:-1]) == (upgrade_step_2[2][:-1])
+        fail_msg: >-
+          upgrade_step_2 = {{ upgrade_step_2 }} mixes nodes from multiple clusters.
+          This looks like variant C (interleaved rolling upgrade), which is NOT supported
+          by RPV-1's per-step feature-flag enable flow.  Rerun with a single-cluster-per-step
+          variant (A: sink-1 -> hub -> sink-2, or B: hub -> sink-1 -> sink-2).
+          See scenarios/company-1/RPV1/vars.yml lines 97-103 for variant definitions.
+    - name: "Enable post-upgrade features on {{ upgrade_step_2[0][:-1] }}a/db1"
+      ravendb_features:
+        kind: enable
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ upgrade_step_2[0][:-1] }}a"
+        db_name: db1
+        add: "{{ post_upgrade_feature_flags }}"
+      register: r_step_8b
+      when: (post_upgrade_feature_flags | default([])) | length > 0
+    - name: "Show enable result (step 8b)"
+      ansible.builtin.debug: { msg: "{{ r_step_8b.msg | default('feature-flag list empty -- no-op') }}" }
+
+
 # ----- step 9: after the second batch, run the same light checkpoint while writers flow ------
 
 # Upgrade window closed -- restart the tool for the steady-state checkpoint B.
@@ -1235,35 +1323,41 @@
       poll: 30
 
 
-# ----- step 10b: enable post-upgrade feature flags now that every node is on v_new -----------
-# The whole topology (hub + sink-1 + sink-2, 9 nodes) is on the new binary at this point.
-# Some v_new-only behaviors are gated behind feature flags so they don't auto-activate on a
-# mixed-binary cluster.  Flip them on now; the module verifies the flag is reflected in each
-# DatabaseRecord before returning.  Empty list -> no-op.
-- name: RPV-1 step 10b -- enable post-upgrade feature flags on every cluster
+# ----- step 10b: enable post-upgrade feature flag on the cluster just upgraded ---------------
+# Mirror of step 6b/8b for upgrade_step_3.  At this point all 9 nodes are on v_new and each
+# cluster has had its flag flipped immediately after its own roll completed -- step 6b for
+# upgrade_step_1, step 8b for upgrade_step_2, this one for upgrade_step_3.  No final
+# combined-enable: per-cluster enables are the only path now.
+- name: RPV-1 step 10b -- enable feature flags on the cluster just upgraded (step 3)
   hosts: localhost
   connection: local
   gather_facts: false
   vars_files: [vars.yml]
   tasks:
-    - name: "Enable post-upgrade features on {{ item }}/db1"
+    - name: "Guard: upgrade_step_3 must be a single-cluster batch (variants A/B only)"
+      ansible.builtin.assert:
+        that:
+          - (upgrade_step_3[0][:-1]) == (upgrade_step_3[1][:-1])
+          - (upgrade_step_3[1][:-1]) == (upgrade_step_3[2][:-1])
+        fail_msg: >-
+          upgrade_step_3 = {{ upgrade_step_3 }} mixes nodes from multiple clusters.
+          This looks like variant C (interleaved rolling upgrade), which is NOT supported
+          by RPV-1's per-step feature-flag enable flow.  Rerun with a single-cluster-per-step
+          variant (A: sink-1 -> hub -> sink-2, or B: hub -> sink-1 -> sink-2).
+          See scenarios/company-1/RPV1/vars.yml lines 97-103 for variant definitions.
+    - name: "Enable post-upgrade features on {{ upgrade_step_3[0][:-1] }}a/db1"
       ravendb_features:
         kind: enable
         ravendb_domain: "{{ ravendb_domain }}"
         client_cert: "{{ cert_dir }}/client.pem"
         ca_cert: "{{ cert_ca_crt }}"
-        target: "{{ item }}"
+        target: "{{ upgrade_step_3[0][:-1] }}a"
         db_name: db1
         add: "{{ post_upgrade_feature_flags }}"
-      register: r
+      register: r_step_10b
       when: (post_upgrade_feature_flags | default([])) | length > 0
-      loop:
-        - "{{ hub_id   | default(1) }}a"
-        - "{{ sink1_id | default(2) }}a"
-        - "{{ sink2_id | default(3) }}a"
-    - name: Show result
-      ansible.builtin.debug: { msg: "{{ r.results | map(attribute='msg') | list }}" }
-      when: (post_upgrade_feature_flags | default([])) | length > 0
+    - name: "Show enable result (step 10b)"
+      ansible.builtin.debug: { msg: "{{ r_step_10b.msg | default('feature-flag list empty -- no-op') }}" }
 
 
 # Upgrade window closed -- restart the tool one last time so it scans the
@@ -1507,9 +1601,10 @@
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/assert_workload_alive.yml
   vars: { pidfile: "/tmp/w2-{{ hub_id | default(1) }}a-db1.pid" }
 
-# W-1C assert_alive (hub-side sidecar).
+# W-1C assert_alive (hub-side sidecar) -- gated on rpv1_enable_w1c.
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/assert_workload_alive.yml
   vars: { pidfile: "/tmp/w1c-{{ hub_id | default(1) }}a-db1.pid" }
+  when: rpv1_enable_w1c | default(false) | bool
 
 
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
@@ -1523,6 +1618,7 @@
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
   vars:
     pidfile: "/tmp/w1c-{{ hub_id | default(1) }}a-db1.pid"
+  when: rpv1_enable_w1c | default(false) | bool
 
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
   vars:
@@ -1531,6 +1627,7 @@
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
   vars:
     pidfile: "/tmp/w1c-{{ sink1_id | default(2) }}a-db1.pid"
+  when: rpv1_enable_w1c | default(false) | bool
 
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
   vars:
@@ -1539,6 +1636,7 @@
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
   vars:
     pidfile: "/tmp/w1c-{{ sink2_id | default(3) }}a-db1.pid"
+  when: rpv1_enable_w1c | default(false) | bool
 
 - name: RPV-1 step 12 -- final convergence + deep parity (quiet cluster)
   hosts: localhost
