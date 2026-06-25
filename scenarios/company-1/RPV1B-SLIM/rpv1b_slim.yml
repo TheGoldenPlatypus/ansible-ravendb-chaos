@@ -582,6 +582,25 @@
   when: rpv1b_slim_enable_w1c | default(true) | bool
 
 
+# ----- step 6: soak -- let the workloads exercise the cluster for a while --------------------
+# RPV-1 gets its soak time naturally from the 3 upgrade phases (~5-10 min wall time).
+# RPV-1B-SLIM has no upgrade, so without an explicit pause the workloads would only run
+# for the few seconds between step 5 launch and step 11's endpoint stop -- producing
+# essentially no writes (a 10s run yielded +7 hub docs, +9 sink docs, +19 revisions in
+# practice).  A 30-min soak (default) gives W-1 + W-2 + W-1C + sink workloads enough wall
+# time to actually exercise replication and the cluster-wide-tx path before convergence
+# asserts run.  Override -e soak_duration_secs=N to shorten/lengthen.
+- name: RPV-1B-SLIM step 6 -- soak (let workloads churn before endpoint asserts)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Soak for {{ soak_duration_secs | default(1800) | int }}s while W-1/W-2/W-1C churn"
+      ansible.builtin.pause:
+        seconds: "{{ soak_duration_secs | default(1800) | int }}"
+
+
 # ----- step 11: endpoint checkpoint -- every node on the new binary, writers still flowing ---
 
 - name: RPV-1B-SLIM step 11 -- endpoint checkpoint (drain + I-13 suite)

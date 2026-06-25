@@ -114,3 +114,11 @@ marker_propagation_timeout_secs: 300
 # RPV-1B-SLIM exists specifically to stress the CWT path.  Override
 # -e rpv1b_slim_enable_w1c=false to disable.
 rpv1b_slim_enable_w1c: true
+
+# Soak duration (seconds) -- explicit dwell between step 5 (workload launch)
+# and step 11 (endpoint checkpoint).  Without it the scenario runs end-to-end
+# in seconds and the workloads barely write anything (RPV-1 gets its dwell
+# from the upgrade phases; RPV-1B-SLIM has none, so we need an explicit pause).
+# Default 1800s = 30 min, per Karmel's request for the CWT-stress overnight.
+# Override -e soak_duration_secs=N for shorter dev/CI runs.
+soak_duration_secs: 1800
