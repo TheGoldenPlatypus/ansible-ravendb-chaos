@@ -109,7 +109,7 @@ DEADLINE=$(( $(date +%s) + (MAX_WALL_HRS * 3600) ))
 # 1, 2, 3, ... rather than restarting at 1 each batch.
 # -------------------------------------------------------------------------
 declare -A ITER_COUNTS=(
-  [rv1]=0 [rp1]=0 [rpv1-B]=0 [rv2]=0
+  [rv1]=0 [rp1]=0 [rpv1-B]=0 [rpv1b-slim]=0 [rv2]=0
 )
 # NOTE: rpv1-A and rpv1-C are case-handled below for manual launches but
 # intentionally NOT included in the default batches.  Only ONE rpv1 variant
@@ -211,6 +211,7 @@ compute_subnet() {
     rpv1-B) base=40 ;;
     rpv1-C) base=50 ;;
     rv2)    base=60 ;;
+    rpv1b-slim) base=70 ;;
     *)      return 1 ;;
   esac
   printf '172.30.%d.0/24' "$(( base + iter - 1 ))"
@@ -293,6 +294,15 @@ run_batch() {
         ( export DOCKER_NETWORK_SUBNET="$subnet"
           run_iter "$name" "$iter" "$net" \
             ./scenarios/company-1/RV2/run.sh "$V_OLD" "$V_NEW" "$cid" "$net" ) & ;;
+      rpv1b-slim)
+        # Steady-state variant of RPV-1: T2 (1 hub + 1 sink, all v_new, no
+        # upgrade), W-1C ON by default.  No ConsistencyCheck step -> no host-
+        # port collision -> multiple iters can safely run in parallel.
+        cid=$(( 60 + cid_bump ))
+        net="net_rpv1b_slim_iter${iter}"
+        ( export DOCKER_NETWORK_SUBNET="$subnet"
+          run_iter "$name" "$iter" "$net" \
+            ./scenarios/company-1/RPV1B-SLIM/run.sh "$V_NEW" "$cid" "$net" ) & ;;
       *)      echo "ERROR: unknown scenario '$name'" >&2; continue ;;
     esac
     pids+=($!)
