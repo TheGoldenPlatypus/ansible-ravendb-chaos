@@ -109,7 +109,7 @@ DEADLINE=$(( $(date +%s) + (MAX_WALL_HRS * 3600) ))
 # 1, 2, 3, ... rather than restarting at 1 each batch.
 # -------------------------------------------------------------------------
 declare -A ITER_COUNTS=(
-  [rv1]=0 [rp1]=0 [rpv1-B]=0 [rpv1b-slim]=0 [rv2]=0
+  [rv1]=0 [rp1]=0 [rpv1-B]=0 [rpv1b-slim]=0 [rpv1b-slim-nocwt]=0 [rv2]=0
 )
 # NOTE: rpv1-A and rpv1-C are case-handled below for manual launches but
 # intentionally NOT included in the default batches.  Only ONE rpv1 variant
@@ -212,6 +212,7 @@ compute_subnet() {
     rpv1-C) base=50 ;;
     rv2)    base=60 ;;
     rpv1b-slim) base=70 ;;
+    rpv1b-slim-nocwt) base=80 ;;
     *)      return 1 ;;
   esac
   printf '172.30.%d.0/24' "$(( base + iter - 1 ))"
@@ -303,6 +304,19 @@ run_batch() {
         ( export DOCKER_NETWORK_SUBNET="$subnet"
           run_iter "$name" "$iter" "$net" \
             ./scenarios/company-1/RPV1B-SLIM/run.sh "$V_NEW" "$cid" "$net" ) & ;;
+      rpv1b-slim-nocwt)
+        # Control variant of rpv1b-slim with W-1C cluster-wide-tx workloads
+        # DISABLED.  Same topology + same 30-min soak + same convergence
+        # asserts.  Used to isolate whether replication anomalies in
+        # rpv1b-slim are CWT-induced or affect the non-CWT path too.  CID
+        # base 70 keeps it disjoint from rpv1b-slim (base 60) so both can
+        # run in parallel without container-name collisions.
+        cid=$(( 70 + cid_bump ))
+        net="net_rpv1b_slim_nocwt_iter${iter}"
+        ( export DOCKER_NETWORK_SUBNET="$subnet"
+          run_iter "$name" "$iter" "$net" \
+            ./scenarios/company-1/RPV1B-SLIM/run.sh "$V_NEW" "$cid" "$net" \
+            -e rpv1b_slim_enable_w1c=false ) & ;;
       *)      echo "ERROR: unknown scenario '$name'" >&2; continue ;;
     esac
     pids+=($!)
