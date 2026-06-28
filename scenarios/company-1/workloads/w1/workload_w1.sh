@@ -122,12 +122,43 @@ delete_doc() {
 is_put_ok()    { [ "$1" = 200 ] || [ "$1" = 201 ]; }
 is_delete_ok() { [ "$1" = 204 ] || [ "$1" = 404 ]; }
 
+# Read-modify-write: GET the doc, replace only .v, emit the full body+@metadata
+# back as JSON.  Empty stdout = doc missing / fetch failed / parse failed.
+# We MUST preserve @metadata.@collection across the update -- a blind PUT with
+# a fresh body (no @collection) makes the server infer @empty and reject the
+# write with DocumentCollectionMismatchException on collection-bearing docs.
+rmw_set_v() {
+  curl --connect-timeout 5 --max-time 15 -sk \
+    --cert "$CERT_PEM" --cacert "$CA_CRT" \
+    "$url/docs?id=$1" 2>/dev/null \
+  | python3 -c '
+import sys, json
+try:
+    d = json.loads(sys.stdin.read() or "{}")
+    r = d.get("Results") or []
+    if not r:
+        sys.exit(0)
+    doc = r[0]
+    doc["v"] = sys.argv[1]
+    sys.stdout.write(json.dumps(doc))
+except Exception:
+    sys.exit(0)
+' "$2"
+}
+
 # ---------- ops ----------
 
 do_update() {
   local id="${bucket_prefix}/$((RANDOM % bucket_pool))"
-  local body="{\"v\":\"u-$RANDOM\"}"
   last_op="update $id"
+  local body
+  body=$(rmw_set_v "$id" "u-$RANDOM")
+  if [ -z "$body" ]; then
+    # Doc missing (another worker deleted it, or pool slot never filled).
+    # Fall back to fresh body with the bucket's collection -- equivalent to
+    # the original implicit "PUT creates if absent" behaviour.
+    body="{\"v\":\"u-$RANDOM\",\"@metadata\":{\"@collection\":\"${bucket_collection}\"}}"
+  fi
   last_http=$(put_doc "$id" "$body")
   if is_put_ok "$last_http"; then updates=$((updates+1)); else errs=$((errs+1)); fi
 }

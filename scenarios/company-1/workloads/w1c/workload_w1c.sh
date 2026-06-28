@@ -141,13 +141,42 @@ is_ok_put()    { [ "$1" = 200 ] || [ "$1" = 201 ]; }
 is_ok_delete() { [ "$1" = 200 ] || [ "$1" = 201 ] || [ "$1" = 204 ] || [ "$1" = 404 ]; }
 is_conflict()  { [ "$1" = 409 ]; }
 
+# Read-modify-write: GET the doc, replace only .v, emit the full body+@metadata
+# back as JSON.  Empty stdout = doc missing / fetch failed / parse failed.
+# Preserves @metadata.@collection across the update so the CWT PUT does not
+# trip DocumentCollectionMismatchException -- happens when @collection is
+# absent in the new body and the server infers @empty.
+rmw_set_v() {
+  curl --connect-timeout 5 --max-time 15 -sk \
+    --cert "$CERT_PEM" --cacert "$CA_CRT" \
+    "$url/docs?id=$1" 2>/dev/null \
+  | python3 -c '
+import sys, json
+try:
+    d = json.loads(sys.stdin.read() or "{}")
+    r = d.get("Results") or []
+    if not r:
+        sys.exit(0)
+    doc = r[0]
+    doc["v"] = sys.argv[1]
+    sys.stdout.write(json.dumps(doc))
+except Exception:
+    sys.exit(0)
+' "$2"
+}
+
 # ---------- ops ----------
 
 do_update() {
   local id="${bucket_prefix}/$((RANDOM % bucket_pool))"
-  local body
-  body="{\"v\":\"uc-$RANDOM\",\"@metadata\":{\"@collection\":\"${bucket_collection}\"}}"
   last_op="cw-update $id"
+  local body
+  body=$(rmw_set_v "$id" "uc-$RANDOM")
+  if [ -z "$body" ]; then
+    # Doc missing -- write fresh with the bucket's collection, equivalent to
+    # the original implicit "create-if-absent" behaviour.
+    body="{\"v\":\"uc-$RANDOM\",\"@metadata\":{\"@collection\":\"${bucket_collection}\"}}"
+  fi
   last_http=$(bulk_docs_post "$(cw_put_body "$id" "$body")")
   if   is_ok_put "$last_http";  then updates=$((updates+1))
   elif is_conflict "$last_http"; then conflicts=$((conflicts+1))
