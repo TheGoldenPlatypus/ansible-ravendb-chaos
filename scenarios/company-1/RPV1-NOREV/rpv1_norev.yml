@@ -1,0 +1,1936 @@
+##################################################################################################
+# scenarios/company-1/RPV1-NOREV/rpv1_norev.yml -- filter-aware rolling upgrade across 1 hub + 2
+# sinks (9 nodes, all clusters replication-factor 3), driving the hub's writers through every
+# mixed-binary combination the upgrade passes through.
+#
+# Variant note: this is RPV-1-NOREV -- identical to RPV-1 EXCEPT it runs WITHOUT per-collection
+# revisions configuration (no step-1 revisions policy, no revision-count / orphan-revisions /
+# lane-inert asserts).
+#
+# What this scenario does:
+#   1.  Create the database on the hub and on both sinks (no per-collection revisions policy
+#       in this NOREV variant -- Users / Orders / Internal are written without revisions).
+#   2.  Wire bidirectional pull-replication from the hub to each sink:
+#         hub -> sink-1: filtered (users/sink1/, orders/sink1/)
+#         hub -> sink-2: filtered (users/sink2/, orders/sink2/)
+#         sink-1 -> hub: '*' (unfiltered -- every sink-1 write, incl sink1-local/, flows to hub)
+#         sink-2 -> hub: '*' (same for sink-2 / sink2-local/)
+#       Hub-only buckets stay on the hub; cross-sink isolation still holds (sink-1 must NOT
+#       receive users/sink2/* and vice versa -- enforced by the hub->sink filters).
+#   3.  Seed the hub with seven prefix buckets (~15k documents) and wait for the filter to
+#       drain -- a marker document under each allowed prefix has to reach its target sink
+#       before continuing.
+#   4.  Take a baseline checkpoint while everything is quiet on the old binary.  Strict
+#       /stats parity is NOT asserted here -- v_old (6.2) has a known sink<->hub
+#       replication bug that leaves a tail of docs un-replicated post-seed, and T0 is
+#       meant to snapshot the v_old state, not pretend v_old is bug-free.  Counts are
+#       dumped informationally; filter compliance, version, and doc-id-set parity ARE
+#       asserted.  Strict count parity moves to step 12 (post-upgrade, quiet cluster).
+#   5.  Start two background hub-side workloads (W-1, W-2) writing across all seven buckets
+#       so the upgrade happens under live churn instead of a frozen dataset.
+#   6.  Upgrade the first batch of three nodes from the old binary to the new one.
+#       [post-step-6]  RUN ONCE x3: ConsistencyCheck runs once per cluster (hub a/b/c,
+#                      then sink-1 a/b/c, then sink-2 a/b/c) -- the tool is intra-cluster
+#                      and expects all listed nodes to mirror each other.  Each call
+#                      does one full scan + apply pass, prints a Run Summary, exits.
+#   7.  Run a light mid-roll checkpoint while writers keep flowing: marker propagation,
+#       schema-version dump (mixed state expected), filter compliance still holds, no
+#       cross-sink leak.  (Lane-inert sweep is dropped in the NOREV variant.)
+#   8.  Upgrade the second batch of three nodes.
+#       [post-step-8]  RUN ONCE x3: same per-cluster repair sweep.
+#   9.  Repeat the same shape of mid-roll checkpoint.
+#   10. Upgrade the final batch of three nodes -- the whole topology is now on the new binary.
+#   10b. Enable post-upgrade feature flags (PullReplicationCompositeChangeVectors and any other
+#        v_new gated behavior listed in vars.yml's post_upgrade_feature_flags).  The module
+#        verifies each flag is reflected in the DatabaseRecord before returning.
+#       [post-step-10b] RUN ONCE x3: final per-cluster repair sweep with flags on.
+#   11. Run an endpoint checkpoint while writers are still going: schema parity across all
+#       nine nodes, filter compliance and cross-sink isolation hold, and an extra change-vector
+#       boundary check on both sink directions.
+#   12. Stop both workloads, wait for every cluster to drain, then run the strict final
+#       asserts on a quiet topology: doc-id-set parity per bucket, filter compliance,
+#       cross-sink isolation, /stats parity, AND hub-sink doc-set completeness (every doc
+#       the filter says should be on sink-1 is on sink-1, and same for sink-2; no sink-side
+#       orphans except sink<N>-local).  Revision-count / orphan-revisions parity is NOT
+#       checked in this NOREV variant (no revisions configured).
+#
+# The mid-roll checkpoints (7, 9, 11) only run checks that are safe under live writes; the
+# strict everything-must-match parity checks are deferred to step 12 once the workloads stop.
+#
+# Variants.  The same recipe runs in three upgrade orders, selected by overriding three
+# variables on the command line:
+#   * Variant A -- sinks first.  Upgrades sink-1, then the hub, then sink-2.  This is the
+#                  default if you pass nothing extra.  Stresses the case where an old hub
+#                  sends to a new sink.
+#   * Variant B -- hub first.  Upgrades the hub, then sink-1, then sink-2.  Stresses the
+#                  reverse: a new hub sending to old sinks.
+#   * Variant C -- interleaved.  Picks three nodes per batch from across the topology so
+#                  every batch leaves at least one cluster mid-upgrade with mixed binaries
+#                  inside it.
+#
+# Deep version (invariants, risks, validators) -> company-1_TESTING_PLAN/scenarios.md (RPV-1-NOREV).
+#
+# PREREQ -- bring up a clean T3 (3-cluster x 3-node) lab at v_old.
+#
+#   1. ansible-playbook playbooks/teardown_containers.yml -K
+#   2. ansible-playbook playbooks/provision_nodes.yml -K -e clusters_count=3 -e nodes_per_cluster=3
+#   3. ansible-playbook playbooks/install_ravendb.yml -K -e rdb_version=6.2.15
+#   4. ansible-playbook playbooks/form_clusters.yml -K -e clusters_count=3 -e nodes_per_cluster=3
+#
+# RUN -- pick one of the 3 variants.  Same scenario, only the upgrade order differs.
+#
+#   # Variant A -- sinks first (this is the default if you pass nothing extra).
+#   #   Upgrade order: sink-1, then hub, then sink-2.  After the first batch, the old hub
+#   #   is sending to a new sink.
+#   ansible-playbook scenarios/company-1/RPV1-NOREV/rpv1_norev.yml -K \
+#       -e v_old=6.2.15 \
+#       -e v_new_build=$PWD/builds/raven-prNNN.deb
+#
+#   # Variant B -- hub first.
+#   #   Upgrade order: hub, then sink-1, then sink-2.  After the first batch, the new hub
+#   #   is sending to old sinks.
+#   ansible-playbook scenarios/company-1/RPV1-NOREV/rpv1_norev.yml -K \
+#       -e v_old=6.2.15 \
+#       -e v_new_build=$PWD/builds/raven-prNNN.deb \
+#       -e '{"upgrade_step_1":["1a","1b","1c"],
+#            "upgrade_step_2":["2a","2b","2c"],
+#            "upgrade_step_3":["3a","3b","3c"]}'
+#
+#   # Variant C -- interleaved (three nodes per batch, picked across all 9 so each batch
+#   #   leaves at least one cluster mid-upgrade with mixed binaries inside it).
+#   ansible-playbook scenarios/company-1/RPV1-NOREV/rpv1_norev.yml -K \
+#       -e v_old=6.2.15 \
+#       -e v_new_build=$PWD/builds/raven-prNNN.deb \
+#       -e '{"upgrade_step_1":["2a","1b","3c"],
+#            "upgrade_step_2":["1a","3b","2c"],
+#            "upgrade_step_3":["3a","1c","2b"]}'
+##################################################################################################
+
+
+# ----- pre: kill any leftover background workloads from a previous run, then validate inputs --
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars:
+    pidfile: "/tmp/w1-{{ hub_id | default(1) }}a-db1.pid"
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars:
+    pidfile: "/tmp/w2-{{ hub_id | default(1) }}a-db1.pid"
+
+# W-1C orphan-kill (sidecar pidfiles -- mirrors W-1 across hub + 2 sinks).
+# Gated on rpv1_enable_w1c (default false) -- when W-1C is disabled the
+# pidfiles never exist so the stop is a no-op anyway, but skip the imports
+# entirely to keep the orphan-kill output focused on the workloads that ran.
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars:
+    pidfile: "/tmp/w1c-{{ hub_id | default(1) }}a-db1.pid"
+  when: rpv1_enable_w1c | default(false) | bool
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars:
+    pidfile: "/tmp/w1c-{{ sink1_id | default(2) }}a-db1.pid"
+  when: rpv1_enable_w1c | default(false) | bool
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars:
+    pidfile: "/tmp/w1c-{{ sink2_id | default(3) }}a-db1.pid"
+  when: rpv1_enable_w1c | default(false) | bool
+
+- name: RPV-1-NOREV pre -- validate inputs + show plan
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - v_old is defined
+          - v_new_build is defined
+        fail_msg: "Required: -e v_old=<6.2.x version> -e v_new_build=<path to v_new .deb>"
+
+    - name: Show plan
+      ansible.builtin.debug:
+        msg: >-
+          RPV-1-NOREV  v_old={{ v_old }}  v_new_build={{ v_new_build }}
+          upgrade_step_1={{ upgrade_step_1 }}
+          upgrade_step_2={{ upgrade_step_2 }}
+          upgrade_step_3={{ upgrade_step_3 }}
+
+
+# ----- create the database on all three clusters (NOREV variant: no revisions policy) --------
+
+- ansible.builtin.import_playbook: ../../../toolbox/db/create_database.yml
+  vars: { cluster_leader: "{{ hub_id | default(1) }}a",   db_name: db1, replication_factor: 3 }
+- ansible.builtin.import_playbook: ../../../toolbox/db/create_database.yml
+  vars: { cluster_leader: "{{ sink1_id | default(2) }}a", db_name: db1, replication_factor: 3 }
+- ansible.builtin.import_playbook: ../../../toolbox/db/create_database.yml
+  vars: { cluster_leader: "{{ sink2_id | default(3) }}a", db_name: db1, replication_factor: 3 }
+
+
+# ----- step 2: wire the filtered pull-replication from the hub down to both sinks ------------
+
+- name: RPV-1-NOREV step 2 -- wire filtered pull (Hub -> Sink-1 + Sink-2)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Define hub pull task 'rpv1-hub' + access entries for sink-1 + sink-2"
+      ravendb_tasks:
+        kind: define_hub
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        hub_leader: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        hub_task_name: rpv1-hub
+        sink_cluster_ids:
+          - "{{ sink1_id | default(2) | int }}"
+          - "{{ sink2_id | default(3) | int }}"
+        # Build the dict via a single Jinja expression -- templated keys inside a YAML dict
+        # literal don't reliably resolve, which makes AllowedHubToSinkPaths silently fall
+        # back to ["*"] (a wide-open filter).
+        sink_allowed_paths: >-
+          {{
+            {
+              (sink1_id | default(2) | int | string): ['users/sink1/*', 'orders/sink1/*'],
+              (sink2_id | default(3) | int | string): ['users/sink2/*', 'orders/sink2/*']
+            }
+          }}
+        # Bidirectional: hub -> sink filters per the plan (disjoint per sink),
+        # sink -> hub unfiltered ('*') so sink-local writes (sink<N>-local/*)
+        # flow back to hub.  The step-12 hub_sink_doc_set check enforces both
+        # directions structurally.
+        sink_to_hub_paths: >-
+          {{
+            {
+              (sink1_id | default(2) | int | string): ['*'],
+              (sink2_id | default(3) | int | string): ['*']
+            }
+          }}
+        replication_certs_dir: "{{ playbook_dir }}/../../../replication-certs"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Attach sink-1 + sink-2 pull tasks to hub topology"
+      ravendb_tasks:
+        kind: attach_sinks
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        hub_task_name: rpv1-hub
+        hub_topology_urls:
+          - "https://{{ hub_id | default(1) }}a.hubsink.test:443"
+          - "https://{{ hub_id | default(1) }}b.hubsink.test:443"
+          - "https://{{ hub_id | default(1) }}c.hubsink.test:443"
+        sink_cluster_ids:
+          - "{{ sink1_id | default(2) | int }}"
+          - "{{ sink2_id | default(3) | int }}"
+        sink_allowed_paths: >-
+          {{
+            {
+              (sink1_id | default(2) | int | string): ['users/sink1/*', 'orders/sink1/*'],
+              (sink2_id | default(3) | int | string): ['users/sink2/*', 'orders/sink2/*']
+            }
+          }}
+        sink_to_hub_paths: >-
+          {{
+            {
+              (sink1_id | default(2) | int | string): ['*'],
+              (sink2_id | default(3) | int | string): ['*']
+            }
+          }}
+        replication_certs_dir: "{{ playbook_dir }}/../../../replication-certs"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# Dump pull-replication config on hub + both sinks so the filter, mode, and
+# allowed paths are visible in the scenario log.
+- ansible.builtin.import_playbook: ../../../toolbox/replication/dump_config.yml
+  vars:
+    target: "{{ hub_id   | default(1) }}a"
+    db_name: db1
+    hub_task_name: rpv1-hub
+- ansible.builtin.import_playbook: ../../../toolbox/replication/dump_config.yml
+  vars:
+    target: "{{ sink1_id | default(2) }}a"
+    db_name: db1
+- ansible.builtin.import_playbook: ../../../toolbox/replication/dump_config.yml
+  vars:
+    target: "{{ sink2_id | default(3) }}a"
+    db_name: db1
+
+
+# ----- step 3: seed the hub with seven prefix buckets and wait for the filter to drain --------
+
+- name: RPV-1-NOREV step 3 -- seed Hub with 7 prefix buckets, then wait for filtered drain
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    # Users collection -- 3 buckets
+    - name: "Seed users/sink1/* on hub {{ hub_id | default(1) }}a/db1 (count={{ bucket_users_sink1 }}, 1 rev)"
+      ravendb_writes:
+        kind: docs_revisions
+        phase: "{{ pre_cv_toggle_phase }}"
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        id_prefix: users/sink1
+        collection: Users
+        count: "{{ bucket_users_sink1 | default(2000) | int }}"
+        revs_per_doc: 1
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Seed users/sink2/* on hub {{ hub_id | default(1) }}a/db1 (count={{ bucket_users_sink2 }}, 1 rev)"
+      ravendb_writes:
+        kind: docs_revisions
+        phase: "{{ pre_cv_toggle_phase }}"
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        id_prefix: users/sink2
+        collection: Users
+        count: "{{ bucket_users_sink2 | default(2000) | int }}"
+        revs_per_doc: 1
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Seed users/hub/* on hub {{ hub_id | default(1) }}a/db1 (count={{ bucket_users_hub }}, 1 rev)"
+      ravendb_writes:
+        kind: docs_revisions
+        phase: "{{ pre_cv_toggle_phase }}"
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        id_prefix: users/hub
+        collection: Users
+        count: "{{ bucket_users_hub | default(2000) | int }}"
+        revs_per_doc: 1
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Orders collection -- 3 buckets
+    - name: "Seed orders/sink1/* on hub {{ hub_id | default(1) }}a/db1 (count={{ bucket_orders_sink1 }}, 1 rev)"
+      ravendb_writes:
+        kind: docs_revisions
+        phase: "{{ pre_cv_toggle_phase }}"
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        id_prefix: orders/sink1
+        collection: Orders
+        count: "{{ bucket_orders_sink1 | default(2000) | int }}"
+        revs_per_doc: 1
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Seed orders/sink2/* on hub {{ hub_id | default(1) }}a/db1 (count={{ bucket_orders_sink2 }}, 1 rev)"
+      ravendb_writes:
+        kind: docs_revisions
+        phase: "{{ pre_cv_toggle_phase }}"
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        id_prefix: orders/sink2
+        collection: Orders
+        count: "{{ bucket_orders_sink2 | default(2000) | int }}"
+        revs_per_doc: 1
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Seed orders/hub/* on hub {{ hub_id | default(1) }}a/db1 (count={{ bucket_orders_hub }}, 1 rev)"
+      ravendb_writes:
+        kind: docs_revisions
+        phase: "{{ pre_cv_toggle_phase }}"
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        id_prefix: orders/hub
+        collection: Orders
+        count: "{{ bucket_orders_hub | default(2000) | int }}"
+        revs_per_doc: 1
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Internal collection
+    - name: "Seed Internal/* on hub {{ hub_id | default(1) }}a/db1 (count={{ bucket_internal }}, 1 rev)"
+      ravendb_writes:
+        kind: docs_revisions
+        phase: "{{ pre_cv_toggle_phase }}"
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+        id_prefix: Internal
+        collection: Internal
+        count: "{{ bucket_internal | default(3000) | int }}"
+        revs_per_doc: 1
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Sink-side activity: write sink-local pools that do NOT match the hub->sink filters.
+    # Top-level prefixes `sink1-local/` and `sink2-local/` so they're easy to tell
+    # apart from hub-routed docs in logs and assertions.  Per Karmel: every
+    # replication scenario should have writes on the sink whenever there are writes
+    # on the hub.
+    - name: "Seed sink-1 local (sink1-local/users/*, count={{ sink1_local_seed_count }}) on {{ sink1_id | default(2) }}a/db1"
+      ravendb_writes:
+        kind: docs
+        phase: "{{ pre_cv_toggle_phase }}"
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ sink1_id | default(2) }}a"
+        db_name: db1
+        id_prefix: "sink1-local/users"
+        count: "{{ sink1_local_seed_count | default(2000) | int }}"
+        body_tag: sink1-local
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Seed sink-2 local (sink2-local/users/*, count={{ sink2_local_seed_count }}) on {{ sink2_id | default(3) }}a/db1"
+      ravendb_writes:
+        kind: docs
+        phase: "{{ pre_cv_toggle_phase }}"
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ sink2_id | default(3) }}a"
+        db_name: db1
+        id_prefix: "sink2-local/users"
+        count: "{{ sink2_local_seed_count | default(2000) | int }}"
+        body_tag: sink2-local
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Confirm the filtered pull is actually flowing: a marker document under each sink's
+    # allowed prefix should make it from the hub to that sink's cluster.
+    - name: "Wait for users/sink1/marker-* propagation hub -> sink-1 a/b/c"
+      ravendb_wait:
+        kind: marker_propagation
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        source: "{{ hub_id | default(1) }}a"
+        targets: ["{{ sink1_id | default(2) }}a", "{{ sink1_id | default(2) }}b", "{{ sink1_id | default(2) }}c"]
+        marker_id_prefix: "users/sink1/marker-"
+        timeout: "{{ filter_drain_budget_secs | default(600) | int }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Wait for users/sink2/marker-* propagation hub -> sink-2 a/b/c"
+      ravendb_wait:
+        kind: marker_propagation
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        source: "{{ hub_id | default(1) }}a"
+        targets: ["{{ sink2_id | default(3) }}a", "{{ sink2_id | default(3) }}b", "{{ sink2_id | default(3) }}c"]
+        marker_id_prefix: "users/sink2/marker-"
+        timeout: "{{ filter_drain_budget_secs | default(600) | int }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ----- ConsistencyCheck lifecycle ------------------------------------------------------------
+# T0 (step 4) deliberately does NOT assert strict /stats_parity on counts:
+# v_old (6.2) has a known intra-cluster replication bug that leaves a small
+# tail of docs un-replicated between nodes inside a cluster after seed.  T0's
+# purpose is to snapshot the v_old state we're upgrading FROM, not to prove
+# v_old has perfect replication -- that's exactly the bug we expect the rolling
+# upgrade + ConsistencyCheck to converge over the run.
+#
+# ConsistencyCheck is INTRA-CLUSTER: it compares nodes that SHOULD mirror each
+# other.  After each upgrade step we therefore call run_once.yml THREE times,
+# once per cluster -- (hub a/b/c), (sink-1 a/b/c), (sink-2 a/b/c).  Total:
+# 3 invocations per bracket x 3 brackets = 9 one-shot runs per scenario.
+# Each prints its own Run Summary box on exit (no SIGTERM/SIGKILL drama).
+#
+# Strict /stats_parity on counts is asserted ONLY at step 12 (post-upgrade,
+# quiet cluster), where it actually matters: by that point the upgrade has
+# completed and ConsistencyCheck has had nine one-shot passes to converge.
+
+
+# ----- step 4: baseline checkpoint while the topology is still quiet on the old binary -------
+
+- name: RPV-1-NOREV step 4 -- T0 baseline checkpoint
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    # The filter has to hold from the start -- this catches any leak introduced during seeding.
+    - name: "T0: assert filter compliance on sink-1 (allowed users/sink1/, orders/sink1/)"
+      ravendb_diagnostic:
+        kind: filter_compliance
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        sink_cluster_leader: "{{ sink1_id | default(2) }}a"
+        db_name: db1
+        allowed_prefixes: ["users/sink1/", "orders/sink1/", "sink1-local/"]
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "T0: assert filter compliance on sink-2 (allowed users/sink2/, orders/sink2/)"
+      ravendb_diagnostic:
+        kind: filter_compliance
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        sink_cluster_leader: "{{ sink2_id | default(3) }}a"
+        db_name: db1
+        allowed_prefixes: ["users/sink2/", "orders/sink2/", "sink2-local/"]
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # All 9 nodes should still be on the old binary at this point.
+    - name: "T0: dump schema version on all 9 nodes (expect all v_old)"
+      ravendb_diagnostic:
+        kind: schema_version
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        nodes:
+          - "{{ hub_id | default(1) }}a"
+          - "{{ hub_id | default(1) }}b"
+          - "{{ hub_id | default(1) }}c"
+          - "{{ sink1_id | default(2) }}a"
+          - "{{ sink1_id | default(2) }}b"
+          - "{{ sink1_id | default(2) }}c"
+          - "{{ sink2_id | default(3) }}a"
+          - "{{ sink2_id | default(3) }}b"
+          - "{{ sink2_id | default(3) }}c"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Sink-routed buckets have to be present on the matching sink.
+    - name: "T0: assert users/sink1 doc-id-set parity across sink-1 a/b/c"
+      ravendb_diagnostic:
+        kind: doc_id_set_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ sink1_id | default(2) }}a", "{{ sink1_id | default(2) }}b", "{{ sink1_id | default(2) }}c"]
+        id_prefix: users/sink1
+        count: "{{ parity_probe_count | default(50) | int }}"
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "T0: assert users/sink2 doc-id-set parity across sink-2 a/b/c"
+      ravendb_diagnostic:
+        kind: doc_id_set_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ sink2_id | default(3) }}a", "{{ sink2_id | default(3) }}b", "{{ sink2_id | default(3) }}c"]
+        id_prefix: users/sink2
+        count: "{{ parity_probe_count | default(50) | int }}"
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # /stats parity at T0 is informational only -- v_old (6.2) has a known
+    # sink<->hub replication bug that leaves a small tail of docs un-replicated
+    # post-seed.  Asserting strict count parity here would fail every run for
+    # the wrong reason.  The strict assert lives in step 12 (post-upgrade,
+    # quiet cluster, ConsistencyCheck has converged), where it's load-bearing.
+    - name: "T0: dump /stats across hub a/b/c (informational, drift expected on v_old)"
+      ravendb_diagnostic:
+        kind: stats_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
+        assert_fields: "{{ t0_stats_assert_fields }}"
+        assert_mode: false
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "T0: dump /stats across sink-1 a/b/c (informational, drift expected on v_old)"
+      ravendb_diagnostic:
+        kind: stats_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ sink1_id | default(2) }}a", "{{ sink1_id | default(2) }}b", "{{ sink1_id | default(2) }}c"]
+        assert_fields: "{{ t0_stats_assert_fields }}"
+        assert_mode: false
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "T0: dump /stats across sink-2 a/b/c (informational, drift expected on v_old)"
+      ravendb_diagnostic:
+        kind: stats_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ sink2_id | default(3) }}a", "{{ sink2_id | default(3) }}b", "{{ sink2_id | default(3) }}c"]
+        assert_fields: "{{ t0_stats_assert_fields }}"
+        assert_mode: false
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+# ----- step 5: start the two background hub-side workloads that run through the upgrade ------
+
+- name: RPV-1-NOREV step 5 -- start W-1 + W-2 in background on Hub
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Launch W-1 (doc CRUD churn, 7-bucket 40/40/20 split, background async)
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w1/workload_w1.sh"
+      environment:
+        TARGET:        "{{ hub_id | default(1) }}a"
+        DB_NAME:       "{{ db_name }}"
+        BUCKETS_SPEC:  "{{ workload_buckets_spec }}"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: 14400
+      poll: 0
+
+    # W-1C sidecar on hub -- cluster-wide-tx variant, same buckets_spec.
+    # Gated on rpv1_enable_w1c (default false; see vars.yml).
+    - name: Launch W-1C on hub (cluster-wide tx sidecar, background async)
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w1c/workload_w1c.sh"
+      environment:
+        TARGET:        "{{ hub_id | default(1) }}a"
+        DB_NAME:       "{{ db_name }}"
+        BUCKETS_SPEC:  "{{ workload_buckets_spec }}"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: 14400
+      poll: 0
+      when: rpv1_enable_w1c | bool
+
+    - name: Launch W-2 (doc-extension churn, same 7-bucket 40/40/20 split, background async)
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w2/workload_w2.sh"
+      environment:
+        TARGET:        "{{ hub_id | default(1) }}a"
+        DB_NAME:       "{{ db_name }}"
+        BUCKETS_SPEC:  "{{ workload_buckets_spec }}"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: 14400
+      poll: 0
+
+    # Parallel sink-side workloads (one per sink cluster) running for the full
+    # upgrade so the sinks aren't silent while hub churns.  Single-bucket each,
+    # writing under sink<N>-local/ (filter-NOT-matching, sink-local only).
+    - name: Launch W-1-Sink-1 (sink-local CRUD churn on sink-1 leader, background async)
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w1/workload_w1.sh"
+      environment:
+        TARGET:        "{{ sink1_id | default(2) }}a"
+        DB_NAME:       "{{ db_name }}"
+        BUCKETS_SPEC:  "sink1-local/users:{{ sink1_local_seed_count | default(2000) | int }}:100"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: 14400
+      poll: 0
+
+    # W-1C sidecar on sink-1 (mirrors W-1-Sink-1 with same pool).
+    # Gated on rpv1_enable_w1c (default false; see vars.yml).
+    - name: Launch W-1C-Sink-1 (cluster-wide tx sidecar on sink-1 leader, background async)
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w1c/workload_w1c.sh"
+      environment:
+        TARGET:        "{{ sink1_id | default(2) }}a"
+        DB_NAME:       "{{ db_name }}"
+        BUCKETS_SPEC:  "sink1-local/users:{{ sink1_local_seed_count | default(2000) | int }}:100"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: 14400
+      poll: 0
+      when: rpv1_enable_w1c | bool
+
+    - name: Launch W-1-Sink-2 (sink-local CRUD churn on sink-2 leader, background async)
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w1/workload_w1.sh"
+      environment:
+        TARGET:        "{{ sink2_id | default(3) }}a"
+        DB_NAME:       "{{ db_name }}"
+        BUCKETS_SPEC:  "sink2-local/users:{{ sink2_local_seed_count | default(2000) | int }}:100"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: 14400
+      poll: 0
+
+    # W-1C sidecar on sink-2 (mirrors W-1-Sink-2 with same pool).
+    # Gated on rpv1_enable_w1c (default false; see vars.yml).
+    - name: Launch W-1C-Sink-2 (cluster-wide tx sidecar on sink-2 leader, background async)
+      ansible.builtin.command:
+        cmd: "bash {{ playbook_dir }}/../workloads/w1c/workload_w1c.sh"
+      environment:
+        TARGET:        "{{ sink2_id | default(3) }}a"
+        DB_NAME:       "{{ db_name }}"
+        BUCKETS_SPEC:  "sink2-local/users:{{ sink2_local_seed_count | default(2000) | int }}:100"
+        RAVEN_DOMAIN:  "{{ ravendb_domain }}"
+        CERT_PEM:      "{{ cert_dir }}/client.pem"
+        CA_CRT:        "{{ cert_ca_crt }}"
+      async: 14400
+      poll: 0
+      when: rpv1_enable_w1c | bool
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars:
+    pidfile: "/tmp/w1-{{ hub_id | default(1) }}a-db1.pid"
+    timeout_secs: 30
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars:
+    pidfile: "/tmp/w2-{{ hub_id | default(1) }}a-db1.pid"
+    timeout_secs: 30
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars:
+    pidfile: "/tmp/w1-{{ sink1_id | default(2) }}a-db1.pid"
+    timeout_secs: 30
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars:
+    pidfile: "/tmp/w1-{{ sink2_id | default(3) }}a-db1.pid"
+    timeout_secs: 30
+
+# W-1C wait_for_started (sidecar pidfiles -- one per W-1C launch above).
+# Skipped when rpv1_enable_w1c is false (no W-1C process -> no pidfile to wait for).
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars:
+    pidfile: "/tmp/w1c-{{ hub_id | default(1) }}a-db1.pid"
+    timeout_secs: 30
+  when: rpv1_enable_w1c | default(false) | bool
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars:
+    pidfile: "/tmp/w1c-{{ sink1_id | default(2) }}a-db1.pid"
+    timeout_secs: 30
+  when: rpv1_enable_w1c | default(false) | bool
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
+  vars:
+    pidfile: "/tmp/w1c-{{ sink2_id | default(3) }}a-db1.pid"
+    timeout_secs: 30
+  when: rpv1_enable_w1c | default(false) | bool
+
+
+# ----- step 6: upgrade the first batch of three nodes (default variant A: sink-1) ------------
+# No daemon to stop -- ConsistencyCheck only runs as one-shot passes AFTER each upgrade
+# step (see run_once.yml imports interleaved between steps).
+- name: RPV-1-NOREV step 6 -- upgrade step 1 (3 nodes from upgrade_step_1)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Announce upgrade step 1 banner
+      ansible.builtin.debug:
+        msg: "==== step 6 -- upgrade step 1 ({{ upgrade_step_1 }}) ===="
+
+    - name: Upgrade each node + wait for member
+      ansible.builtin.shell: |
+        set -e
+        ansible-playbook toolbox/service/upgrade_node.yml \
+          -e target={{ item }} -e custom_build={{ v_new_build }} --skip-tags download \
+          > /tmp/rpv1-upgrade-{{ item }}.log 2>&1
+        ansible-playbook toolbox/wait/wait_for_member.yml \
+          -e cluster_leader={{ peer_map[item] }} -e db_name={{ db_name }} \
+          -e target={{ item }} \
+          -e timeout_secs={{ member_budget_secs | default(300) | int }} \
+          > /tmp/rpv1-member-{{ item }}.log 2>&1
+      args:
+        chdir: "{{ playbook_dir }}/../../.."
+      environment:
+        ANSIBLE_BECOME_PASS: "{{ ansible_become_pass | default('') }}"
+      loop: "{{ upgrade_step_1 }}"
+      async: 2400
+      poll: 30
+
+
+# ----- step 6b: enable post-upgrade feature flag on the cluster just upgraded ----------------
+# After upgrade_step_1 finishes, the 3 nodes that rolled belong to ONE cluster (variants A and
+# B).  Enable post_upgrade_feature_flags on that cluster's leader; the ravendb_features
+# module verifies the flag is reflected in the DatabaseRecord before returning.  Variant C
+# interleaves clusters per step and is unsupported here -- the assert below fails loudly with
+# a rerun hint.
+- name: RPV-1-NOREV step 6b -- enable feature flags on the cluster just upgraded (step 1)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Guard: upgrade_step_1 must be a single-cluster batch (variants A/B only)"
+      ansible.builtin.assert:
+        that:
+          - (upgrade_step_1[0][:-1]) == (upgrade_step_1[1][:-1])
+          - (upgrade_step_1[1][:-1]) == (upgrade_step_1[2][:-1])
+        fail_msg: >-
+          upgrade_step_1 = {{ upgrade_step_1 }} mixes nodes from multiple clusters.
+          This looks like variant C (interleaved rolling upgrade), which is NOT supported
+          by RPV-1-NOREV's per-step feature-flag enable flow.  Rerun with a single-cluster-per-step
+          variant (A: sink-1 -> hub -> sink-2, or B: hub -> sink-1 -> sink-2).
+          See scenarios/company-1/RPV1-NOREV/vars.yml lines 97-103 for variant definitions.
+    - name: "Enable post-upgrade features on {{ upgrade_step_1[0][:-1] }}a/db1"
+      ravendb_features:
+        kind: enable
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ upgrade_step_1[0][:-1] }}a"
+        db_name: db1
+        add: "{{ post_upgrade_feature_flags }}"
+      register: r_step_6b
+      when: (post_upgrade_feature_flags | default([])) | length > 0
+    - name: "Show enable result (step 6b)"
+      ansible.builtin.debug: { msg: "{{ r_step_6b.msg | default('feature-flag list empty -- no-op') }}" }
+
+
+# ----- step 7: after the first batch, run a light checkpoint while writers keep flowing ------
+
+# Upgrade window closed -- restart the tool for the steady-state checkpoint A.
+# ConsistencyCheck is an INTRA-CLUSTER consistency tool -- it expects all listed
+# nodes to mirror each other's data.  Feeding it (Hub-A, Sink1-A, Sink2-A) makes
+# it mass-flag filtered-away docs as drift and "repair" them by violating the
+# filter.  Per the tool's author: run it once per cluster (hub a/b/c, sink-1
+# a/b/c, sink-2 a/b/c) so it only compares nodes that SHOULD be identical.
+- ansible.builtin.import_playbook: ../../../toolbox/consistency_check/run_once.yml
+  vars:
+    db_name: db1
+    net: "{{ docker_network_name }}"
+    state_store_host_port: "{{ cc_state_port | default(8084) | int }}"
+    node_leaders:
+      - { label: "{{ hub_id | default(1) }}a", host: "{{ hub_id | default(1) }}a" }
+      - { label: "{{ hub_id | default(1) }}b", host: "{{ hub_id | default(1) }}b" }
+      - { label: "{{ hub_id | default(1) }}c", host: "{{ hub_id | default(1) }}c" }
+
+- ansible.builtin.import_playbook: ../../../toolbox/consistency_check/run_once.yml
+  vars:
+    db_name: db1
+    net: "{{ docker_network_name }}"
+    state_store_host_port: "{{ cc_state_port | default(8084) | int }}"
+    node_leaders:
+      - { label: "{{ sink1_id | default(2) }}a", host: "{{ sink1_id | default(2) }}a" }
+      - { label: "{{ sink1_id | default(2) }}b", host: "{{ sink1_id | default(2) }}b" }
+      - { label: "{{ sink1_id | default(2) }}c", host: "{{ sink1_id | default(2) }}c" }
+
+- ansible.builtin.import_playbook: ../../../toolbox/consistency_check/run_once.yml
+  vars:
+    db_name: db1
+    net: "{{ docker_network_name }}"
+    state_store_host_port: "{{ cc_state_port | default(8084) | int }}"
+    node_leaders:
+      - { label: "{{ sink2_id | default(3) }}a", host: "{{ sink2_id | default(3) }}a" }
+      - { label: "{{ sink2_id | default(3) }}b", host: "{{ sink2_id | default(3) }}b" }
+      - { label: "{{ sink2_id | default(3) }}c", host: "{{ sink2_id | default(3) }}c" }
+
+- name: RPV-1-NOREV step 7 -- Checkpoint A (drain + light checks)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    # Mid-roll drain.  A full quiescence wait would never converge while the workloads are
+    # still going, so we use marker propagation as a live-write-safe proxy instead.
+    - name: "Checkpoint A: wait for users/sink1/marker-* propagation hub -> sink-1 a/b/c"
+      ravendb_wait:
+        kind: marker_propagation
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        source: "{{ hub_id | default(1) }}a"
+        targets: ["{{ sink1_id | default(2) }}a", "{{ sink1_id | default(2) }}b", "{{ sink1_id | default(2) }}c"]
+        marker_id_prefix: "users/sink1/marker-"
+        timeout: "{{ marker_propagation_timeout_secs | default(300) | int }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Checkpoint A: wait for users/sink2/marker-* propagation hub -> sink-2 a/b/c"
+      ravendb_wait:
+        kind: marker_propagation
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        source: "{{ hub_id | default(1) }}a"
+        targets: ["{{ sink2_id | default(3) }}a", "{{ sink2_id | default(3) }}b", "{{ sink2_id | default(3) }}c"]
+        marker_id_prefix: "users/sink2/marker-"
+        timeout: "{{ marker_propagation_timeout_secs | default(300) | int }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Mixed binaries are expected here -- the first batch is on the new binary, the other
+    # two batches are still on the old one.
+    - name: "Checkpoint A: dump schema version on all 9 nodes (mixed binaries expected)"
+      ravendb_diagnostic:
+        kind: schema_version
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        nodes:
+          - "{{ hub_id | default(1) }}a"
+          - "{{ hub_id | default(1) }}b"
+          - "{{ hub_id | default(1) }}c"
+          - "{{ sink1_id | default(2) }}a"
+          - "{{ sink1_id | default(2) }}b"
+          - "{{ sink1_id | default(2) }}c"
+          - "{{ sink2_id | default(3) }}a"
+          - "{{ sink2_id | default(3) }}b"
+          - "{{ sink2_id | default(3) }}c"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Filter compliance on each sink -- catches a routing regression introduced by the upgrade.
+    - name: "Checkpoint A: assert filter compliance on sink-1"
+      ravendb_diagnostic:
+        kind: filter_compliance
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        sink_cluster_leader: "{{ sink1_id | default(2) }}a"
+        db_name: db1
+        allowed_prefixes: ["users/sink1/", "orders/sink1/", "sink1-local/"]
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Checkpoint A: assert filter compliance on sink-2"
+      ravendb_diagnostic:
+        kind: filter_compliance
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        sink_cluster_leader: "{{ sink2_id | default(3) }}a"
+        db_name: db1
+        allowed_prefixes: ["users/sink2/", "orders/sink2/", "sink2-local/"]
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # No documents belonging to one sink should ever show up on the other sink.
+    - name: "Checkpoint A: assert cross-sink isolation on sink-1 (no users/sink2 or orders/sink2)"
+      ravendb_diagnostic:
+        kind: cross_sink_isolation
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        sink_cluster_leader: "{{ sink1_id | default(2) }}a"
+        forbidden_prefixes: ["users/sink2/", "orders/sink2/"]
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Checkpoint A: assert cross-sink isolation on sink-2 (no users/sink1 or orders/sink1)"
+      ravendb_diagnostic:
+        kind: cross_sink_isolation
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        sink_cluster_leader: "{{ sink2_id | default(3) }}a"
+        forbidden_prefixes: ["users/sink1/", "orders/sink1/"]
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+# ----- step 8: upgrade the second batch of three nodes (default variant A: the hub) ----------
+- name: RPV-1-NOREV step 8 -- upgrade step 2 (3 nodes from upgrade_step_2)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Announce upgrade step 2 banner
+      ansible.builtin.debug:
+        msg: "==== step 8 -- upgrade step 2 ({{ upgrade_step_2 }}) ===="
+
+    - name: Upgrade each node + wait for member
+      ansible.builtin.shell: |
+        set -e
+        ansible-playbook toolbox/service/upgrade_node.yml \
+          -e target={{ item }} -e custom_build={{ v_new_build }} --skip-tags download \
+          > /tmp/rpv1-upgrade-{{ item }}.log 2>&1
+        ansible-playbook toolbox/wait/wait_for_member.yml \
+          -e cluster_leader={{ peer_map[item] }} -e db_name={{ db_name }} \
+          -e target={{ item }} \
+          -e timeout_secs={{ member_budget_secs | default(300) | int }} \
+          > /tmp/rpv1-member-{{ item }}.log 2>&1
+      args:
+        chdir: "{{ playbook_dir }}/../../.."
+      environment:
+        ANSIBLE_BECOME_PASS: "{{ ansible_become_pass | default('') }}"
+      loop: "{{ upgrade_step_2 }}"
+      async: 2400
+      poll: 30
+
+
+# ----- step 8b: enable post-upgrade feature flag on the cluster just upgraded ----------------
+# Mirror of step 6b for upgrade_step_2.  Same single-cluster-batch guard; same module call.
+- name: RPV-1-NOREV step 8b -- enable feature flags on the cluster just upgraded (step 2)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Guard: upgrade_step_2 must be a single-cluster batch (variants A/B only)"
+      ansible.builtin.assert:
+        that:
+          - (upgrade_step_2[0][:-1]) == (upgrade_step_2[1][:-1])
+          - (upgrade_step_2[1][:-1]) == (upgrade_step_2[2][:-1])
+        fail_msg: >-
+          upgrade_step_2 = {{ upgrade_step_2 }} mixes nodes from multiple clusters.
+          This looks like variant C (interleaved rolling upgrade), which is NOT supported
+          by RPV-1-NOREV's per-step feature-flag enable flow.  Rerun with a single-cluster-per-step
+          variant (A: sink-1 -> hub -> sink-2, or B: hub -> sink-1 -> sink-2).
+          See scenarios/company-1/RPV1-NOREV/vars.yml lines 97-103 for variant definitions.
+    - name: "Enable post-upgrade features on {{ upgrade_step_2[0][:-1] }}a/db1"
+      ravendb_features:
+        kind: enable
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ upgrade_step_2[0][:-1] }}a"
+        db_name: db1
+        add: "{{ post_upgrade_feature_flags }}"
+      register: r_step_8b
+      when: (post_upgrade_feature_flags | default([])) | length > 0
+    - name: "Show enable result (step 8b)"
+      ansible.builtin.debug: { msg: "{{ r_step_8b.msg | default('feature-flag list empty -- no-op') }}" }
+
+
+# ----- step 9: after the second batch, run the same light checkpoint while writers flow ------
+
+# Upgrade window closed -- restart the tool for the steady-state checkpoint B.
+# ConsistencyCheck is an INTRA-CLUSTER consistency tool -- it expects all listed
+# nodes to mirror each other's data.  Feeding it (Hub-A, Sink1-A, Sink2-A) makes
+# it mass-flag filtered-away docs as drift and "repair" them by violating the
+# filter.  Per the tool's author: run it once per cluster (hub a/b/c, sink-1
+# a/b/c, sink-2 a/b/c) so it only compares nodes that SHOULD be identical.
+- ansible.builtin.import_playbook: ../../../toolbox/consistency_check/run_once.yml
+  vars:
+    db_name: db1
+    net: "{{ docker_network_name }}"
+    state_store_host_port: "{{ cc_state_port | default(8084) | int }}"
+    node_leaders:
+      - { label: "{{ hub_id | default(1) }}a", host: "{{ hub_id | default(1) }}a" }
+      - { label: "{{ hub_id | default(1) }}b", host: "{{ hub_id | default(1) }}b" }
+      - { label: "{{ hub_id | default(1) }}c", host: "{{ hub_id | default(1) }}c" }
+
+- ansible.builtin.import_playbook: ../../../toolbox/consistency_check/run_once.yml
+  vars:
+    db_name: db1
+    net: "{{ docker_network_name }}"
+    state_store_host_port: "{{ cc_state_port | default(8084) | int }}"
+    node_leaders:
+      - { label: "{{ sink1_id | default(2) }}a", host: "{{ sink1_id | default(2) }}a" }
+      - { label: "{{ sink1_id | default(2) }}b", host: "{{ sink1_id | default(2) }}b" }
+      - { label: "{{ sink1_id | default(2) }}c", host: "{{ sink1_id | default(2) }}c" }
+
+- ansible.builtin.import_playbook: ../../../toolbox/consistency_check/run_once.yml
+  vars:
+    db_name: db1
+    net: "{{ docker_network_name }}"
+    state_store_host_port: "{{ cc_state_port | default(8084) | int }}"
+    node_leaders:
+      - { label: "{{ sink2_id | default(3) }}a", host: "{{ sink2_id | default(3) }}a" }
+      - { label: "{{ sink2_id | default(3) }}b", host: "{{ sink2_id | default(3) }}b" }
+      - { label: "{{ sink2_id | default(3) }}c", host: "{{ sink2_id | default(3) }}c" }
+
+- name: RPV-1-NOREV step 9 -- Checkpoint B (drain + light checks)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Checkpoint B: wait for users/sink1/marker-* propagation hub -> sink-1 a/b/c"
+      ravendb_wait:
+        kind: marker_propagation
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        source: "{{ hub_id | default(1) }}a"
+        targets: ["{{ sink1_id | default(2) }}a", "{{ sink1_id | default(2) }}b", "{{ sink1_id | default(2) }}c"]
+        marker_id_prefix: "users/sink1/marker-"
+        timeout: "{{ marker_propagation_timeout_secs | default(300) | int }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Checkpoint B: wait for users/sink2/marker-* propagation hub -> sink-2 a/b/c"
+      ravendb_wait:
+        kind: marker_propagation
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        source: "{{ hub_id | default(1) }}a"
+        targets: ["{{ sink2_id | default(3) }}a", "{{ sink2_id | default(3) }}b", "{{ sink2_id | default(3) }}c"]
+        marker_id_prefix: "users/sink2/marker-"
+        timeout: "{{ marker_propagation_timeout_secs | default(300) | int }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Checkpoint B: dump schema version on all 9 nodes (mixed binaries expected)"
+      ravendb_diagnostic:
+        kind: schema_version
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        nodes:
+          - "{{ hub_id | default(1) }}a"
+          - "{{ hub_id | default(1) }}b"
+          - "{{ hub_id | default(1) }}c"
+          - "{{ sink1_id | default(2) }}a"
+          - "{{ sink1_id | default(2) }}b"
+          - "{{ sink1_id | default(2) }}c"
+          - "{{ sink2_id | default(3) }}a"
+          - "{{ sink2_id | default(3) }}b"
+          - "{{ sink2_id | default(3) }}c"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Checkpoint B: assert filter compliance on sink-1"
+      ravendb_diagnostic:
+        kind: filter_compliance
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        sink_cluster_leader: "{{ sink1_id | default(2) }}a"
+        db_name: db1
+        allowed_prefixes: ["users/sink1/", "orders/sink1/", "sink1-local/"]
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Checkpoint B: assert filter compliance on sink-2"
+      ravendb_diagnostic:
+        kind: filter_compliance
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        sink_cluster_leader: "{{ sink2_id | default(3) }}a"
+        db_name: db1
+        allowed_prefixes: ["users/sink2/", "orders/sink2/", "sink2-local/"]
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Checkpoint B: assert cross-sink isolation on sink-1"
+      ravendb_diagnostic:
+        kind: cross_sink_isolation
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        sink_cluster_leader: "{{ sink1_id | default(2) }}a"
+        forbidden_prefixes: ["users/sink2/", "orders/sink2/"]
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Checkpoint B: assert cross-sink isolation on sink-2"
+      ravendb_diagnostic:
+        kind: cross_sink_isolation
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        sink_cluster_leader: "{{ sink2_id | default(3) }}a"
+        forbidden_prefixes: ["users/sink1/", "orders/sink1/"]
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+# ----- step 10: upgrade the final batch of three nodes (default variant A: sink-2) -----------
+- name: RPV-1-NOREV step 10 -- upgrade step 3 (3 nodes from upgrade_step_3)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Announce upgrade step 3 banner
+      ansible.builtin.debug:
+        msg: "==== step 10 -- upgrade step 3 ({{ upgrade_step_3 }}) ===="
+
+    - name: Upgrade each node + wait for member
+      ansible.builtin.shell: |
+        set -e
+        ansible-playbook toolbox/service/upgrade_node.yml \
+          -e target={{ item }} -e custom_build={{ v_new_build }} --skip-tags download \
+          > /tmp/rpv1-upgrade-{{ item }}.log 2>&1
+        ansible-playbook toolbox/wait/wait_for_member.yml \
+          -e cluster_leader={{ peer_map[item] }} -e db_name={{ db_name }} \
+          -e target={{ item }} \
+          -e timeout_secs={{ member_budget_secs | default(300) | int }} \
+          > /tmp/rpv1-member-{{ item }}.log 2>&1
+      args:
+        chdir: "{{ playbook_dir }}/../../.."
+      environment:
+        ANSIBLE_BECOME_PASS: "{{ ansible_become_pass | default('') }}"
+      loop: "{{ upgrade_step_3 }}"
+      async: 2400
+      poll: 30
+
+
+# ----- step 10b: enable post-upgrade feature flag on the cluster just upgraded ---------------
+# Mirror of step 6b/8b for upgrade_step_3.  At this point all 9 nodes are on v_new and each
+# cluster has had its flag flipped immediately after its own roll completed -- step 6b for
+# upgrade_step_1, step 8b for upgrade_step_2, this one for upgrade_step_3.  No final
+# combined-enable: per-cluster enables are the only path now.
+- name: RPV-1-NOREV step 10b -- enable feature flags on the cluster just upgraded (step 3)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Guard: upgrade_step_3 must be a single-cluster batch (variants A/B only)"
+      ansible.builtin.assert:
+        that:
+          - (upgrade_step_3[0][:-1]) == (upgrade_step_3[1][:-1])
+          - (upgrade_step_3[1][:-1]) == (upgrade_step_3[2][:-1])
+        fail_msg: >-
+          upgrade_step_3 = {{ upgrade_step_3 }} mixes nodes from multiple clusters.
+          This looks like variant C (interleaved rolling upgrade), which is NOT supported
+          by RPV-1-NOREV's per-step feature-flag enable flow.  Rerun with a single-cluster-per-step
+          variant (A: sink-1 -> hub -> sink-2, or B: hub -> sink-1 -> sink-2).
+          See scenarios/company-1/RPV1-NOREV/vars.yml lines 97-103 for variant definitions.
+    - name: "Enable post-upgrade features on {{ upgrade_step_3[0][:-1] }}a/db1"
+      ravendb_features:
+        kind: enable
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ upgrade_step_3[0][:-1] }}a"
+        db_name: db1
+        add: "{{ post_upgrade_feature_flags }}"
+      register: r_step_10b
+      when: (post_upgrade_feature_flags | default([])) | length > 0
+    - name: "Show enable result (step 10b)"
+      ansible.builtin.debug: { msg: "{{ r_step_10b.msg | default('feature-flag list empty -- no-op') }}" }
+
+
+# Upgrade window closed -- restart the tool one last time so it scans the
+# fully-upgraded cluster with the new feature flags on.  Final stop below
+# extracts the Run Summary from this last window.
+# ConsistencyCheck is an INTRA-CLUSTER consistency tool -- it expects all listed
+# nodes to mirror each other's data.  Feeding it (Hub-A, Sink1-A, Sink2-A) makes
+# it mass-flag filtered-away docs as drift and "repair" them by violating the
+# filter.  Per the tool's author: run it once per cluster (hub a/b/c, sink-1
+# a/b/c, sink-2 a/b/c) so it only compares nodes that SHOULD be identical.
+- ansible.builtin.import_playbook: ../../../toolbox/consistency_check/run_once.yml
+  vars:
+    db_name: db1
+    net: "{{ docker_network_name }}"
+    state_store_host_port: "{{ cc_state_port | default(8084) | int }}"
+    node_leaders:
+      - { label: "{{ hub_id | default(1) }}a", host: "{{ hub_id | default(1) }}a" }
+      - { label: "{{ hub_id | default(1) }}b", host: "{{ hub_id | default(1) }}b" }
+      - { label: "{{ hub_id | default(1) }}c", host: "{{ hub_id | default(1) }}c" }
+
+- ansible.builtin.import_playbook: ../../../toolbox/consistency_check/run_once.yml
+  vars:
+    db_name: db1
+    net: "{{ docker_network_name }}"
+    state_store_host_port: "{{ cc_state_port | default(8084) | int }}"
+    node_leaders:
+      - { label: "{{ sink1_id | default(2) }}a", host: "{{ sink1_id | default(2) }}a" }
+      - { label: "{{ sink1_id | default(2) }}b", host: "{{ sink1_id | default(2) }}b" }
+      - { label: "{{ sink1_id | default(2) }}c", host: "{{ sink1_id | default(2) }}c" }
+
+- ansible.builtin.import_playbook: ../../../toolbox/consistency_check/run_once.yml
+  vars:
+    db_name: db1
+    net: "{{ docker_network_name }}"
+    state_store_host_port: "{{ cc_state_port | default(8084) | int }}"
+    node_leaders:
+      - { label: "{{ sink2_id | default(3) }}a", host: "{{ sink2_id | default(3) }}a" }
+      - { label: "{{ sink2_id | default(3) }}b", host: "{{ sink2_id | default(3) }}b" }
+      - { label: "{{ sink2_id | default(3) }}c", host: "{{ sink2_id | default(3) }}c" }
+
+# ----- step 11: endpoint checkpoint -- every node on the new binary, writers still flowing ---
+
+- name: RPV-1-NOREV step 11 -- endpoint checkpoint (drain + I-13 suite)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Endpoint: dump schema version on all 9 nodes (expect all v_new)"
+      ravendb_diagnostic:
+        kind: schema_version
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        nodes:
+          - "{{ hub_id   | default(1) }}a"
+          - "{{ hub_id   | default(1) }}b"
+          - "{{ hub_id   | default(1) }}c"
+          - "{{ sink1_id | default(2) }}a"
+          - "{{ sink1_id | default(2) }}b"
+          - "{{ sink1_id | default(2) }}c"
+          - "{{ sink2_id | default(3) }}a"
+          - "{{ sink2_id | default(3) }}b"
+          - "{{ sink2_id | default(3) }}c"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Drain before the endpoint checkpoint -- marker propagation, since a full docs-drain
+    # wait can't converge while the workloads are still going.
+    - name: "Endpoint: wait for users/sink1/marker-* propagation hub -> sink-1 a/b/c"
+      ravendb_wait:
+        kind: marker_propagation
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        source: "{{ hub_id | default(1) }}a"
+        targets: ["{{ sink1_id | default(2) }}a", "{{ sink1_id | default(2) }}b", "{{ sink1_id | default(2) }}c"]
+        marker_id_prefix: "users/sink1/marker-"
+        timeout: "{{ marker_propagation_timeout_secs | default(300) | int }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Endpoint: wait for users/sink2/marker-* propagation hub -> sink-2 a/b/c"
+      ravendb_wait:
+        kind: marker_propagation
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        source: "{{ hub_id | default(1) }}a"
+        targets: ["{{ sink2_id | default(3) }}a", "{{ sink2_id | default(3) }}b", "{{ sink2_id | default(3) }}c"]
+        marker_id_prefix: "users/sink2/marker-"
+        timeout: "{{ marker_propagation_timeout_secs | default(300) | int }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Every node should now report the new binary version.
+    - name: "Endpoint: assert schema version parity across all 9 nodes (all v_new)"
+      ravendb_diagnostic:
+        kind: schema_version
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        nodes:
+          - "{{ hub_id | default(1) }}a"
+          - "{{ hub_id | default(1) }}b"
+          - "{{ hub_id | default(1) }}c"
+          - "{{ sink1_id | default(2) }}a"
+          - "{{ sink1_id | default(2) }}b"
+          - "{{ sink1_id | default(2) }}c"
+          - "{{ sink2_id | default(3) }}a"
+          - "{{ sink2_id | default(3) }}b"
+          - "{{ sink2_id | default(3) }}c"
+        require_parity: true
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # After the rolling upgrade is complete, confirm the new build's features
+    # actually flipped on for the database.
+    - name: "Endpoint: read DatabaseRecord.SupportedFeatures (via hub leader)"
+      ravendb_diagnostic:
+        kind: supported_features
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        target: "{{ hub_id | default(1) }}a"
+        db_name: db1
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Filter compliance still holds.
+    - name: "Endpoint: assert filter compliance on sink-1"
+      ravendb_diagnostic:
+        kind: filter_compliance
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        sink_cluster_leader: "{{ sink1_id | default(2) }}a"
+        db_name: db1
+        allowed_prefixes: ["users/sink1/", "orders/sink1/", "sink1-local/"]
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Endpoint: assert filter compliance on sink-2"
+      ravendb_diagnostic:
+        kind: filter_compliance
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        sink_cluster_leader: "{{ sink2_id | default(3) }}a"
+        db_name: db1
+        allowed_prefixes: ["users/sink2/", "orders/sink2/", "sink2-local/"]
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # No cross-sink leak at the endpoint either.
+    - name: "Endpoint: assert cross-sink isolation on sink-1"
+      ravendb_diagnostic:
+        kind: cross_sink_isolation
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        sink_cluster_leader: "{{ sink1_id | default(2) }}a"
+        forbidden_prefixes: ["users/sink2/", "orders/sink2/"]
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Endpoint: assert cross-sink isolation on sink-2"
+      ravendb_diagnostic:
+        kind: cross_sink_isolation
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        sink_cluster_leader: "{{ sink2_id | default(3) }}a"
+        forbidden_prefixes: ["users/sink1/", "orders/sink1/"]
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # NOTE: no legacy-lane check at the endpoint.  The legacy-lane check only matters while
+    # there are mixed-binary connections; at this point everything is on the new binary so
+    # there is nothing left to verify there.
+
+    # Endpoint change-vector boundary check on each sink direction.
+    - name: "Endpoint I-13b: assert CV-boundary order-side hub -> sink-1"
+      ravendb_diagnostic:
+        kind: cv_boundary_by_dbid
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        source_nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
+        receiver_nodes: ["{{ sink1_id | default(2) }}a", "{{ sink1_id | default(2) }}b", "{{ sink1_id | default(2) }}c"]
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Endpoint I-13b: assert CV-boundary order-side hub -> sink-2"
+      ravendb_diagnostic:
+        kind: cv_boundary_by_dbid
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        source_nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
+        receiver_nodes: ["{{ sink2_id | default(3) }}a", "{{ sink2_id | default(3) }}b", "{{ sink2_id | default(3) }}c"]
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Reverse direction (sink -> hub) is now done structurally by the
+    # hub_sink_doc_set_converged waits at step 12 (one per link).  With bidi
+    # config (sink -> hub filter '*'), every sink-side write must appear on
+    # hub; hub_sink_doc_set asserts exactly that.  A broken sink -> hub link
+    # surfaces there with the offending missing-on-hub ids listed.  No
+    # separate cv_boundary_by_dbid call needed here.
+
+
+# ----- step 12: stop the workloads, wait for everything to drain, and run the strict asserts -
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/assert_workload_alive.yml
+  vars: { pidfile: "/tmp/w1-{{ hub_id | default(1) }}a-db1.pid" }
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/assert_workload_alive.yml
+  vars: { pidfile: "/tmp/w2-{{ hub_id | default(1) }}a-db1.pid" }
+
+# W-1C assert_alive (hub-side sidecar) -- gated on rpv1_enable_w1c.
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/assert_workload_alive.yml
+  vars: { pidfile: "/tmp/w1c-{{ hub_id | default(1) }}a-db1.pid" }
+  when: rpv1_enable_w1c | default(false) | bool
+
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars:
+    pidfile: "/tmp/w1-{{ hub_id | default(1) }}a-db1.pid"
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars:
+    pidfile: "/tmp/w2-{{ hub_id | default(1) }}a-db1.pid"
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars:
+    pidfile: "/tmp/w1c-{{ hub_id | default(1) }}a-db1.pid"
+  when: rpv1_enable_w1c | default(false) | bool
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars:
+    pidfile: "/tmp/w1-{{ sink1_id | default(2) }}a-db1.pid"
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars:
+    pidfile: "/tmp/w1c-{{ sink1_id | default(2) }}a-db1.pid"
+  when: rpv1_enable_w1c | default(false) | bool
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars:
+    pidfile: "/tmp/w1-{{ sink2_id | default(3) }}a-db1.pid"
+
+- ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
+  vars:
+    pidfile: "/tmp/w1c-{{ sink2_id | default(3) }}a-db1.pid"
+  when: rpv1_enable_w1c | default(false) | bool
+
+- name: RPV-1-NOREV step 12 -- final convergence + deep parity (quiet cluster)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    # Per-cluster etag stability.  Simpler than full change-vector equality and immune to
+    # the responsible-node asymmetry that sink clusters show under bidirectional pull.
+    - name: "Final: wait for etag parity across hub a/b/c (quiet drain)"
+      ravendb_wait:
+        kind: etag_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
+        timeout: "{{ quiesce_budget_secs | default(1200) | int }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Final: wait for etag parity across sink-1 a/b/c (quiet drain)"
+      ravendb_wait:
+        kind: etag_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ sink1_id | default(2) }}a", "{{ sink1_id | default(2) }}b", "{{ sink1_id | default(2) }}c"]
+        timeout: "{{ quiesce_budget_secs | default(1200) | int }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Final: wait for etag parity across sink-2 a/b/c (quiet drain)"
+      ravendb_wait:
+        kind: etag_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ sink2_id | default(3) }}a", "{{ sink2_id | default(3) }}b", "{{ sink2_id | default(3) }}c"]
+        timeout: "{{ quiesce_budget_secs | default(1200) | int }}"
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Per-cluster tombstone convergence -- background cleanup runs on its own timer, so we
+    # wait until the per-node tombstone counts have settled before we assert on them.
+    # Tombstone settle waits -- informational by default.  Cross-replica
+    # tombstone counts lag on whichever node the per-node cleanup hasn't
+    # kicked on; it's not a correctness signal for replication and produced
+    # false-positive timeouts.  Override -e relax_rpv1_tombstone_wait=false
+    # to restore the strict behaviour.  Same shape as relax_rp1_tombstone_wait.
+    - name: "Final: wait for tombstone-count convergence across hub a/b/c"
+      ravendb_wait:
+        kind: stats_field_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
+        fields: ["CountOfTombstones"]
+        timeout: "{{ tombstone_settle_timeout_secs | default(300) | int }}"
+        poll_interval: 3
+      register: r
+      failed_when: "not (relax_rpv1_tombstone_wait | default(true) | bool) and (r.failed | default(false))"
+    - name: Show result
+      ansible.builtin.debug:
+        msg: "tombstone settle ({{ 'informational' if (relax_rpv1_tombstone_wait | default(true) | bool) else 'strict' }}): {{ r.msg | default('ok') }}"
+
+    - name: "Final: wait for tombstone-count convergence across sink-1 a/b/c"
+      ravendb_wait:
+        kind: stats_field_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ sink1_id | default(2) }}a", "{{ sink1_id | default(2) }}b", "{{ sink1_id | default(2) }}c"]
+        fields: ["CountOfTombstones"]
+        timeout: "{{ tombstone_settle_timeout_secs | default(300) | int }}"
+        poll_interval: 3
+      register: r
+      failed_when: "not (relax_rpv1_tombstone_wait | default(true) | bool) and (r.failed | default(false))"
+    - name: Show result
+      ansible.builtin.debug:
+        msg: "tombstone settle ({{ 'informational' if (relax_rpv1_tombstone_wait | default(true) | bool) else 'strict' }}): {{ r.msg | default('ok') }}"
+
+    - name: "Final: wait for tombstone-count convergence across sink-2 a/b/c"
+      ravendb_wait:
+        kind: stats_field_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ sink2_id | default(3) }}a", "{{ sink2_id | default(3) }}b", "{{ sink2_id | default(3) }}c"]
+        fields: ["CountOfTombstones"]
+        timeout: "{{ tombstone_settle_timeout_secs | default(300) | int }}"
+        poll_interval: 3
+      register: r
+      failed_when: "not (relax_rpv1_tombstone_wait | default(true) | bool) and (r.failed | default(false))"
+    - name: Show result
+      ansible.builtin.debug:
+        msg: "tombstone settle ({{ 'informational' if (relax_rpv1_tombstone_wait | default(true) | bool) else 'strict' }}): {{ r.msg | default('ok') }}"
+
+    # Cross-cluster doc-set completeness.  Enumerate every live doc on hub +
+    # each sink and verify by set containment that every doc the filter allows
+    # is present, and every sink-side doc that's not sink-local has a hub twin.
+    # Two independent links (hub <-> sink-1 and hub <-> sink-2) -- check each.
+    - name: "Final: hub <-> sink-1 doc-set completeness"
+      ravendb_wait:
+        kind: hub_sink_doc_set_converged
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        hub_cluster_leader:  "{{ hub_id   | default(1) }}a"
+        sink_cluster_leader: "{{ sink1_id | default(2) }}a"
+        allowed_prefixes:    ["users/sink1/*", "orders/sink1/*"]
+        sink_local_prefixes: []   # bidi sink->hub * -- sink1-local must also be on hub
+        timeout: "{{ doc_set_settle_timeout_secs | default(300) | int }}"
+        poll_interval: 5
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Final: hub <-> sink-2 doc-set completeness"
+      ravendb_wait:
+        kind: hub_sink_doc_set_converged
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        hub_cluster_leader:  "{{ hub_id   | default(1) }}a"
+        sink_cluster_leader: "{{ sink2_id | default(3) }}a"
+        allowed_prefixes:    ["users/sink2/*", "orders/sink2/*"]
+        sink_local_prefixes: []   # bidi sink->hub * -- sink2-local must also be on hub
+        timeout: "{{ doc_set_settle_timeout_secs | default(300) | int }}"
+        poll_interval: 5
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Per-cluster /stats parity now that everything is quiet.  Tombstones
+    # excluded from the assertion -- same rationale as T0 and as RP-1:
+    # cross-replica tombstone counts lag on whichever node the per-node
+    # cleanup hasn't kicked on yet, and that's not a correctness signal
+    # for replication.  Tombstone count still appears in the printed
+    # table as info-only.
+    - name: "Final: assert /stats parity across hub a/b/c (I-1+I-5+I-6, tombstones info-only)"
+      ravendb_diagnostic:
+        kind: stats_parity
+        settle_secs: "{{ stats_parity_settle_secs | default(120) | int }}"
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
+        assert_fields: "{{ t0_stats_assert_fields }}"
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Final: assert /stats parity across sink-1 a/b/c (tombstones info-only)"
+      ravendb_diagnostic:
+        kind: stats_parity
+        settle_secs: "{{ stats_parity_settle_secs | default(120) | int }}"
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ sink1_id | default(2) }}a", "{{ sink1_id | default(2) }}b", "{{ sink1_id | default(2) }}c"]
+        assert_fields: "{{ t0_stats_assert_fields }}"
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Final: assert /stats parity across sink-2 a/b/c (tombstones info-only)"
+      ravendb_diagnostic:
+        kind: stats_parity
+        settle_secs: "{{ stats_parity_settle_secs | default(120) | int }}"
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ sink2_id | default(3) }}a", "{{ sink2_id | default(3) }}b", "{{ sink2_id | default(3) }}c"]
+        assert_fields: "{{ t0_stats_assert_fields }}"
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Per-bucket doc-id-set parity: each of the seven buckets is checked on the cluster
+    # that owns it.
+    - name: "Final: assert users/sink1 doc-id-set parity across sink-1 a/b/c"
+      ravendb_diagnostic:
+        kind: doc_id_set_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ sink1_id | default(2) }}a", "{{ sink1_id | default(2) }}b", "{{ sink1_id | default(2) }}c"]
+        id_prefix: "users/sink1"
+        count: "{{ parity_probe_count | default(50) | int }}"
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Final: assert orders/sink1 doc-id-set parity across sink-1 a/b/c"
+      ravendb_diagnostic:
+        kind: doc_id_set_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ sink1_id | default(2) }}a", "{{ sink1_id | default(2) }}b", "{{ sink1_id | default(2) }}c"]
+        id_prefix: "orders/sink1"
+        count: "{{ parity_probe_count | default(50) | int }}"
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Final: assert users/sink2 doc-id-set parity across sink-2 a/b/c"
+      ravendb_diagnostic:
+        kind: doc_id_set_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ sink2_id | default(3) }}a", "{{ sink2_id | default(3) }}b", "{{ sink2_id | default(3) }}c"]
+        id_prefix: "users/sink2"
+        count: "{{ parity_probe_count | default(50) | int }}"
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Final: assert orders/sink2 doc-id-set parity across sink-2 a/b/c"
+      ravendb_diagnostic:
+        kind: doc_id_set_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ sink2_id | default(3) }}a", "{{ sink2_id | default(3) }}b", "{{ sink2_id | default(3) }}c"]
+        id_prefix: "orders/sink2"
+        count: "{{ parity_probe_count | default(50) | int }}"
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Final: assert users/hub doc-id-set parity across hub a/b/c"
+      ravendb_diagnostic:
+        kind: doc_id_set_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
+        id_prefix: "users/hub"
+        count: "{{ parity_probe_count | default(50) | int }}"
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Final: assert orders/hub doc-id-set parity across hub a/b/c"
+      ravendb_diagnostic:
+        kind: doc_id_set_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
+        id_prefix: "orders/hub"
+        count: "{{ parity_probe_count | default(50) | int }}"
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Final: assert Internal doc-id-set parity across hub a/b/c"
+      ravendb_diagnostic:
+        kind: doc_id_set_parity
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        nodes: ["{{ hub_id | default(1) }}a", "{{ hub_id | default(1) }}b", "{{ hub_id | default(1) }}c"]
+        id_prefix: "Internal"
+        count: "{{ parity_probe_count | default(50) | int }}"
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # Filter compliance on each sink at the very end.
+    - name: "Final: assert filter compliance on sink-1"
+      ravendb_diagnostic:
+        kind: filter_compliance
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        sink_cluster_leader: "{{ sink1_id | default(2) }}a"
+        db_name: db1
+        allowed_prefixes: ["users/sink1/", "orders/sink1/", "sink1-local/"]
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Final: assert filter compliance on sink-2"
+      ravendb_diagnostic:
+        kind: filter_compliance
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        sink_cluster_leader: "{{ sink2_id | default(3) }}a"
+        db_name: db1
+        allowed_prefixes: ["users/sink2/", "orders/sink2/", "sink2-local/"]
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    # No documents belonging to one sink should ever show up on the other sink.
+    - name: "Final: assert cross-sink isolation on sink-1"
+      ravendb_diagnostic:
+        kind: cross_sink_isolation
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        sink_cluster_leader: "{{ sink1_id | default(2) }}a"
+        forbidden_prefixes: ["users/sink2/", "orders/sink2/"]
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+    - name: "Final: assert cross-sink isolation on sink-2"
+      ravendb_diagnostic:
+        kind: cross_sink_isolation
+        ravendb_domain: "{{ ravendb_domain }}"
+        client_cert: "{{ cert_dir }}/client.pem"
+        ca_cert: "{{ cert_ca_crt }}"
+        db_name: db1
+        sink_cluster_leader: "{{ sink2_id | default(3) }}a"
+        forbidden_prefixes: ["users/sink1/", "orders/sink1/"]
+        assert_mode: true
+      register: r
+    - name: Show result
+      ansible.builtin.debug: { msg: "{{ r.msg }}" }
+
+
+- name: RPV-1-NOREV -- DONE
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: Show RPV-1-NOREV PASS banner
+      ansible.builtin.debug:
+        msg: >-
+          RPV-1-NOREV PASS  hub=[{{ hub_id | default(1) }}a,{{ hub_id | default(1) }}b,{{ hub_id | default(1) }}c]
+          sink-1=[{{ sink1_id | default(2) }}a,{{ sink1_id | default(2) }}b,{{ sink1_id | default(2) }}c]
+          sink-2=[{{ sink2_id | default(3) }}a,{{ sink2_id | default(3) }}b,{{ sink2_id | default(3) }}c]
+          db=db1 (no revisions)
+          cross-cluster rolling upgrade + filter geometry + CV-boundary all held

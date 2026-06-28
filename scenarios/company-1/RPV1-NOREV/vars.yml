@@ -1,0 +1,178 @@
+# scenarios/company-1/RPV1-NOREV/vars.yml -- shared config for RPV-1-NOREV.
+# Variant of RPV-1 with per-collection revisions configuration removed.
+# (cross-cluster v_62 -> v_new rolling upgrade across T3, filter-aware, no revisions)
+
+# ---------- Topology -- T3: 1 hub + 2 sink clusters, 9 nodes total ------------
+db_name: db1
+
+# Default cluster ids -- hub at 1, sink-1 at 2, sink-2 at 3.  For parallel runs on the
+# same docker host, override -e hub_id=4 -e sink1_id=5 -e sink2_id=6 (and matching
+# -e cluster_id_start=4 on provision_nodes + -e docker_network_name=<unique-net>).
+# All three ids must be DISJOINT across concurrent runs.
+hub_id: 1
+sink1_id: 2
+sink2_id: 3
+
+# Derived (these defaults are also inlined at every import_playbook call site in rpv1.yml
+# because vars.yml is not reachable from that scope).
+hub_cluster_leader: "{{ hub_id | default(1) }}a"
+hub_cluster_nodes:
+  - "{{ hub_id | default(1) }}a"
+  - "{{ hub_id | default(1) }}b"
+  - "{{ hub_id | default(1) }}c"
+
+sink1_cluster_leader: "{{ sink1_id | default(2) }}a"
+sink1_cluster_nodes:
+  - "{{ sink1_id | default(2) }}a"
+  - "{{ sink1_id | default(2) }}b"
+  - "{{ sink1_id | default(2) }}c"
+
+sink2_cluster_leader: "{{ sink2_id | default(3) }}a"
+sink2_cluster_nodes:
+  - "{{ sink2_id | default(3) }}a"
+  - "{{ sink2_id | default(3) }}b"
+  - "{{ sink2_id | default(3) }}c"
+
+# ---------- Seed -- 7 prefix buckets on Hub, 15k docs total ------------------
+# Override per bucket with -e bucket_X=N for a fast dev shakedown.
+bucket_users_sink1:  2000
+bucket_users_sink2:  2000
+bucket_users_hub:    2000
+bucket_orders_sink1: 2000
+bucket_orders_sink2: 2000
+bucket_orders_hub:   2000
+bucket_internal:     3000
+
+# ---------- Sink-local seeds (symmetric writes on each sink) ----------------
+# Per Karmel: every replication scenario needs writes on the sink whenever
+# there are writes on the hub.  We seed `sink1-local/users/*` on sink-1's
+# leader and `sink2-local/users/*` on sink-2's leader at step 3, and run a
+# parallel single-bucket workload on each sink through the rolling upgrade
+# (step 5).  Both prefixes are intentionally outside the hub->sink filters
+# so the docs are sink-local-only.  Whitelisted in every filter_compliance
+# call via the third entry in `allowed_prefixes`.
+sink1_local_seed_count: 2000
+sink2_local_seed_count: 2000
+
+# ---------- Filter spec -- disjoint sink filters; hub-only collections stay on hub ----
+sink1_allowed_prefixes: ["users/sink1/*", "orders/sink1/*"]
+sink2_allowed_prefixes: ["users/sink2/*", "orders/sink2/*"]
+
+# ---------- Per-bucket parity loop -- 7 buckets across the right clusters ---------
+# Each entry: prefix, count (pool_size), nodes (where the bucket is expected to land).
+# Used by Section 12 to loop the existing diagnostic_doc_id_set_parity tool per bucket.
+all_buckets:
+  - { prefix: "users/sink1",  count: "{{ bucket_users_sink1  | default(2000) | int }}", nodes: "{{ sink1_cluster_nodes }}" }
+  - { prefix: "orders/sink1", count: "{{ bucket_orders_sink1 | default(2000) | int }}", nodes: "{{ sink1_cluster_nodes }}" }
+  - { prefix: "users/sink2",  count: "{{ bucket_users_sink2  | default(2000) | int }}", nodes: "{{ sink2_cluster_nodes }}" }
+  - { prefix: "orders/sink2", count: "{{ bucket_orders_sink2 | default(2000) | int }}", nodes: "{{ sink2_cluster_nodes }}" }
+  - { prefix: "users/hub",    count: "{{ bucket_users_hub    | default(2000) | int }}", nodes: "{{ hub_cluster_nodes }}" }
+  - { prefix: "orders/hub",   count: "{{ bucket_orders_hub   | default(2000) | int }}", nodes: "{{ hub_cluster_nodes }}" }
+  - { prefix: "Internal",     count: "{{ bucket_internal     | default(3000) | int }}", nodes: "{{ hub_cluster_nodes }}" }
+
+# ---------- Workload -- W-1 + W-2 on Hub through the rolling upgrade ---------
+# Per the RPV-1 spec: "continuous from T0 through endpoint".  No duration var -- W-1 + W-2
+# run indefinitely until Section 12's explicit stop_workload kills them.  No more "what if
+# the scenario takes longer than the duration" race.
+
+# Per the RPV-1 spec: W-1 + W-2 hit the 3 collections weighted 40 / 40 / 20
+# (users / orders / Internal).  Within each collection the buckets get an even split:
+#   users   = sink1 (13) + sink2 (13) + hub (14) = 40
+#   orders  = sink1 (13) + sink2 (13) + hub (14) = 40
+#   Internal = 20
+# Format is workload_w*.sh's BUCKETS_SPEC: pipe-separated "prefix:pool_size:weight" triples.
+workload_buckets_spec: "users/sink1:{{ bucket_users_sink1 | default(2000) | int }}:13|orders/sink1:{{ bucket_orders_sink1 | default(2000) | int }}:13|users/sink2:{{ bucket_users_sink2 | default(2000) | int }}:13|orders/sink2:{{ bucket_orders_sink2 | default(2000) | int }}:13|users/hub:{{ bucket_users_hub | default(2000) | int }}:14|orders/hub:{{ bucket_orders_hub | default(2000) | int }}:14|Internal:{{ bucket_internal | default(3000) | int }}:20"
+
+# ---------- Probe sets for parity asserts -----------------------------------
+parity_probe_count: 50
+
+# ---------- Variant -- which 3 nodes get upgraded at each step --------------
+# Variant A (sinks first) is the default.  B and C variants change these three lists
+# (override on the CLI: -e '{"upgrade_step_1":[...], "upgrade_step_2":[...], "upgrade_step_3":[...]}').
+# Variant A: sink-1 -> hub -> sink-2
+upgrade_step_1: "{{ sink1_cluster_nodes }}"
+upgrade_step_2: "{{ hub_cluster_nodes }}"
+upgrade_step_3: "{{ sink2_cluster_nodes }}"
+
+# Peer-query map for wait_for_member -- for each node, gives a cluster peer to query
+# its topology from.  Variant-agnostic: any variant's upgrade order picks a peer in the
+# SAME cluster as the target (so the topology query stays inside one cluster).
+#
+# Build as a single Jinja expression -- templated KEYS in a YAML dict literal don't
+# resolve reliably through import_playbook / vars_files scoping, leaving the dict with
+# keys like literal "{{ sink1_id... }}a" and peer_map['8a'] lookups failing with
+# "'dict object' has no attribute '8a'".
+peer_map: >-
+  {{
+    {
+      ((hub_id   | default(1)) | string) ~ 'a': ((hub_id   | default(1)) | string) ~ 'b',
+      ((hub_id   | default(1)) | string) ~ 'b': ((hub_id   | default(1)) | string) ~ 'c',
+      ((hub_id   | default(1)) | string) ~ 'c': ((hub_id   | default(1)) | string) ~ 'a',
+      ((sink1_id | default(2)) | string) ~ 'a': ((sink1_id | default(2)) | string) ~ 'b',
+      ((sink1_id | default(2)) | string) ~ 'b': ((sink1_id | default(2)) | string) ~ 'c',
+      ((sink1_id | default(2)) | string) ~ 'c': ((sink1_id | default(2)) | string) ~ 'a',
+      ((sink2_id | default(3)) | string) ~ 'a': ((sink2_id | default(3)) | string) ~ 'b',
+      ((sink2_id | default(3)) | string) ~ 'b': ((sink2_id | default(3)) | string) ~ 'c',
+      ((sink2_id | default(3)) | string) ~ 'c': ((sink2_id | default(3)) | string) ~ 'a'
+    }
+  }}
+
+# ---------- Budgets (in seconds) --------------------------------------------
+member_budget_secs: 300
+drain_budget_secs: 180
+quiesce_budget_secs: 1200
+filter_drain_budget_secs: 600
+
+# Budget for post-workload-stop tombstone-count convergence (Section 12).  RavenDB's
+# background tombstone cleanup runs on its own timer; etag stability says "no new writes"
+# but per-node counts only equalize once cleanup has caught up.  300s = 5min ceiling;
+# bump for slower labs.
+tombstone_settle_timeout_secs: 300
+
+# ---------- Post-upgrade feature flags ---------------------------------------
+# Flags to enable on hub + sink-1 + sink-2 once every node is on v_new (step 10b).
+# Some v_new behaviors are gated behind these flags so they don't auto-activate on a
+# mixed-binary cluster mid-roll.  Empty list = no flips.
+post_upgrade_feature_flags:
+  - PullReplicationCompositeChangeVectors
+
+pre_cv_toggle_phase:  pre_cv_toggle
+post_cv_toggle_phase: post_cv_toggle
+
+# Note: CountOfRevisionDocuments dropped from the asserted set -- without
+# per-collection revisions config (this scenario's whole point), it stays 0
+# across all nodes and the equality check would be vacuous.
+t0_stats_assert_fields:
+  - CountOfAttachments
+  - CountOfConflicts
+  - CountOfDocuments
+  - CountOfDocumentsConflicts
+  - CountOfRemoteAttachments
+  - CountOfTimeSeriesDeletedRanges
+  - CountOfUniqueAttachments
+
+# Tombstone-wait relax flag.  Default TRUE -- the CountOfTombstones
+# stats_field_parity wait in step 12 is informational by default.
+# Cross-replica tombstone counts lag on whichever node the per-node
+# cleanup hasn't kicked on; it's not a correctness signal for replication
+# and was producing false-positive timeouts.  Override
+# -e relax_rpv1_tombstone_wait=false to restore strict behaviour.
+# Same shape as relax_rp1_tombstone_wait.
+relax_rpv1_tombstone_wait: true
+
+# W-1C cluster-wide-tx sidecar workloads.  Default OFF -- W-1C mixes
+# regular PUTs (via W-1) and cluster-wide-tx writes against the SAME id pool
+# (workload_buckets_spec / sink<N>-local).  That pattern has historically
+# masked replication issues that are out of scope for the baseline RPV-1
+# rolling-upgrade signal.  Flip to true with -e rpv1_enable_w1c=true to
+# exercise the CWT path explicitly.  Affects 3 launches (hub + 2 sinks),
+# their wait_for_started imports, the orphan-kill cleanup at file top,
+# and the step-12 assert_alive + stop_workload imports.
+rpv1_enable_w1c: false
+
+# Per-marker propagation wait budget used by Checkpoint A / B and the endpoint
+# checkpoint (6 call sites in rpv1.yml).  Was hardcoded to 120s; under parallel
+# iters that was tight and made the endpoint marker wait time out before
+# hub->sink-1 replication caught up.  Override -e marker_propagation_timeout_secs=N
+# to widen or narrow per run.
+marker_propagation_timeout_secs: 300
