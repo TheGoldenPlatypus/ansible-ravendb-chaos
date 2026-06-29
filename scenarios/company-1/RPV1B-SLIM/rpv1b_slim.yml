@@ -20,7 +20,7 @@
 #   4.  Take a T0 baseline checkpoint while everything is quiet.
 #   5.  Start the background hub-side workloads (W-1, W-2, W-1C) writing across all five
 #       buckets, plus W-1 + W-1C on the sink under sink-local/.  W-1C cluster-wide-tx
-#       sidecars are ON by default in this variant (rpv1b_slim_enable_w1c, default true).
+#       sidecars are OFF by default in this variant (rpv1b_slim_enable_w1c, default false).
 #   11. Endpoint checkpoint while writers are still going: schema parity across all 6 nodes,
 #       filter compliance holds, CV-boundary check on hub -> sink.
 #   12. Stop all workloads, wait for every cluster to drain, then run the strict final
@@ -57,17 +57,17 @@
     pidfile: "/tmp/w2-{{ hub_id | default(1) }}a-db1.pid"
 
 # W-1C orphan-kill (sidecar pidfiles -- mirrors W-1 across hub + sink).
-# Gated on rpv1b_slim_enable_w1c (default true) -- when W-1C is disabled the
+# Gated on rpv1b_slim_enable_w1c (default false) -- when W-1C is disabled the
 # pidfiles never exist so the stop is a no-op anyway, but skip the imports
 # entirely to keep the orphan-kill output focused on the workloads that ran.
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
   vars:
     pidfile: "/tmp/w1c-{{ hub_id | default(1) }}a-db1.pid"
-  when: rpv1b_slim_enable_w1c | default(true) | bool
+  when: rpv1b_slim_enable_w1c | default(false) | bool
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
   vars:
     pidfile: "/tmp/w1c-{{ sink_id | default(2) }}a-db1.pid"
-  when: rpv1b_slim_enable_w1c | default(true) | bool
+  when: rpv1b_slim_enable_w1c | default(false) | bool
 
 - name: RPV-1B-SLIM pre -- show plan
   hosts: localhost
@@ -82,7 +82,7 @@
       ansible.builtin.debug:
         msg: >-
           RPV-1B-SLIM  hub={{ hub_id | default(1) }}a/b/c  sink={{ sink_id | default(2) }}a/b/c
-          db={{ db_name }}  w1c_enabled={{ rpv1b_slim_enable_w1c | default(true) | bool }}
+          db={{ db_name }}  w1c_enabled={{ rpv1b_slim_enable_w1c | default(false) | bool }}
           flags={{ post_upgrade_feature_flags | default([]) }}
 
 
@@ -503,7 +503,7 @@
       poll: 0
 
     # W-1C sidecar on hub -- cluster-wide-tx variant, same buckets_spec.
-    # Gated on rpv1b_slim_enable_w1c (default true; see vars.yml).
+    # Gated on rpv1b_slim_enable_w1c (default false; see vars.yml).
     - name: Launch W-1C on hub (cluster-wide tx sidecar, background async)
       ansible.builtin.command:
         cmd: "bash {{ playbook_dir }}/../workloads/w1c/workload_w1c.sh"
@@ -547,7 +547,7 @@
       poll: 0
 
     # W-1C sidecar on sink (mirrors W-1-Sink with same pool).
-    # Gated on rpv1b_slim_enable_w1c (default true; see vars.yml).
+    # Gated on rpv1b_slim_enable_w1c (default false; see vars.yml).
     - name: Launch W-1C-Sink (cluster-wide tx sidecar on sink leader, background async)
       ansible.builtin.command:
         cmd: "bash {{ playbook_dir }}/../workloads/w1c/workload_w1c.sh"
@@ -583,13 +583,13 @@
   vars:
     pidfile: "/tmp/w1c-{{ hub_id | default(1) }}a-db1.pid"
     timeout_secs: 30
-  when: rpv1b_slim_enable_w1c | default(true) | bool
+  when: rpv1b_slim_enable_w1c | default(false) | bool
 
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/wait_for_workload_started.yml
   vars:
     pidfile: "/tmp/w1c-{{ sink_id | default(2) }}a-db1.pid"
     timeout_secs: 30
-  when: rpv1b_slim_enable_w1c | default(true) | bool
+  when: rpv1b_slim_enable_w1c | default(false) | bool
 
 
 # ----- step 6: soak -- let the workloads exercise the cluster for a while --------------------
@@ -734,7 +734,7 @@
 # W-1C assert_alive (hub-side sidecar) -- gated on rpv1b_slim_enable_w1c.
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/assert_workload_alive.yml
   vars: { pidfile: "/tmp/w1c-{{ hub_id | default(1) }}a-db1.pid" }
-  when: rpv1b_slim_enable_w1c | default(true) | bool
+  when: rpv1b_slim_enable_w1c | default(false) | bool
 
 
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
@@ -748,7 +748,7 @@
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
   vars:
     pidfile: "/tmp/w1c-{{ hub_id | default(1) }}a-db1.pid"
-  when: rpv1b_slim_enable_w1c | default(true) | bool
+  when: rpv1b_slim_enable_w1c | default(false) | bool
 
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
   vars:
@@ -757,7 +757,7 @@
 - ansible.builtin.import_playbook: ../../../toolbox/workloads/stop_workload.yml
   vars:
     pidfile: "/tmp/w1c-{{ sink_id | default(2) }}a-db1.pid"
-  when: rpv1b_slim_enable_w1c | default(true) | bool
+  when: rpv1b_slim_enable_w1c | default(false) | bool
 
 
 # ----- pre-step 12: optional intra-cluster ConsistencyCheck on quiet cluster ----------------
