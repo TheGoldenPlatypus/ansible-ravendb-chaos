@@ -329,16 +329,22 @@ run_batch() {
         #       export SLIM_NOCWT_CC=true             # fire intra-cluster CC
         #     When on, the tool runs after workload-stop + cooldown
         #     (cc_cooldown_secs, default 60s), before step 12 final asserts.
+        #   - post_upgrade_feature_flags forced empty -- the /admin/features
+        #     endpoint doesn't exist on v6.2 (the default binary here).  If
+        #     V_SLIM_BIN is overridden to v_new and you want feature flags
+        #     too, additionally export SLIM_NOCWT_FF='[PullReplicationCompositeChangeVectors]'.
         # CID base 70 keeps disjoint from rpv1b-slim (base 60) so both can
         # run in parallel without container-name collisions.
         cid=$(( 70 + cid_bump ))
         net="net_rpv1b_slim_nocwt_iter${iter}"
         local cc_override=""
         [ "${SLIM_NOCWT_CC:-false}" = "true" ] && cc_override="-e rpv1b_slim_run_consistency_check=true"
+        local ff_list="${SLIM_NOCWT_FF:-[]}"
         ( export DOCKER_NETWORK_SUBNET="$subnet"
           run_iter "$name" "$iter" "$net" \
             ./scenarios/company-1/RPV1B-SLIM/run.sh "${V_SLIM_BIN:-$V_OLD_DEB}" "$cid" "$net" \
             -e rpv1b_slim_enable_w1c=false \
+            -e "post_upgrade_feature_flags=${ff_list}" \
             $cc_override ) & ;;
       *)      echo "ERROR: unknown scenario '$name'" >&2; continue ;;
     esac
