@@ -109,7 +109,7 @@ DEADLINE=$(( $(date +%s) + (MAX_WALL_HRS * 3600) ))
 # 1, 2, 3, ... rather than restarting at 1 each batch.
 # -------------------------------------------------------------------------
 declare -A ITER_COUNTS=(
-  [rv1]=0 [rp1]=0 [rpv1-B]=0 [rpv1-B-norev]=0 [rpv1b-slim]=0 [rpv1b-slim-nocwt]=0 [rv2]=0
+  [rv1]=0 [rp1]=0 [rpv1-B]=0 [rpv1-B-norev]=0 [rpv1b-slim]=0 [rpv1b-slim-nocwt]=0 [rpv1b-slim-nocwt-vnew]=0 [rv2]=0
 )
 # NOTE: rpv1-A and rpv1-C are case-handled below for manual launches but
 # intentionally NOT included in the default batches.  Only ONE rpv1 variant
@@ -214,6 +214,7 @@ compute_subnet() {
     rpv1b-slim) base=70 ;;
     rpv1b-slim-nocwt) base=80 ;;
     rpv1-B-norev) base=90 ;;
+    rpv1b-slim-nocwt-vnew) base=100 ;;
     *)      return 1 ;;
   esac
   printf '172.30.%d.0/24' "$(( base + iter - 1 ))"
@@ -321,34 +322,45 @@ run_batch() {
           run_iter "$name" "$iter" "$net" \
             ./scenarios/company-1/RPV1B-SLIM/run.sh "$V_NEW" "$cid" "$net" ) & ;;
       rpv1b-slim-nocwt)
-        # rpv1b-slim variant focused on the no-CWT exploration:
-        #   - Binary defaults to $V_OLD_DEB (v6.2); override per-run with
-        #       export V_SLIM_BIN="$V_NEW"            # use v_new instead
-        #   - W-1C OFF (explicit override, also matches vars.yml default).
-        #   - ConsistencyCheck OFF by default.  Enable per-run via env:
-        #       export SLIM_NOCWT_CC=true             # fire intra-cluster CC
-        #     When on, the tool runs after workload-stop + cooldown
-        #     (cc_cooldown_secs, default 60s), before step 12 final asserts.
-        #   - post_upgrade_feature_flags forced empty -- the /admin/features
-        #     endpoint doesn't exist on v6.2 (the default binary here).  If
-        #     V_SLIM_BIN is overridden to v_new and you want feature flags
-        #     too, additionally export SLIM_NOCWT_FF='[PullReplicationCompositeChangeVectors]'.
-        # CID base 70 keeps disjoint from rpv1b-slim (base 60) so both can
-        # run in parallel without container-name collisions.
+        # rpv1b-slim variant: v6.2 + no CWT + ConsistencyCheck ON.
+        #   - Binary $V_OLD_DEB (v6.2).  No env override -- use the
+        #     -vnew sibling token for v_new.
+        #   - W-1C OFF (explicit; also matches vars.yml default).
+        #   - ConsistencyCheck ON -- intra-cluster CC fires after workload-
+        #     stop + cooldown (cc_cooldown_secs, default 60s), before step
+        #     12 final asserts.
+        #   - post_upgrade_feature_flags forced empty (JSON form so it
+        #     parses as a real list, not the literal string "[]") -- the
+        #     /admin/features endpoint does not exist on v6.2.
+        # CID base 70 keeps disjoint from peer slim tokens.
         cid=$(( 70 + cid_bump ))
         net="net_rpv1b_slim_nocwt_iter${iter}"
-        local cc_override=""
-        [ "${SLIM_NOCWT_CC:-false}" = "true" ] && cc_override="-e rpv1b_slim_run_consistency_check=true"
-        # JSON form of -e so the empty list parses as a real list (not the
-        # literal string "[]", which makes `length > 0` true and trips the
-        # step-3b ravendb_features call into "non-empty add" rejection).
-        local ff_list="${SLIM_NOCWT_FF:-[]}"
         ( export DOCKER_NETWORK_SUBNET="$subnet"
           run_iter "$name" "$iter" "$net" \
-            ./scenarios/company-1/RPV1B-SLIM/run.sh "${V_SLIM_BIN:-$V_OLD_DEB}" "$cid" "$net" \
+            ./scenarios/company-1/RPV1B-SLIM/run.sh "$V_OLD_DEB" "$cid" "$net" \
             -e rpv1b_slim_enable_w1c=false \
-            -e "{\"post_upgrade_feature_flags\":${ff_list}}" \
-            $cc_override ) & ;;
+            -e '{"post_upgrade_feature_flags":[]}' \
+            -e rpv1b_slim_run_consistency_check=true ) & ;;
+      rpv1b-slim-nocwt-vnew)
+        # rpv1b-slim variant: v_new + no CWT + ConsistencyCheck ON +
+        # feature flags off ("legacy mode on v_new").  Sibling of
+        # rpv1b-slim-nocwt; together they let us compare the same shape
+        # across binary versions.
+        #   - Binary $V_NEW (v_new PR build).
+        #   - W-1C OFF.
+        #   - ConsistencyCheck ON (matches the v6.2 sibling for symmetry).
+        #   - post_upgrade_feature_flags forced empty -- v_new HAS the
+        #     /admin/features endpoint but we deliberately skip the enable
+        #     to keep the cluster in pre-toggle/legacy CV mode.
+        # CID base 100 keeps disjoint from rpv1b-slim-nocwt (base 70).
+        cid=$(( 100 + cid_bump ))
+        net="net_rpv1b_slim_nocwt_vnew_iter${iter}"
+        ( export DOCKER_NETWORK_SUBNET="$subnet"
+          run_iter "$name" "$iter" "$net" \
+            ./scenarios/company-1/RPV1B-SLIM/run.sh "$V_NEW" "$cid" "$net" \
+            -e rpv1b_slim_enable_w1c=false \
+            -e '{"post_upgrade_feature_flags":[]}' \
+            -e rpv1b_slim_run_consistency_check=true ) & ;;
       *)      echo "ERROR: unknown scenario '$name'" >&2; continue ;;
     esac
     pids+=($!)
