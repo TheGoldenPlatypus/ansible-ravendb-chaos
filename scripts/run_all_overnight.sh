@@ -342,16 +342,15 @@ run_batch() {
             -e '{"post_upgrade_feature_flags":[]}' \
             -e rpv1b_slim_run_consistency_check=true ) & ;;
       rpv1b-slim-nocwt-vnew)
-        # rpv1b-slim variant: v_new + no CWT + ConsistencyCheck ON +
-        # feature flags off ("legacy mode on v_new").  Sibling of
-        # rpv1b-slim-nocwt; together they let us compare the same shape
-        # across binary versions.
+        # rpv1b-slim variant: v_new in LEGACY MODE + no CWT + CC ON.
         #   - Binary $V_NEW (v_new PR build).
         #   - W-1C OFF.
-        #   - ConsistencyCheck ON (matches the v6.2 sibling for symmetry).
-        #   - post_upgrade_feature_flags forced empty -- v_new HAS the
-        #     /admin/features endpoint but we deliberately skip the enable
-        #     to keep the cluster in pre-toggle/legacy CV mode.
+        #   - ConsistencyCheck ON.
+        #   - PullReplicationCompositeChangeVectors actively REMOVED via
+        #     step 3b's remove list -- v_new defaults the feature ON; to
+        #     get legacy CV mode we have to disable it explicitly, not
+        #     just skip enabling.  (post_upgrade_feature_flags stays []
+        #     so step 3b only does the remove.)
         # CID base 100 keeps disjoint from rpv1b-slim-nocwt (base 70).
         cid=$(( 100 + cid_bump ))
         net="net_rpv1b_slim_nocwt_vnew_iter${iter}"
@@ -359,7 +358,7 @@ run_batch() {
           run_iter "$name" "$iter" "$net" \
             ./scenarios/company-1/RPV1B-SLIM/run.sh "$V_NEW" "$cid" "$net" \
             -e rpv1b_slim_enable_w1c=false \
-            -e '{"post_upgrade_feature_flags":[]}' \
+            -e '{"post_upgrade_feature_flags":[],"post_upgrade_feature_flags_remove":["PullReplicationCompositeChangeVectors"]}' \
             -e rpv1b_slim_run_consistency_check=true ) & ;;
       *)      echo "ERROR: unknown scenario '$name'" >&2; continue ;;
     esac
