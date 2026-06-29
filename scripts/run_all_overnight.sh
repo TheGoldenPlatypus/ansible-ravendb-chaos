@@ -109,7 +109,7 @@ DEADLINE=$(( $(date +%s) + (MAX_WALL_HRS * 3600) ))
 # 1, 2, 3, ... rather than restarting at 1 each batch.
 # -------------------------------------------------------------------------
 declare -A ITER_COUNTS=(
-  [rv1]=0 [rp1]=0 [rpv1-B]=0 [rpv1b-slim]=0 [rpv1b-slim-nocwt]=0 [rv2]=0
+  [rv1]=0 [rp1]=0 [rpv1-B]=0 [rpv1-B-norev]=0 [rpv1b-slim]=0 [rpv1b-slim-nocwt]=0 [rv2]=0
 )
 # NOTE: rpv1-A and rpv1-C are case-handled below for manual launches but
 # intentionally NOT included in the default batches.  Only ONE rpv1 variant
@@ -213,6 +213,7 @@ compute_subnet() {
     rv2)    base=60 ;;
     rpv1b-slim) base=70 ;;
     rpv1b-slim-nocwt) base=80 ;;
+    rpv1-B-norev) base=90 ;;
     *)      return 1 ;;
   esac
   printf '172.30.%d.0/24' "$(( base + iter - 1 ))"
@@ -280,6 +281,21 @@ run_batch() {
           run_iter "$name" "$iter" "$net" \
             ./scenarios/company-1/RPV1/run.sh "$V_OLD" "$V_NEW" "$cid" "$net" \
             -e "{\"upgrade_step_1\":[\"${cid}a\",\"${cid}b\",\"${cid}c\"],\"upgrade_step_2\":[\"${cid2}a\",\"${cid2}b\",\"${cid2}c\"],\"upgrade_step_3\":[\"${cid3}a\",\"${cid3}b\",\"${cid3}c\"]}" ) & ;;
+      rpv1-B-norev)
+        # Variant of rpv1-B with no per-collection revisions configuration.
+        # Same T3 rolling-upgrade flow but RavenDB never writes revision docs,
+        # so the bug class we're isolating is "do replication anomalies still
+        # repro without revisions in play?".  CID base 80 keeps it disjoint
+        # from rpv1-B (base 30) so both can run in parallel without container
+        # name collisions.
+        cid=$(( 80 + cid_bump ))
+        cid2=$(( cid + 1 ))
+        local cid3=$(( cid + 2 ))
+        net="net_rpv1_b_norev_iter${iter}"
+        ( export DOCKER_NETWORK_SUBNET="$subnet"
+          run_iter "$name" "$iter" "$net" \
+            ./scenarios/company-1/RPV1-NOREV/run.sh "$V_OLD" "$V_NEW" "$cid" "$net" \
+            -e "{\"upgrade_step_1\":[\"${cid}a\",\"${cid}b\",\"${cid}c\"],\"upgrade_step_2\":[\"${cid2}a\",\"${cid2}b\",\"${cid2}c\"],\"upgrade_step_3\":[\"${cid3}a\",\"${cid3}b\",\"${cid3}c\"]}" ) & ;;
       rpv1-C)
         cid=$(( 40 + cid_bump ))
         cid2=$(( cid + 1 ))
@@ -297,26 +313,31 @@ run_batch() {
             ./scenarios/company-1/RV2/run.sh "$V_OLD" "$V_NEW" "$cid" "$net" ) & ;;
       rpv1b-slim)
         # Steady-state variant of RPV-1: T2 (1 hub + 1 sink, all v_new, no
-        # upgrade), W-1C ON by default.  No ConsistencyCheck step -> no host-
-        # port collision -> multiple iters can safely run in parallel.
+        # upgrade), W-1C OFF by default (per vars.yml).  Canonical clean
+        # baseline -- no CWT, no ConsistencyCheck, no exploration overrides.
         cid=$(( 60 + cid_bump ))
         net="net_rpv1b_slim_iter${iter}"
         ( export DOCKER_NETWORK_SUBNET="$subnet"
           run_iter "$name" "$iter" "$net" \
             ./scenarios/company-1/RPV1B-SLIM/run.sh "$V_NEW" "$cid" "$net" ) & ;;
       rpv1b-slim-nocwt)
-        # Control variant of rpv1b-slim with W-1C cluster-wide-tx workloads
-        # DISABLED.  Same topology + same 30-min soak + same convergence
-        # asserts.  Used to isolate whether replication anomalies in
-        # rpv1b-slim are CWT-induced or affect the non-CWT path too.  CID
-        # base 70 keeps it disjoint from rpv1b-slim (base 60) so both can
+        # rpv1b-slim variant focused on the no-CWT + tool-check exploration:
+        #   - Binary defaults to $V_OLD_DEB (v6.2); override per-run with
+        #       export V_SLIM_BIN="$V_NEW"            # use v_new instead
+        #     or any other path.
+        #   - W-1C OFF (explicit override, also matches vars.yml default now).
+        #   - rpv1b_slim_run_consistency_check=true -> intra-cluster
+        #     ConsistencyCheck fires after workloads stop + cooldown
+        #     (cc_cooldown_secs, default 60s), before step 12 final asserts.
+        # CID base 70 keeps disjoint from rpv1b-slim (base 60) so both can
         # run in parallel without container-name collisions.
         cid=$(( 70 + cid_bump ))
         net="net_rpv1b_slim_nocwt_iter${iter}"
         ( export DOCKER_NETWORK_SUBNET="$subnet"
           run_iter "$name" "$iter" "$net" \
-            ./scenarios/company-1/RPV1B-SLIM/run.sh "$V_NEW" "$cid" "$net" \
-            -e rpv1b_slim_enable_w1c=false ) & ;;
+            ./scenarios/company-1/RPV1B-SLIM/run.sh "${V_SLIM_BIN:-$V_OLD_DEB}" "$cid" "$net" \
+            -e rpv1b_slim_enable_w1c=false \
+            -e rpv1b_slim_run_consistency_check=true ) & ;;
       *)      echo "ERROR: unknown scenario '$name'" >&2; continue ;;
     esac
     pids+=($!)
