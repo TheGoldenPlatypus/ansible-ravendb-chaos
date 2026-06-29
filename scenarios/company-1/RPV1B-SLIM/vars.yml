@@ -110,10 +110,28 @@ relax_rpv1_tombstone_wait: true
 # Per-marker propagation wait budget used by step 3 + endpoint marker waits.
 marker_propagation_timeout_secs: 300
 
-# W-1C cluster-wide-tx sidecar workloads.  Default ON for this scenario --
-# RPV-1B-SLIM exists specifically to stress the CWT path.  Override
-# -e rpv1b_slim_enable_w1c=false to disable.
-rpv1b_slim_enable_w1c: true
+# W-1C cluster-wide-tx sidecar workloads.  Default OFF -- CWT writes carry a
+# RAFT entry in the change vector forever, which interacts badly with pull
+# replication ("once-CWT-always-quarantined" pattern we surfaced earlier).
+# Flip to true with -e rpv1b_slim_enable_w1c=true to exercise the CWT path
+# explicitly.
+rpv1b_slim_enable_w1c: false
+
+# Run intra-cluster ConsistencyCheck just before step 12's final asserts.
+# Default OFF (scenario is built for cross-cluster signal, and the tool is
+# intra-cluster only -- usually adds no signal).  Flip to true to investigate
+# whether the tool catches intra-cluster drift the harness asserts miss
+# (e.g. "rpv1b-slim on v6.2 + ConsistencyCheck" exploration).  Adds ~3-5min
+# of wall-clock per iter.  Override -e rpv1b_slim_run_consistency_check=true.
+rpv1b_slim_run_consistency_check: false
+
+# Cooldown (seconds) between workload-stop and the ConsistencyCheck call.
+# Only consumed when rpv1b_slim_run_consistency_check is true.  Gives the
+# cluster time to drain any in-flight replication + tombstone cleanup so
+# the tool scans a stable etag frontier instead of catching transient
+# drift mid-settle.  Override -e cc_cooldown_secs=N for shorter/longer
+# settle windows.
+cc_cooldown_secs: 60
 
 # Soak duration (seconds) -- explicit dwell between step 5 (workload launch)
 # and step 11 (endpoint checkpoint).  Without it the scenario runs end-to-end

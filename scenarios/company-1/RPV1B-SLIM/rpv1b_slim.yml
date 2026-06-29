@@ -749,6 +749,51 @@
     pidfile: "/tmp/w1c-{{ sink_id | default(2) }}a-db1.pid"
   when: rpv1b_slim_enable_w1c | default(true) | bool
 
+
+# ----- pre-step 12: optional intra-cluster ConsistencyCheck on quiet cluster ----------------
+# Gated on rpv1b_slim_run_consistency_check (default false; see vars.yml).  Workloads were
+# stopped above, so the cluster is quiet.  ConsistencyCheck is intra-cluster only -- it
+# scans hub a/b/c against each other and sink a/b/c against each other.  Cross-cluster
+# (hub vs sink) drift is the job of step 12's hub_sink_doc_set_converged assert.  Used
+# mainly for the "rpv1b-slim on v6.2" exploration: see whether the tool catches anything
+# the harness asserts miss.
+
+# Cooldown gives the cluster time to drain in-flight replication + tombstone cleanup so
+# the tool scans a stable etag frontier instead of catching transient drift mid-settle.
+- name: "RPV-1B-SLIM pre-CC cooldown -- let cluster quiesce before ConsistencyCheck"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [vars.yml]
+  tasks:
+    - name: "Pause {{ cc_cooldown_secs | default(60) | int }}s for cluster to settle"
+      ansible.builtin.pause:
+        seconds: "{{ cc_cooldown_secs | default(60) | int }}"
+      when: rpv1b_slim_run_consistency_check | default(false) | bool
+
+- ansible.builtin.import_playbook: ../../../toolbox/consistency_check/run_once.yml
+  vars:
+    db_name: db1
+    net: "{{ docker_network_name }}"
+    state_store_host_port: "{{ cc_state_port | default(8084) | int }}"
+    node_leaders:
+      - { label: "{{ hub_id | default(1) }}a", host: "{{ hub_id | default(1) }}a" }
+      - { label: "{{ hub_id | default(1) }}b", host: "{{ hub_id | default(1) }}b" }
+      - { label: "{{ hub_id | default(1) }}c", host: "{{ hub_id | default(1) }}c" }
+  when: rpv1b_slim_run_consistency_check | default(false) | bool
+
+- ansible.builtin.import_playbook: ../../../toolbox/consistency_check/run_once.yml
+  vars:
+    db_name: db1
+    net: "{{ docker_network_name }}"
+    state_store_host_port: "{{ cc_state_port | default(8084) | int }}"
+    node_leaders:
+      - { label: "{{ sink_id | default(2) }}a", host: "{{ sink_id | default(2) }}a" }
+      - { label: "{{ sink_id | default(2) }}b", host: "{{ sink_id | default(2) }}b" }
+      - { label: "{{ sink_id | default(2) }}c", host: "{{ sink_id | default(2) }}c" }
+  when: rpv1b_slim_run_consistency_check | default(false) | bool
+
+
 - name: RPV-1B-SLIM step 12 -- final convergence + deep parity (quiet cluster)
   hosts: localhost
   connection: local
