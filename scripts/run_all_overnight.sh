@@ -351,8 +351,11 @@ run_batch() {
         #     get legacy CV mode we have to disable it explicitly, not
         #     just skip enabling.  (post_upgrade_feature_flags stays []
         #     so step 3b only does the remove.)
-        # CID base 100 keeps disjoint from rpv1b-slim-nocwt (base 70).
-        cid=$(( 100 + cid_bump ))
+        # CID base 90 -- mod-100 = 90/91, both free across the matrix.
+        # Previous base 100 collided with rv1 iter2 (CID 101): both wrote
+        # 101a.hubsink.test entries to /etc/hosts at different IPs, and
+        # Python's resolver picked the stale one -> EHOSTUNREACH at seed.
+        cid=$(( 90 + cid_bump ))
         net="net_rpv1b_slim_nocwt_vnew_iter${iter}"
         ( export DOCKER_NETWORK_SUBNET="$subnet"
           run_iter "$name" "$iter" "$net" \
