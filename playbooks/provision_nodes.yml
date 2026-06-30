@@ -66,8 +66,8 @@
         command: /usr/sbin/init
         cgroupns_mode: host
 
-        memory: "{{ container_memory | default('2500m') }}"
-        memory_swap: "{{ container_memory | default('2500m') }}"
+        memory: "{{ container_memory | default('4000m') }}"
+        memory_swap: "{{ container_memory | default('4000m') }}"
         networks:
           - name: "{{ docker_network_name }}"
         networks_cli_compatible: true
